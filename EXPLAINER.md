@@ -1,3 +1,16 @@
+---
+type: Install Guide
+title: "OpenKnowledge portable release: install explainer"
+description: Each command of a container install of OpenKnowledge from a portable release, with the footprint of each step and the source of each fact.
+tags:
+  - install
+  - container
+  - portable-release
+generated:
+  by: process:claude-code
+  at: 2026-10-07T17:30:00Z
+---
+
 # OpenKnowledge portable release: install explainer
 
 This file explains how to install OpenKnowledge in a container from a portable release. It gives each command that you type, in order. It also names each thing on your machine that a command reads, writes or creates.
@@ -20,6 +33,7 @@ A maintainer updates this file for each portable release. The section "Keep this
 - [Keep this file current](#keep-this-file-current)
 - [Release facts](#release-facts)
 - [Requirements](#requirements)
+- [Mac specifics](#mac-specifics)
 - [Quick start](#quick-start)
 - [Components](#components)
 - [Step 1: Check the requirements](#step-1-check-the-requirements)
@@ -91,6 +105,7 @@ Do these edits for each new portable release:
 4. Do the steps on a test machine. Compare each output block and each drill-down with the result.
    Check the scan modes, hook ranges, host-file contract and promotion checks when the gate scripts change.
 5. Update the section "Where the outputs come from". Keep earlier observations distinct from checks of the new release.
+6. Set `generated.at` in the frontmatter to the time of the edit, as an ISO 8601 datetime with the `Z` offset. The frontmatter follows the Open Knowledge Format, version 0.2.
 
 Pin literals belong in their single rows in "Release facts" only. Run `scripts/tenant/pins.sh` after updating the table. It lists the pins and their sources, then checks this file and `deploy/docs/*.md` for drift and repeated literals. Exit 0 means agreement, 1 means a doc mismatch, and 2 means the check cannot run. It needs no Docker or Node.js.
 
@@ -102,8 +117,8 @@ Port, user ID and project name examples repeat values from the table. Review the
 
 | Fact | Value | Source |
 |---|---|---|
-| Portable release tag | `portable-v0.3.0` | Target release for this file. Not verified: the tag exists. `git tag --list 'portable-v*'` lists available tags. |
-| Portable version | `0.3.0` | The release tag without `portable-v` |
+| Portable release tag | `portable-v0.3.1` | Target release for this file. Not verified: the tag exists. `git tag --list 'portable-v*'` lists available tags. |
+| Portable version | `0.3.1` | The release tag without `portable-v` |
 | Upstream version | `0.81.4` | `ARG OK_VERSION` in `deploy/Dockerfile` |
 | Image tag | `open-knowledge:<upstream version>-p<portable version>` | The "Release identity" format in `deploy/docs/deployment.md`, with this release's versions |
 | Base image | `node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20` | `ARG NODE_IMAGE` in `deploy/Dockerfile` |
@@ -137,6 +152,21 @@ Port, user ID and project name examples repeat values from the table. Review the
 
 The image is verified on `linux/amd64` only. The section "Target runtime" of [deploy/docs/deployment.md](deploy/docs/deployment.md) gives the notes for a Mac.
 
+## Mac specifics
+
+Not verified: these steps on a Mac. The section "Target runtime" of [deploy/docs/deployment.md](deploy/docs/deployment.md) has the checklist for the first run.
+The steps are the same as on Linux. The table gives the differences.
+
+| Step | Difference on a Mac |
+|---|---|
+| Requirements | The Mac has Apple silicon (`arm64`). Podman is the container engine of this kit on a Mac. Install it with `brew install podman podman-compose`; both formulas have an `arm64` bottle. Node.js 24 comes with `brew install node@24`, also with an `arm64` bottle. |
+| Requirements | Make the VM with `podman machine init --cpus 4 --memory 8192` and start it with `podman machine start`. The build needs more than the default 2 CPUs and 2 GiB. |
+| 1 | Set `OK_CONTAINER_CLI=podman` in your shell. Each kit script then runs `podman` where this file shows `docker`. Type `podman compose` where this file shows `docker compose`. |
+| 2 | Keep the clone under your home directory. The Podman VM shares that directory with the containers. |
+| 4, 6 | `scan.sh` and `smoke.sh` start their containers through the same CLI. Not verified on a Mac. |
+| 5 | The build makes a `linux/arm64` image. The `native` stage picks the `linux-arm64-gnu` addon file. Podman 4.8 or newer builds the heredoc `RUN` blocks of the Dockerfile and ignores its `# syntax=` line. Not verified: `deploy/Dockerfile.dockerignore` as the ignore file of the build. |
+| Maintainer work | `scripts/tenant/update.sh detect` needs `OK_UPDATE_DIGEST_COMMAND`, because Podman has no `docker buildx imagetools`. `qualify` needs `OK_UPDATE_SS_COMMAND`, because macOS has no `ss`. |
+
 ## Quick start
 
 These commands give you a running container with the fewest steps. They skip steps 3, 4, 9, 10 and 11.
@@ -144,7 +174,7 @@ These commands give you a running container with the fewest steps. They skip ste
 1. Get the source and build the image.
 
    ```sh
-   RELEASE_TAG=portable-v0.3.0
+   RELEASE_TAG=portable-v0.3.1
    git clone --branch "$RELEASE_TAG" https://github.com/<organization>/<repository>.git open-knowledge
    cd open-knowledge
    UPSTREAM_VERSION=$(awk -F= '/^ARG OK_VERSION=/ { print $2; exit }' deploy/Dockerfile)
@@ -274,7 +304,7 @@ Network hosts that the install contacts:
 | `deb.debian.org` | 5 | The Debian packages `git` and `ca-certificates` |
 | `registry.npmjs.org` | 11 | The launcher package for your machine |
 
-Docker downloads an image only when the machine does not have it.
+Docker downloads an image only when the machine does not have it. In the table, `docker` stands for the CLI that `OK_CONTAINER_CLI` names.
 
 Disk space: see the earlier image size in "Release facts". Not verified: the size of the build cache after a build with an empty cache.
 
@@ -287,7 +317,7 @@ This step changes nothing on the machine.
 Clone the release repository at the release tag. The tag gives you one fixed commit of the branch `portable`.
 
 ```sh
-RELEASE_TAG=portable-v0.3.0
+RELEASE_TAG=portable-v0.3.1
 git clone --branch "$RELEASE_TAG" https://github.com/<organization>/<repository>.git open-knowledge
 cd open-knowledge
 git describe --tags
