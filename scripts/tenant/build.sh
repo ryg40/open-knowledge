@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+container_cli=${OK_CONTAINER_CLI:-docker}
 
 usage() {
   echo "usage: $0 -t <image-tag> [-s <source-rev>] [-v <upstream-version>]" >&2
@@ -58,4 +59,4 @@ for name in OK_VERSION OK_NPM_INTEGRITY OK_SOURCE OK_UID OK_GID NODE_IMAGE; do
   fi
 done
 
-docker build "$@" "$context"
+"$container_cli" build "$@" "$context"

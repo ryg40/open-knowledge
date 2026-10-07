@@ -159,7 +159,7 @@ awk -F '\t' '
   $3 ~ /^host-/ {
     printf "public-check: allow list line %s: host rule IDs cannot be allowed\n", FNR > "/dev/stderr"; exit 2
   }
-  NF != 5 || $1 == "" || $1 ~ /(^\/|(^|\/)\.\.?(\/|$)|[*?\[\\])/ || $2 !~ /^[1-9][0-9]*$/ || $3 !~ /^[a-z][a-z0-9-]+$/ || $4 !~ /^[a-f0-9]+$/ || (length($4) != 40 && length($4) != 64) || $5 !~ /[^[:space:]]/ || seen[$1 SUBSEP $2 SUBSEP $3]++ {
+  NF != 5 || $1 == "" || $1 ~ /(^\/|(^|\/)\.\.?(\/|$)|[*?\[\\])/ || $2 !~ /^[1-9][0-9]*$/ || $3 !~ /^[a-z][a-z0-9-]+$/ || $4 !~ /^[a-f0-9]+$/ || (length($4) != 40 && length($4) != 64) || $5 !~ /[^[:space:]]/ || seen[$1 SUBSEP $2 SUBSEP $3 SUBSEP $4]++ {
     printf "public-check: allow list line %s: invalid row or empty reason\n", FNR > "/dev/stderr"; exit 2
   }
   {

@@ -1,10 +1,11 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
-ARG NODE_IMAGE=node:24-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
+ARG NODE_IMAGE=node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 ARG OK_VERSION=0.81.4
 
 FROM ${NODE_IMAGE} AS native
 ARG OK_VERSION
+ARG TARGETARCH
 ARG OK_NPM_INTEGRITY=sha512-ZyS9zwX/wk32z9Kk/YXDO3ebldCQvc3YpVSB9pEpwebcxIkUVZZ+CIhJ3SUWB/Pk1tkJ7rdl3Tm49sBpMXc93Q==
 ENV OK_NPM_TARBALL=https://registry.npmjs.org/@inkeep/open-knowledge/-/open-knowledge-${OK_VERSION}.tgz \
     OK_NPM_INTEGRITY=${OK_NPM_INTEGRITY}
@@ -28,7 +29,12 @@ tar -xzf npm-package.tgz package/dist/native
 mkdir -p out
 cp package/dist/native/index.js package/dist/native/index.d.ts package/dist/native/*.node out/
 test "$(find out -name '*.node' | wc -l)" -eq 8
-test -f out/native-config.linux-x64-gnu.node
+case "${TARGETARCH:-$(uname -m)}" in
+  amd64|x86_64) addon=x64 ;;
+  arm64|aarch64) addon=arm64 ;;
+  *) echo "unsupported target architecture: ${TARGETARCH:-$(uname -m)}" >&2; exit 1 ;;
+esac
+test -f "out/native-config.linux-$addon-gnu.node"
 EOF
 
 FROM ${NODE_IMAGE} AS build

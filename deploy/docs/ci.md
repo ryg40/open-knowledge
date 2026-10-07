@@ -33,8 +33,8 @@ These items apply to each runner:
 - The runner reaches `registry.npmjs.org`. The tarball URL in `deploy/Dockerfile` is fixed.
 - The runner reaches Docker Hub for the base image, the scanner image and the shell check image, or `NODE_IMAGE`, `GITLEAKS_IMAGE` and `SHELLCHECK_IMAGE` name mirrors.
 - The runner reaches `github.com`. The workflows fetch the pinned actions there, and `scripts/tenant/ci.sh upstream-ref` fetches the upstream branch when the clone does not hold the upstream release commit.
-- The workflow check and the upstream update need Node.js 22 or newer. The upstream update also needs npm and `ss`. See [update.md](update.md).
-- The checkout directory and `$TMPDIR` have the same path for the job and for the Docker daemon. `scan.sh` mounts them.
+- The workflow check and the upstream update need Node.js 24 or newer; their entrypoints refuse an older Node. The upstream update also needs npm and `ss`. See [update.md](update.md).
+- The checkout directory and `$TMPDIR` have the same path for the job and for the Docker daemon. `scan.sh` mounts them. A job container without the Docker CLI, or with the checkout in a named volume, cannot run the kit scripts. On a Gitea server, use a host-mode label (`<label>:host`) of `act_runner` with Node.js 24, the Docker CLI and GNU `grep`, and a work directory bind-mounted at the same path on the runner and on the Docker daemon. Set `OK_RUNNER` to that label.
 
 If the runner is behind a TLS-inspecting proxy, these items also apply:
 
@@ -290,7 +290,7 @@ Do one of these before you turn Actions on:
 
 With the first way alone, the daily schedule still needs `.gitea/workflows/upstream-update.yml` on the default branch.
 
-Not verified: a run on a Gitea server. The statements above come from the source code, not from a test.
+Verified on a Gitea server with `local-dev` as the default branch: a push of `local-dev` started `checks.yml` only, the schedule started `upstream-update.yml` only, and no upstream file started.
 
 ## Checks of the public repository
 
@@ -392,10 +392,9 @@ The run checks out the tag, not the branch of the dispatch. A re-run after a com
 - A build behind a TLS-inspecting proxy, and a build with a mirror `NODE_IMAGE`.
 - The login, the manifest check and the push with a remote registry. The pipeline needs an HTTPS registry with authentication.
 - The error text of your registry for a missing tag and for a refused login. The pipeline counts the tag as absent only when the error names a missing manifest. A connection failure gives another text (`failed to configure transport`), and the pipeline stops. Not verified: the missing-tag check against a plain HTTP registry. Your registry must answer on HTTPS.
-- A run of `.gitea/workflows/checks.yml`, `.gitea/workflows/upstream-update.yml` or `.github/workflows/public-checks.yml` on a server. No run of these files exists.
-- The actions `actions/checkout`, `actions/upload-artifact` and `actions/download-artifact` at the pinned commits on a Gitea runner.
+- The job `pull-request` of `.gitea/workflows/upstream-update.yml`. `checks.yml` passed both jobs on a Gitea server with a host-mode `act_runner`, `public-checks.yml` passed on GitHub, and the jobs `detect`, `qualify` and `notes` of `upstream-update.yml` ran there with their artifacts. The first candidate version did not qualify, so the pull request job was skipped.
+- The action `actions/download-artifact` at its pinned commit on a Gitea runner. `actions/checkout` and `actions/upload-artifact` at their pinned commits ran there; the server needs each action mirrored under the same owner and name when `DEFAULT_ACTIONS_URL` is `self`.
 - The rights of the token of a run on a Gitea server: the read of pull requests, the push of `sync/v<version>` and the new pull request.
 - The values `github.api_url` and `github.server_url` on a Gitea runner. `scripts/tenant/update-ci.mjs` builds the request address and the push address from them.
-- The expression in `runs-on` that reads the variable `OK_RUNNER` on a Gitea server.
 - The steps on a Mac.
 - Whether an image that another host builds from the same tag has the same digest. No test compared two builds. Use the digest of the record, not a digest from another build.

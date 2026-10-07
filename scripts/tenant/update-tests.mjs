@@ -109,7 +109,7 @@ else if(kind==='docker') {
 `;
   for (const name of ['npm', 'digest', 'docker', 'ss', 'releases']) { writeFileSync(join(bin, name), fake); chmodSync(join(bin, name), 0o755); }
   const transport = Object.fromEntries(['DOCKER_HOST', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'].map((name) => [name, name === 'DOCKER_HOST' ? 'unix:///fixture/docker.sock' : name.toLowerCase().includes('no_proxy') ? 'localhost,127.0.0.1' : 'http://127.0.0.1:9']));
-  const environment = { ...process.env, ...transport, GITEA_TOKEN: 'test-not-a-credential', OK_REGISTRY_TOKEN: 'test-not-a-credential', OK_UPDATE_NPM_COMMAND: join(bin, 'npm'), OK_UPDATE_DIGEST_COMMAND: join(bin, 'digest'), OK_UPDATE_DOCKER_COMMAND: join(bin, 'docker'), OK_UPDATE_SS_COMMAND: join(bin, 'ss'), OK_UPDATE_RELEASES_COMMAND: join(bin, 'releases'), SMOKE_PORT: '18080' };
+  const environment = { ...process.env, ...transport, PATH: `${dirname(process.execPath)}:${process.env.PATH}`, GITEA_TOKEN: 'test-not-a-credential', OK_REGISTRY_TOKEN: 'test-not-a-credential', OK_UPDATE_NPM_COMMAND: join(bin, 'npm'), OK_UPDATE_DIGEST_COMMAND: join(bin, 'digest'), OK_UPDATE_DOCKER_COMMAND: join(bin, 'docker'), OK_UPDATE_SS_COMMAND: join(bin, 'ss'), OK_UPDATE_RELEASES_COMMAND: join(bin, 'releases'), SMOKE_PORT: '18080' };
   function call(action, args = []) {
     const output = spawnSync('sh', [join(repo, 'scripts/tenant/update.sh'), action, ...args], { env: environment, encoding: 'utf8', timeout: 60000 });
     assert.equal(output.error, undefined);
@@ -294,6 +294,16 @@ test('missing Node prints one JSON error object with exit 2', (context) => {
   assert.equal(output.status, 2); assert.equal(output.stderr, '');
   assert.equal(output.stdout.trim().split('\n').length, 1);
   assert.deepEqual(JSON.parse(output.stdout), { error: 'missing command: node', exit_code: 2, ok: false });
+});
+test('the entrypoint refuses Node below 24', (context) => {
+  const old = mkdtempSync(join(tmpdir(), 'ok-old-node-'));
+  context.after(() => rmSync(old, { recursive: true, force: true }));
+  writeFileSync(join(old, 'node'), '#!/bin/sh\nprintf \'22\\n\'\n', { mode: 0o755 });
+  const output = spawnSync('/bin/sh', [join(root, 'scripts/tenant/update.sh'), 'detect'], { env: { PATH: `${old}:/usr/bin:/bin` }, encoding: 'utf8' });
+  assert.equal(output.status, 2); assert.equal(output.stderr, '');
+  assert.deepEqual(JSON.parse(output.stdout), { error: 'Node.js 24 or newer is required', exit_code: 2, ok: false });
+  const workflows = spawnSync('/bin/sh', [join(root, 'scripts/tenant/workflows.sh'), 'check'], { env: { PATH: `${old}:/usr/bin:/bin` }, encoding: 'utf8' });
+  assert.equal(workflows.status, 2); assert.equal(workflows.stderr.trim(), 'workflows: Node.js 24 or newer is required');
 });
 test('symlink workdir ancestors are rejected before directories are created', (context) => {
   const f = fixture(context);

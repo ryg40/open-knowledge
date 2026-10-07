@@ -1,8 +1,11 @@
 .gitignore	25	setup-product	15b2d135a4f1b3498e29653228b2373cbe08c4a0	Upstream runtime feature, editor exclusion or egress restriction; not a setup choice.
 .gitignore	26	setup-product	4c5f2067e39fc25d9553143dacc5f4c1aacac23c	Upstream runtime feature, editor exclusion or egress restriction; not a setup choice.
 .gitignore	27	setup-product	28531ab9a0773e2f39c34d3275c84bf6beb55431	Upstream runtime feature, editor exclusion or egress restriction; not a setup choice.
+.gitignore	27	setup-product	15b2d135a4f1b3498e29653228b2373cbe08c4a0	Upstream runtime feature, editor exclusion or egress restriction; not a setup choice.
+.gitignore	28	setup-product	4c5f2067e39fc25d9553143dacc5f4c1aacac23c	Upstream runtime feature, editor exclusion or egress restriction; not a setup choice.
+.gitignore	29	setup-product	28531ab9a0773e2f39c34d3275c84bf6beb55431	Upstream runtime feature, editor exclusion or egress restriction; not a setup choice.
 .gitleaks.toml	21	url-host	2e9eb10c83eb8c184c12d865ca2db549c36c28fa	Generic URL recognizer; literal pattern text, not a destination host.
-.gitleaks.toml	95	session-wording	5f74db734689b5e246d25122914cb73db57ae6ec	Public product terminology, runtime reload mode or generic detector; not a session record.
+.gitleaks.toml	108	session-wording	5f74db734689b5e246d25122914cb73db57ae6ec	Public product terminology, runtime reload mode or generic detector; not a session record.
 EXPLAINER.md	25	tracker-number	f3c45e05e8c2ebc0646288c07c0e24c47cca5aef	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	26	tracker-number	02e0c424b9edd36db13b7bc706dde3ea6d249492	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	27	tracker-number	89bef53afe07484fc6dbb32f2f18aaf10f695786	Public installation or promotion step; not a private tracker reference.
@@ -24,7 +27,7 @@ EXPLAINER.md	89	tracker-number	e13d65bf79d107ab855bd0ca86979066c7c079ec	Public i
 EXPLAINER.md	97	tracker-number	43c399849dd4bede98dce10ef7697cacc26c9ebd	Public instruction numbering.
 EXPLAINER.md	134	tracker-number	a9288aceb942ed79bc307fb393cba8c89fa3d954	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	135	tracker-number	73ab33727a19234e555650aefe5b52805bec4b7d	Public installation or promotion step; not a private tracker reference.
-EXPLAINER.md	136	tracker-number	5fee746888a78cf0b9fd99f23b5f426150cbbee8	Public installation or promotion step; not a private tracker reference.
+EXPLAINER.md	136	tracker-number	39878ee48dba2dba4b9787779b8df35d4dc56ef3	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	226	tracker-number	b63fb474472ed1f6cbb72475f6e75634e8066684	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	227	tracker-number	a8ab9ccd23392de6858cf9eb1c78577abb8ed90e	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	228	tracker-number	c60ff8de44f2ed49e16d6e2b51b8ac3512a494af	Public installation or promotion step; not a private tracker reference.
@@ -100,11 +103,11 @@ EXPLAINER.md	1454	tracker-number	a71e5097ead40b938259d583899742d12cdfe017	Public
 EXPLAINER.md	1455	tracker-number	cee60591c25faf9824024403c0a7e01956f10e23	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	1456	tracker-number	401b3da6cb67b5cc9527b30c0db94b882e399d51	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	1457	tracker-number	716f6fb3336ccc99bcd785c74713e332d4e9b200	Public installation or promotion step; not a private tracker reference.
-deploy/Dockerfile	92	account-path	72af69b6bd29d7e0ff460b4e16d9904c33bb71da	Fixed container account path or the generic account-path detector.
-deploy/Dockerfile	102	account-path	af5f84a878f2f21fcd14d229260e5e3fece297d5	Fixed container account path or the generic account-path detector.
+deploy/Dockerfile	98	account-path	72af69b6bd29d7e0ff460b4e16d9904c33bb71da	Fixed container account path or the generic account-path detector.
+deploy/Dockerfile	108	account-path	af5f84a878f2f21fcd14d229260e5e3fece297d5	Fixed container account path or the generic account-path detector.
 deploy/docs/deployment.md	184	session-wording	e173e2b11293cfb2acb8bab3e6be9805372fcfe0	Public product terminology, runtime reload mode or generic detector; not a session record.
-deploy/docs/deployment.md	212	session-wording	cb111777e09ac7af1721eca7edb7f0a4cc4d6758	Public development-path boundary documentation.
-deploy/docs/deployment.md	549	session-wording	5f0edc96d4b19f1a94ec0aa489befcc083f423e9	Public product terminology, runtime reload mode or generic detector; not a session record.
+deploy/docs/deployment.md	213	session-wording	cb111777e09ac7af1721eca7edb7f0a4cc4d6758	Public development-path boundary documentation.
+deploy/docs/deployment.md	551	session-wording	5f0edc96d4b19f1a94ec0aa489befcc083f423e9	Public product terminology, runtime reload mode or generic detector; not a session record.
 deploy/docs/hardening.md	13	session-wording	aa062afb71892052542bcd51959c2c032faef844	Public product terminology, runtime reload mode or generic detector; not a session record.
 deploy/docs/hardening.md	14	session-wording	8561d31b81a0efb1344e2e4dbb30b3cc65e45843	Public product terminology, runtime reload mode or generic detector; not a session record.
 deploy/docs/hardening.md	15	session-wording	9c9c7109bb403b88cfc232b57028998396a32ab6	Public product terminology, runtime reload mode or generic detector; not a session record.
@@ -118,24 +121,24 @@ deploy/docs/hardening.md	222	session-wording	10d0a3ad76825808219c4a5fd3c6a25f2e3
 deploy/docs/hardening.md	224	session-wording	1e7d4d4712b21564f528d710d0e053034913eb69	Public product terminology, runtime reload mode or generic detector; not a session record.
 deploy/docs/hardening.md	226	setup-product	7ba101ca18065f3498d719e73f86e664b44ea669	Upstream runtime feature, editor exclusion or egress restriction; not a setup choice.
 scripts/tenant/pins.test.sh	20	email	031982cf09a237c97649e1100e812109b5a64c4b	Synthetic fixture address, not a real account.
-scripts/tenant/promote.sh	45	url-host	44ed4affd46817c5ed816b433c22faa3cf0ff586	Generic URL recognizer; literal pattern text, not a destination host.
-scripts/tenant/promote.sh	289	tracker-number	aec6783cf9283e38f0d33acde1b62d34446c1fd0	Public installation or promotion step; not a private tracker reference.
-scripts/tenant/promote.sh	333	tracker-number	f6d537d1d6f08c436615699ec7ea68443a711459	Public installation or promotion step; not a private tracker reference.
-scripts/tenant/promote.sh	336	tracker-number	5a834021d0085e0522108a8aa3c4b0dc8e5b082f	Public installation or promotion step; not a private tracker reference.
-scripts/tenant/promote.sh	379	tracker-number	08688ec219342a97b86b13906abd5e7ed6f0a01e	Public installation or promotion step; not a private tracker reference.
-scripts/tenant/promote.sh	408	tracker-number	25cd740a3f629d85bc42ea1cbe1ad2cf868b0b98	Public installation or promotion step; not a private tracker reference.
-scripts/tenant/promote.sh	448	tracker-number	f6a5c07417eb8a6ef2476e91059d4c9b7c8554fc	Public installation or promotion step; not a private tracker reference.
-scripts/tenant/promote.sh	488	tracker-number	0bd627844b93fa2a2ed5c634a46d72f05d6478af	Public installation or promotion step; not a private tracker reference.
-scripts/tenant/promote.sh	513	tracker-number	b3f08a44c3a2c191441028636ab759b33059f3f2	Public installation or promotion step; not a private tracker reference.
-scripts/tenant/promote.sh	539	tracker-number	56b2ad0771c34f7c5046fdd2dc19137aea3b3440	Public installation or promotion step; not a private tracker reference.
-scripts/tenant/promote.sh	567	tracker-number	80799868c69880533b5e7455d070a01a920e1dce	Public installation or promotion step; not a private tracker reference.
-scripts/tenant/promote.sh	596	tracker-number	c616c17585182188a43007b0b5df25955af8e753	Public installation or promotion step; not a private tracker reference.
-scripts/tenant/promote.sh	615	tracker-number	f421a09747cdd9ab4bf169194ddafeef3071c383	Public installation or promotion step; not a private tracker reference.
-scripts/tenant/promote.sh	657	tracker-number	fe4c6f69d746a5efffcb998305df6cca633685ac	Public installation or promotion step; not a private tracker reference.
-scripts/tenant/promote.sh	675	tracker-number	3353b29f1973cb33d90b7c7ced7ca03a975827eb	Public installation or promotion step; not a private tracker reference.
-scripts/tenant/promote.sh	679	tracker-number	a2eddbda508810c38dc27c2f99c890ad90693b73	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	46	url-host	44ed4affd46817c5ed816b433c22faa3cf0ff586	Generic URL recognizer; literal pattern text, not a destination host.
+scripts/tenant/promote.sh	290	tracker-number	aec6783cf9283e38f0d33acde1b62d34446c1fd0	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	334	tracker-number	f6d537d1d6f08c436615699ec7ea68443a711459	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	337	tracker-number	5a834021d0085e0522108a8aa3c4b0dc8e5b082f	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	380	tracker-number	08688ec219342a97b86b13906abd5e7ed6f0a01e	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	409	tracker-number	25cd740a3f629d85bc42ea1cbe1ad2cf868b0b98	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	449	tracker-number	f6a5c07417eb8a6ef2476e91059d4c9b7c8554fc	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	489	tracker-number	0bd627844b93fa2a2ed5c634a46d72f05d6478af	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	514	tracker-number	b3f08a44c3a2c191441028636ab759b33059f3f2	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	540	tracker-number	56b2ad0771c34f7c5046fdd2dc19137aea3b3440	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	568	tracker-number	80799868c69880533b5e7455d070a01a920e1dce	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	597	tracker-number	c616c17585182188a43007b0b5df25955af8e753	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	616	tracker-number	f421a09747cdd9ab4bf169194ddafeef3071c383	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	658	tracker-number	fe4c6f69d746a5efffcb998305df6cca633685ac	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	676	tracker-number	3353b29f1973cb33d90b7c7ced7ca03a975827eb	Public installation or promotion step; not a private tracker reference.
+scripts/tenant/promote.sh	680	tracker-number	a2eddbda508810c38dc27c2f99c890ad90693b73	Public installation or promotion step; not a private tracker reference.
 scripts/tenant/public-check.development	1	session-wording	7781bb6b0e837732eb4bcab5d00dea92f2a9c607	Development-path policy data, not session content.
 scripts/tenant/public-check.rules	1	account-path	52cdb3db6bf597f9e46aa67557b00bb759a9072f	Fixed container account path or the generic account-path detector.
 scripts/tenant/public-check.rules	7	session-wording	db3f4d3da670d85db5300a35f498b5dd7372ab62	Public product terminology, runtime reload mode or generic detector; not a session record.
-scripts/tenant/smoke.sh	70	account-path	1e4063b343af33c0c444701507fb87a81568c4fd	Fixed container account path or the generic account-path detector.
+scripts/tenant/smoke.sh	71	account-path	1e4063b343af33c0c444701507fb87a81568c4fd	Fixed container account path or the generic account-path detector.
 scripts/tenant/update.mjs	341	url-host	5414d5efbbbc31921533b09764fd0cc22ac21279	Public upstream release-notes API; unauthenticated read only.

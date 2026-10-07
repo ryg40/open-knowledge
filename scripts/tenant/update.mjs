@@ -184,7 +184,7 @@ async function fetchUpstream(dependency) {
   return step('fetch-upstream', (execute) => execute('git', ['fetch', '--no-tags', 'upstream', '+refs/heads/main:refs/remotes/upstream/main']), dependency);
 }
 function setupDocker() {
-  docker = command('OK_UPDATE_DOCKER_COMMAND', 'docker');
+  docker = command('OK_UPDATE_DOCKER_COMMAND', process.env.OK_CONTAINER_CLI || 'docker');
   prefix = `ok-update-${randomBytes(8).toString('hex')}`;
   image = `${prefix}:${options.version || 'test'}`;
   ledger = join(runDirectory, 'containers');
@@ -322,7 +322,7 @@ async function qualify() {
 async function detect() {
   runDirectory = mkdtempSync(join(tmpdir(), 'ok-update-detect-'));
   env = sterile(runDirectory);
-  docker = command('OK_UPDATE_DOCKER_COMMAND', 'docker');
+  docker = command('OK_UPDATE_DOCKER_COMMAND', process.env.OK_CONTAINER_CLI || 'docker');
   const current = pins();
   const newest = latest();
   const records = [

@@ -6,7 +6,8 @@ The command pushes no ref or image and does not use Compose or deployment data.
 
 ## Requirements
 
-Use Node.js 22 or newer, npm, Git, Docker with BuildKit, and the tools required by the installer kit.
+Use Node.js 24 or newer, npm, Git, Docker with BuildKit or Podman, and the tools required by the installer kit.
+The entrypoint refuses an older Node with exit 2. `OK_CONTAINER_CLI` names the container CLI; the default is `docker`.
 The port check needs `ss` with `-ltn` support.
 Use a full clone with a `local-dev` branch and an `upstream` remote.
 The upstream URL must be the public OpenKnowledge HTTPS repository, or an absolute local repository path for tests.
@@ -86,6 +87,7 @@ It does not expand nested archives or follow filesystem symlinks.
 Base-layer findings belong to the upstream image and appear in a redacted `note:` block without changing the step exit code.
 Findings in added layers fail the step. Scanner errors fail the step even in base layers.
 The command never adds a scanner exception. Cleanup removes the temporary baseline image too.
+The allowlist paths of the image scan in `.gitleaks.toml` begin with `/work/` and the layer index, because the scan reads the mounted absolute path. A tree scan reports relative paths and never matches them.
 
 All test containers have an `ok-update-` name prefix and `--rm`.
 The command does not read a deployment env file, a credential store, or inherited registry credentials.

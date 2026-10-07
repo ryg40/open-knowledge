@@ -29,10 +29,12 @@ paths = [
   '''^docs/src/lib/deferred-share\.test\.ts$''',
   '''^packages/app/src/components/properties-collapsed-store(?:\.test)?\.ts$''',
   '''^packages/app/src/components/skills-dock-expanded-store\.ts$''',
+  '''^packages/cli/src/commands/auth/git-credential-get\.test\.ts$''',
   '''^packages/cli/src/diagnose/diagnostic-reports\.test\.ts$''',
   '''^packages/cli/src/report-bundle\.test\.ts$''',
   '''^packages/core/src/constants/github\.ts$''',
   '''^packages/core/src/logging/qa-secret-pattern-canary\.test\.ts$''',
+  '''^packages/core/src/logging/secret-scrub\.test\.ts$''',
   '''^packages/desktop/src/main/ipc/bug-report\.test\.ts$''',
   '''^packages/desktop/src/main/share-handoff\.test\.ts$''',
   '''^packages/desktop/tests/smoke/_helpers/terminal-ready\.test\.ts$''',
@@ -41,6 +43,12 @@ paths = [
   '''^packages/server/src/remote-mcp\.test\.ts$''',
   '''^patches/@xterm%2Fxterm@6\.0\.0\.patch$''',
   '''^test-support/fixtures/share-url-v1-v2\.json$''',
+]
+[[rules.allowlists]]
+description = "Bundled OpenKnowledge code and the Perl header of the git dependency in the added image layers"
+paths = [
+  '''^/work/[0-9]+/opt/open-knowledge/dist/''',
+  '''^/work/[0-9]+/usr/lib/[^/]+/perl/[0-9.]+/CORE/cop\.h$''',
 ]
 
 [[rules]]
@@ -70,6 +78,11 @@ description = "Upstream test fixtures, storage keys and the public OAuth client 
 paths = [
   '''^packages/core/src/logging/qa-secret-pattern-canary\.test\.ts$''',
 ]
+[[rules.allowlists]]
+description = "Bundled OpenKnowledge code in the added image layers"
+paths = [
+  '''^/work/[0-9]+/opt/open-knowledge/dist/''',
+]
 
 [[rules]]
 id = "gitlab-pat"
@@ -93,4 +106,17 @@ id = "private-key"
 description = "Upstream test fixtures, storage keys and the public OAuth client ID"
 paths = [
   '''^packages/desktop/src/main/bug-report-agent-chat\.test\.ts$''',
+]
+[[rules.allowlists]]
+description = "Bundled OpenKnowledge code in the added image layers"
+paths = [
+  '''^/work/[0-9]+/opt/open-knowledge/dist/''',
+]
+
+[[rules]]
+id = "curl-auth-user"
+[[rules.allowlists]]
+description = "Bundled OpenKnowledge code in the added image layers"
+paths = [
+  '''^/work/[0-9]+/opt/open-knowledge/dist/''',
 ]

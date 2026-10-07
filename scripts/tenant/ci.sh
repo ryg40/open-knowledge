@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 export LC_ALL=C
+container_cli=${OK_CONTAINER_CLI:-docker}
 
 default_image=koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
 upstream_url=https://github.com/inkeep/open-knowledge.git
@@ -62,7 +63,7 @@ case $action in
     for file in $files; do
       set -- "$@" "$file"
     done
-    docker run --rm --network none --volume "$repo_root:/mnt:ro" --workdir /mnt "$image" -s sh "$@"
+    "$container_cli" run --rm --network none --volume "$repo_root:/mnt:ro" --workdir /mnt "$image" -s sh "$@"
     echo "ci: shell check ok, $# files"
     ;;
   deploy-changed)
@@ -116,7 +117,7 @@ case $action in
     pinned_version
     suffix=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
     image=ok-ci-$suffix:$version
-    trap 'docker image rm "$image" >/dev/null 2>&1 || true' EXIT
+    trap '"$container_cli" image rm "$image" >/dev/null 2>&1 || true' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
     DOCKER_BUILDKIT=1 scripts/tenant/build.sh -v "$version" -t "$image"

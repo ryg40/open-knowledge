@@ -202,6 +202,7 @@ Changed submodules stop the check; unchanged upstream submodules remain outside 
 Encoded or compressed values need a separate review.
 
 Each line of `scripts/tenant/public-check.allow` has five tab-separated fields: exact path, line number, rule ID, line hash and reason.
+Two rows may name the same path, line and rule with different hashes. This carries an exception through an upstream edit that moves the line: the row for the new position joins the list before the sync, and the row for the old position leaves after it.
 The hash comes from `git hash-object --stdin` with the complete line and one final newline.
 A changed line, moved exception or different rule therefore needs a new review.
 No path glob or whole-file exception is accepted.
@@ -340,6 +341,7 @@ The variables in the table are environment variables of `build.sh`. The script p
 | `OK_VERSION`, `OK_NPM_INTEGRITY` | Select the npm tarball that supplies the native addons, and its sha512. |
 | `OK_SOURCE` | Sets the `org.opencontainers.image.source` label. The default is the upstream GitHub URL, because this repository holds no URL of your repository. Set `OK_SOURCE` to the URL of the repository that builds the image. |
 | `NODE_IMAGE` | Replaces the pinned base image. |
+| `OK_CONTAINER_CLI` | Names the container CLI for every kit script. The default is `docker`. Set `podman` for Podman. |
 | `OK_UID`, `OK_GID` | Set the user of the container. The default is `10001`. |
 
 ## Build behind TLS inspection
@@ -351,7 +353,7 @@ Two stages of `deploy/Dockerfile` connect to `registry.npmjs.org` through Node:
 - The `native` stage fetches the npm tarball with the Node `fetch` function.
 - The `build` stage runs `npm` and `pnpm`, which are Node programs.
 
-Node uses its own CA store, not the CA store of the Docker daemon or of the build host. A CA in the Docker daemon, in `buildkitd.toml` or in the Colima VM is therefore not enough. The variable `NODE_EXTRA_CA_CERTS` adds a CA file to the Node CA store.
+Node uses its own CA store, not the CA store of the Docker daemon or of the build host. A CA in the Docker daemon, in `buildkitd.toml` or in the Podman machine is therefore not enough. The variable `NODE_EXTRA_CA_CERTS` adds a CA file to the Node CA store.
 
 The tarball URL is fixed in `deploy/Dockerfile`. It is not a build argument. The build host needs a path to `registry.npmjs.org` through the proxy.
 
@@ -383,9 +385,9 @@ Not verified: both paths. They are documented only. No build through a TLS-inspe
 
 The image is verified on `linux/amd64` only.
 
-- A Mac with Apple Silicon builds `linux/arm64` by default. To build for `linux/amd64`, run `DOCKER_DEFAULT_PLATFORM=linux/amd64 scripts/tenant/build.sh ...`. The Docker CLI reads this variable as the default platform. The image then runs under emulation. Not verified on a Mac.
-- To use a native `linux/arm64` image, build and test it on the target first. Not verified: the arm64 build, and the arm64 native file of the npm tarball. The `native` stage checks only the `linux-x64-gnu` file.
-- On a Mac, one option is Colima with the Docker runtime. Install it with `brew install colima docker docker-compose docker-buildx`. Set `cliPluginsExtraDirs` in `~/.docker/config.json` to the Homebrew plugin directory (`$(brew --prefix)/lib/docker/cli-plugins`), so that the Docker CLI finds `docker compose` and `docker buildx`. Start the VM with `colima start --cpus 4 --memory 8`, because the build needs more than the default 2 CPUs and 2 GiB. Not verified on a Mac.
+- The build makes the image for the architecture of the build machine. The `native` stage picks the addon file of `TARGETARCH`, `linux-x64-gnu` on `amd64` and `linux-arm64-gnu` on `arm64`; the npm tarball holds both. Not verified: the `linux/arm64` build and image. Build and test them on the target first.
+- On a Mac with Apple Silicon, use Podman. Install it with `brew install podman podman-compose`; both are arm64 native. Make the machine with `podman machine init --cpus 4 --memory 8192` and start it with `podman machine start`, because the build needs more than the default 2 CPUs and 2 GiB. Set `OK_CONTAINER_CLI=podman` for the kit scripts, and type `podman compose` where the documents show `docker compose`. Podman 4.8 or newer builds the heredoc `RUN` blocks of `deploy/Dockerfile`; Podman ignores its `# syntax=` line. Not verified on a Mac.
+- Mac checklist, not verified: `deploy/Dockerfile.dockerignore` as the ignore file of the build, the heredoc `RUN` blocks, `scripts/tenant/update.sh detect` with `OK_UPDATE_DIGEST_COMMAND` because Podman has no `docker buildx imagetools`, the port check of `qualify` with `OK_UPDATE_SS_COMMAND` because macOS has no `ss`, and `podman compose` with `deploy/compose.yaml`.
 
 ## Run with the generic Compose file
 

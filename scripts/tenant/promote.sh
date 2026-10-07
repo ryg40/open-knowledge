@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 export GIT_PAGER=cat LC_ALL=C
+container_cli=${OK_CONTAINER_CLI:-docker}
 
 version=
 push=0
@@ -544,8 +545,8 @@ scan_dir=$tmp/src
 validation_status=0
 (cd "$scan_dir" && ./scripts/tenant/scan.sh --validate-only) || validation_status=$?
 [ "$validation_status" -eq 0 ] || scanner_error "host configuration validation failed (exit $validation_status)"
-if ! scanner=$(docker run --rm --network none "$image" --version 2>/dev/null); then
-  echo "promote: the scanner cannot run: docker run $image --version failed" >&2
+if ! scanner=$("$container_cli" run --rm --network none "$image" --version 2>/dev/null); then
+  echo "promote: the scanner cannot run: $container_cli run $image --version failed" >&2
   exit 2
 fi
 echo "ok: the scanner runs, $scanner"

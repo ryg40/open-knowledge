@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 export LC_ALL=C
+container_cli=${OK_CONTAINER_CLI:-docker}
 
 default_image=zricethezav/gitleaks:v8.28.0@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854
 image=${GITLEAKS_IMAGE:-$default_image}
@@ -161,7 +162,7 @@ load_rules() {
 
 validate_config_file() {
   validation_status=0
-  docker run --rm --network none --tmpfs /work --workdir /work \
+  "$container_cli" run --rm --network none --tmpfs /work --workdir /work \
     --volume "$1:/config/gitleaks.toml:ro" \
     "$image" dir --no-banner --no-color --redact --config /config/gitleaks.toml . > "$validation_dir/output" 2>&1 || validation_status=$?
   [ "$validation_status" -eq 0 ] && grep -aq 'no leaks found' "$validation_dir/output" && ! grep -aEq '(^|[[:space:]])ERR([[:space:]]|$)' "$validation_dir/output"
@@ -203,7 +204,7 @@ run_gitleaks() {
   fi
   scan_log=$(mktemp "${TMPDIR:-/tmp}/ok-scan-log.XXXXXX")
   scanner_status=0
-  docker run --rm --network none \
+  "$container_cli" run --rm --network none \
     --volume "$common_dir:$common_dir:ro" \
     --volume "$config:/config/gitleaks.toml:ro" \
     "$work" \

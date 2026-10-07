@@ -102,11 +102,11 @@ Port, user ID and project name examples repeat values from the table. Review the
 
 | Fact | Value | Source |
 |---|---|---|
-| Portable release tag | `portable-v0.2.0` | Target release for this file. Not verified: the tag exists. `git tag --list 'portable-v*'` lists available tags. |
-| Portable version | `0.2.0` | The release tag without `portable-v` |
+| Portable release tag | `portable-v0.3.0` | Target release for this file. Not verified: the tag exists. `git tag --list 'portable-v*'` lists available tags. |
+| Portable version | `0.3.0` | The release tag without `portable-v` |
 | Upstream version | `0.81.4` | `ARG OK_VERSION` in `deploy/Dockerfile` |
 | Image tag | `open-knowledge:<upstream version>-p<portable version>` | The "Release identity" format in `deploy/docs/deployment.md`, with this release's versions |
-| Base image | `node:24-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6` | `ARG NODE_IMAGE` in `deploy/Dockerfile` |
+| Base image | `node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20` | `ARG NODE_IMAGE` in `deploy/Dockerfile` |
 | Node.js in the base image | `v24.21.0` | `node --version` in the image |
 | Earlier observed image | The image of an earlier release with the same upstream version | The observations below predate this release. The smoke checks use that image, not a new pin. |
 | Tested tools | Linux `x86_64`, Git `2.39.5`, Docker Engine `29.7.2`, buildx `v0.36.1`, Compose `v5.5.0` | Versions from the earlier observations, not minimum requirements |
@@ -128,12 +128,12 @@ Port, user ID and project name examples repeat values from the table. Review the
 | Tool | Used for |
 |---|---|
 | Git | The clone. `git archive` exports the source for the build and for the scan. |
-| Docker Engine with BuildKit | The image build, and each container that the scripts start. `deploy/Dockerfile` uses heredoc `RUN` blocks, which need BuildKit. |
-| Docker Compose (`docker compose`) | Creates the container, the network and the volume from `deploy/compose.yaml`. |
+| Docker Engine with BuildKit, or Podman 4.8 or newer | The image build, and each container that the scripts start. `deploy/Dockerfile` uses heredoc `RUN` blocks, which need BuildKit or Podman. `OK_CONTAINER_CLI` names the CLI; the default is `docker`. |
+| Docker Compose (`docker compose`), or `podman compose` | Creates the container, the network and the volume from `deploy/compose.yaml`. |
 | A POSIX shell and standard utilities | `tar`, `sed`, `awk`, `grep`, `od`, `cmp`, `mktemp`, `dirname`, `basename`, `mkdir`, `rm`, `cat`, `sleep`, `date`, `chmod`, `mv`, `cp`, `tr`, `tail`, `xargs` |
 | Network access for the build | Step 5 downloads from Docker Hub, `registry.npmjs.org` and `deb.debian.org`. |
 | `curl` | Optional. Step 8 uses it for one check. |
-| Node.js 24 and `npm` on your machine | Optional. Only step 11 needs them, for the launcher. |
+| Node.js 24 or newer | The update and workflow checks of the kit refuse an older Node. Step 11 also needs `npm`, for the launcher. |
 
 The image is verified on `linux/amd64` only. The section "Target runtime" of [deploy/docs/deployment.md](deploy/docs/deployment.md) gives the notes for a Mac.
 
@@ -144,7 +144,7 @@ These commands give you a running container with the fewest steps. They skip ste
 1. Get the source and build the image.
 
    ```sh
-   RELEASE_TAG=portable-v0.2.0
+   RELEASE_TAG=portable-v0.3.0
    git clone --branch "$RELEASE_TAG" https://github.com/<organization>/<repository>.git open-knowledge
    cd open-knowledge
    UPSTREAM_VERSION=$(awk -F= '/^ARG OK_VERSION=/ { print $2; exit }' deploy/Dockerfile)
@@ -238,7 +238,7 @@ Run (steps 7 to 11)
 
 ## Step 1: Check the requirements
 
-Make sure that Git, Docker with BuildKit, and Docker Compose are on the machine. Each command must print a version.
+Make sure that Git and a container engine are on the machine: Docker with BuildKit and Docker Compose, or Podman with `podman compose`. Each command must print a version. With Podman, set `OK_CONTAINER_CLI=podman` and read `podman` where the commands of this file show `docker`.
 
 ```sh
 git --version
@@ -287,7 +287,7 @@ This step changes nothing on the machine.
 Clone the release repository at the release tag. The tag gives you one fixed commit of the branch `portable`.
 
 ```sh
-RELEASE_TAG=portable-v0.2.0
+RELEASE_TAG=portable-v0.3.0
 git clone --branch "$RELEASE_TAG" https://github.com/<organization>/<repository>.git open-knowledge
 cd open-knowledge
 git describe --tags
