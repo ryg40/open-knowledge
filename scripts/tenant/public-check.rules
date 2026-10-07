@@ -1,0 +1,8 @@
+class-1	account-path	/(?:home|Users)/[A-Za-z0-9_.-]+(?:/|\b)|/root(?:/|\b)|[A-Za-z]:\\Users\\[A-Za-z0-9_.-]+(?:\\|\b)
+class-1	email	\b[A-Za-z0-9._%+-]+@(?!(?:[A-Za-z0-9-]+\.)*example\.(?:com|net|org)(?![A-Za-z0-9.-]))[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b
+class-1	url-host	(?i)\b(?:https?|wss?|ssh|git)://(?:[^/\s@]+@)?(?!(?:github\.com|docs\.docker\.com|registry\.npmjs\.org|deb\.debian\.org|nodejs\.org|localhost|127\.0\.0\.1|0\.0\.0\.0|(?:[a-z0-9-]+\.)*example\.(?:com|net|org))(?=[:/\s<>`"']|$))[^/\s<>`"']+
+class-1	ssh-host	\b[A-Za-z0-9_.-]+@(?!(?:github\.com|(?:[a-z0-9-]+\.)*example\.(?:com|net|org))[:/])[A-Za-z0-9.-]+\.[A-Za-z]{2,}:[^\s]+
+class-2	tracker-number	(?i)\b(?:issue|ticket|phase|step|gate)[ _-]*#?[0-9]+\b|(?-i:\b(?!(?:SHA|UTF|GPL)-)[A-Z]{2,8}-[0-9]+\b)|/(?:issues|pull|tickets)/[0-9]+\b
+class-3	work-date	\b(?:19|20)[0-9]{2}-[01][0-9]-[0-3][0-9]\b
+class-3	session-wording	(?i)\b(?:this[ ]host|the[ ]owner|live|agents?|workers?|coordinators?|reviewers?|panes?)\b
+class-4	setup-product	(?i)\b(?:claud[e](?:[- ][0-9][a-z0-9.-]*)?|code[x]|curso[r]|opencod[e]|opencla[w]|copilo[t]|cl[i]ne|aide[r]|g[p]t[- ][0-9][a-z0-9.-]*|qw[e]n[0-9a-z_.-]*|llam[a][- ][0-9][a-z0-9_.-]*|gemin[i][- ][0-9][a-z0-9_.-]*|deepsee[k]|open[a]i|anthrop[i]c|ollam[a]|mistra[l](?:[- ][a-z0-9][a-z0-9.-]*)?|bedroc[k]|litell[m]|sonne[t](?:[- ][0-9][a-z0-9.-]*)?|op[u]s(?:[- ][0-9][a-z0-9.-]*)?|haik[u](?:[- ][0-9][a-z0-9.-]*)?)\b|(?i:\bp[i]\b)

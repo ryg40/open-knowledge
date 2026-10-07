@@ -1,0 +1,157 @@
+name: Upstream update
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-update
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  detect:
+    name: Detect a new upstream version
+    runs-on: ${{ vars.OK_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      qualify: ${{ steps.detect.outputs.qualify }}
+      version: ${{ steps.detect.outputs.version }}
+      current: ${{ steps.detect.outputs.current }}
+    steps:
+      - name: Check out local-dev
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: local-dev
+          persist-credentials: false
+
+      - name: Compare the pins with the registries
+        id: detect
+        env:
+          OK_API_URL: ${{ github.api_url }}
+          OK_REPOSITORY: ${{ github.repository }}
+          OK_TOKEN: ${{ secrets.OK_UPDATE_TOKEN || github.token }}
+        run: node scripts/tenant/update-ci.mjs detect
+
+  qualify:
+    name: Test the new version
+    needs: detect
+    if: needs.detect.outputs.qualify == 'true'
+    runs-on: ${{ vars.OK_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      NEW_VERSION: ${{ needs.detect.outputs.version }}
+      SMOKE_PORT: ${{ vars.OK_SMOKE_PORT || '18080' }}
+    steps:
+      - name: Check out local-dev with the full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: local-dev
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set the upstream remote
+        run: scripts/tenant/ci.sh upstream-remote
+
+      - name: Qualify the version
+        run: |
+          set -eu
+          rm -rf "$RUNNER_TEMP/ok-update"
+          mkdir -p "$RUNNER_TEMP/ok-update"
+          scripts/tenant/update.sh qualify --version "$NEW_VERSION" --workdir "$RUNNER_TEMP/ok-update" --bundle "$RUNNER_TEMP/ok-update/sync.bundle" | tee "$RUNNER_TEMP/ok-update/qualify.json"
+
+      - name: Upload the logs and the result
+        if: always()
+        uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5
+        with:
+          name: qualify
+          path: ${{ runner.temp }}/ok-update
+          if-no-files-found: error
+
+  notes:
+    name: Read the release notes
+    needs: detect
+    if: needs.detect.outputs.qualify == 'true'
+    runs-on: ${{ vars.OK_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CURRENT_VERSION: ${{ needs.detect.outputs.current }}
+      NEW_VERSION: ${{ needs.detect.outputs.version }}
+    steps:
+      - name: Check out local-dev with the full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: local-dev
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set the upstream remote
+        run: scripts/tenant/ci.sh upstream-remote
+
+      - name: Read the notes and the changed kit inputs
+        run: |
+          set -eu
+          rm -rf "$RUNNER_TEMP/ok-notes"
+          mkdir -p "$RUNNER_TEMP/ok-notes"
+          scripts/tenant/update.sh notes --from "$CURRENT_VERSION" --to "$NEW_VERSION" --workdir "$RUNNER_TEMP/ok-notes" | tee "$RUNNER_TEMP/ok-notes/notes.json"
+
+      - name: Upload the notes
+        if: always()
+        uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5
+        with:
+          name: notes
+          path: ${{ runner.temp }}/ok-notes
+          if-no-files-found: error
+
+  pull-request:
+    name: Open the pull request
+    needs:
+      - detect
+      - qualify
+      - notes
+    runs-on: ${{ vars.OK_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out local-dev with the full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: local-dev
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the qualification
+        uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a
+        with:
+          name: qualify
+          path: ${{ runner.temp }}/ok-pull-request/qualify
+
+      - name: Download the notes
+        uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a
+        with:
+          name: notes
+          path: ${{ runner.temp }}/ok-pull-request/notes
+
+      - name: Push the tested branch and open the pull request
+        env:
+          OK_API_URL: ${{ github.api_url }}
+          OK_SERVER_URL: ${{ github.server_url }}
+          OK_REPOSITORY: ${{ github.repository }}
+          OK_TOKEN: ${{ secrets.OK_UPDATE_TOKEN || github.token }}
+        run: node scripts/tenant/update-ci.mjs pull-request --result "$RUNNER_TEMP/ok-pull-request/qualify/qualify.json" --notes "$RUNNER_TEMP/ok-pull-request/notes/notes.json" --bundle "$RUNNER_TEMP/ok-pull-request/qualify/sync.bundle"

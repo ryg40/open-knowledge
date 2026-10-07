@@ -1,0 +1,165 @@
+name: Portable release
+
+on:
+  push:
+    tags:
+      - 'portable-v*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Release tag to build, in the form portable-vX.Y.Z
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portable-release-${{ inputs.ref || github.ref_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    name: Scan, build, smoke-test and push
+    if: vars.OK_REGISTRY != ''
+    runs-on: ${{ vars.OK_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      DOCKER_BUILDKIT: '1'
+      OK_REGISTRY: ${{ vars.OK_REGISTRY }}
+      RELEASE_TAG: ${{ inputs.ref || github.ref_name }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.ref && format('refs/tags/{0}', inputs.ref) || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read the versions
+        run: |
+          set -eu
+          if ! printf '%s\n' "$RELEASE_TAG" | grep -Eq '^portable-v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::the ref $RELEASE_TAG is not a tag of the form portable-vX.Y.Z"
+            exit 1
+          fi
+          portable_version=${RELEASE_TAG#portable-v}
+          upstream_version=$(awk -F= '/^ARG OK_VERSION=/ { print $2; exit }' deploy/Dockerfile)
+          if ! printf '%s\n' "$upstream_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::deploy/Dockerfile gives no upstream version"
+            exit 1
+          fi
+          commit=$(git rev-parse --verify 'HEAD^{commit}')
+          tag_commit=$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")
+          if [ "$commit" != "$tag_commit" ]; then
+            echo "::error::the checkout $commit is not the commit of $RELEASE_TAG"
+            exit 1
+          fi
+          {
+            echo "PORTABLE_VERSION=$portable_version"
+            echo "UPSTREAM_VERSION=$upstream_version"
+            echo "RELEASE_COMMIT=$commit"
+            echo "IMAGE=$OK_REGISTRY/open-knowledge:$upstream_version-p$portable_version"
+            echo "REGISTRY_HOST=${OK_REGISTRY%%/*}"
+          } >> "$GITHUB_ENV"
+
+      - name: Scan the tree
+        env:
+          GITLEAKS_IMAGE: ${{ vars.GITLEAKS_IMAGE }}
+        run: scripts/tenant/scan.sh
+
+      - name: Scan the history since the previous release
+        env:
+          GITLEAKS_IMAGE: ${{ vars.GITLEAKS_IMAGE }}
+        run: |
+          set -eu
+          previous=$(git tag --list 'portable-v*' --sort=-v:refname | awk -v current="$RELEASE_TAG" 'found { print; exit } $0 == current { found = 1 }')
+          if [ -z "$previous" ]; then
+            echo "No release tag before $RELEASE_TAG exists. The history scan did not run." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          scripts/tenant/scan.sh --history "$previous..HEAD"
+
+      - name: Find the upstream release commit
+        run: scripts/tenant/ci.sh upstream-ref
+
+      - name: Check the public content
+        run: scripts/tenant/public-check.sh
+
+      - name: Build the image
+        env:
+          NODE_IMAGE: ${{ vars.NODE_IMAGE }}
+          OK_SOURCE: ${{ vars.OK_SOURCE }}
+        run: scripts/tenant/build.sh -s "$RELEASE_COMMIT" -v "$UPSTREAM_VERSION" -t "$IMAGE"
+
+      - name: Smoke-test the image
+        run: |
+          set -eu
+          scripts/tenant/smoke.sh "$IMAGE" | tee "$RUNNER_TEMP/smoke.log"
+          printed=$(sed -n 's/^smoke: ok //p' "$RUNNER_TEMP/smoke.log" | tail -n 1)
+          if [ "$printed" != "$UPSTREAM_VERSION" ]; then
+            echo "::error::the image reports the version $printed, not the upstream version $UPSTREAM_VERSION"
+            exit 1
+          fi
+
+      - name: Log in to the registry
+        env:
+          OK_REGISTRY_USER: ${{ secrets.OK_REGISTRY_USER }}
+          OK_REGISTRY_TOKEN: ${{ secrets.OK_REGISTRY_TOKEN }}
+        run: printf '%s' "$OK_REGISTRY_TOKEN" | docker login "$REGISTRY_HOST" -u "$OK_REGISTRY_USER" --password-stdin
+
+      - name: Refuse an image tag that exists
+        run: |
+          set -eu
+          if output=$(docker manifest inspect "$IMAGE" 2>&1); then
+            echo "::error::image tag exists: $IMAGE"
+            exit 1
+          fi
+          if printf '%s\n' "$output" | grep -Eqi 'no such manifest|manifest unknown|MANIFEST_UNKNOWN|not found'; then
+            echo "The image tag $IMAGE does not exist in the registry."
+            exit 0
+          fi
+          echo "::error::the registry gave no answer about the image tag $IMAGE"
+          printf '%s\n' "$output"
+          exit 1
+
+      - name: Push the image
+        run: docker push "$IMAGE"
+
+      - name: Record the digest
+        run: |
+          set -eu
+          digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE")
+          {
+            echo "tag=$RELEASE_TAG"
+            echo "commit=$RELEASE_COMMIT"
+            echo "image=$IMAGE"
+            echo "digest=$digest"
+            echo "upstream_version=$UPSTREAM_VERSION"
+          } > release-record.txt
+          {
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Tag | \`$RELEASE_TAG\` |"
+            echo "| Commit | \`$RELEASE_COMMIT\` |"
+            echo "| Image | \`$IMAGE\` |"
+            echo "| Digest | \`$digest\` |"
+            echo "| Upstream version | \`$UPSTREAM_VERSION\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the release record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-record
+          path: release-record.txt
+          if-no-files-found: error
+
+      - name: Log out of the registry
+        if: always()
+        run: docker logout "${OK_REGISTRY%%/*}"

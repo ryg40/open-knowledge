@@ -1,0 +1,33 @@
+name: Public checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Secret scan and public-content check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan the tree
+        run: scripts/tenant/scan.sh
+
+      - name: Find the upstream release commit
+        run: scripts/tenant/ci.sh upstream-ref
+
+      - name: Check the public content
+        run: scripts/tenant/public-check.sh

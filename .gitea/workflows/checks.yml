@@ -1,0 +1,86 @@
+name: Checks
+
+on:
+  push:
+    branches:
+      - local-dev
+  pull_request:
+    branches:
+      - local-dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  source:
+    name: Shell check, secret scan, public-content check and pin check
+    runs-on: ${{ vars.OK_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      deploy: ${{ steps.changed.outputs.deploy }}
+    steps:
+      - name: Check out the commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the workflow files
+        run: scripts/tenant/workflows.sh check
+
+      - name: Check the kit scripts
+        env:
+          SHELLCHECK_IMAGE: ${{ vars.SHELLCHECK_IMAGE }}
+        run: scripts/tenant/ci.sh lint
+
+      - name: Scan the tree
+        env:
+          GITLEAKS_IMAGE: ${{ vars.GITLEAKS_IMAGE }}
+        run: scripts/tenant/scan.sh
+
+      - name: Find the upstream release commit
+        run: scripts/tenant/ci.sh upstream-ref
+
+      - name: Check the public content
+        run: scripts/tenant/public-check.sh
+
+      - name: Check the pins
+        run: scripts/tenant/pins.sh
+
+      - name: Find a change under deploy
+        id: changed
+        env:
+          BASE_COMMIT: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_COMMIT: ${{ github.sha }}
+        run: scripts/tenant/ci.sh deploy-changed "$BASE_COMMIT" "$HEAD_COMMIT"
+
+  image:
+    name: Build and smoke-test the image
+    needs: source
+    if: github.event_name == 'workflow_dispatch' || needs.source.outputs.deploy == 'true'
+    runs-on: ${{ vars.OK_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Build and smoke-test the image
+        env:
+          NODE_IMAGE: ${{ vars.NODE_IMAGE }}
+          SMOKE_PORT: ${{ vars.OK_SMOKE_PORT }}
+        run: scripts/tenant/ci.sh image

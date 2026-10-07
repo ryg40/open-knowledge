@@ -33,3 +33,5 @@ blob-report/
 .env
 .env.local
 .env.*.local
+.credentials
+.local/

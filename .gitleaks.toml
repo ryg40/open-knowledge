@@ -1,0 +1,96 @@
+title = "OpenKnowledge container scan"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "credentials-file"
+description = "A file with the name .credentials"
+path = '''(?:^|/)\.credentials$'''
+
+[[rules]]
+id = "env-file"
+description = "A file with the name .env"
+path = '''(?:^|/)\.env$'''
+
+[[allowlists]]
+description = "Placeholder values in deploy/.env.example"
+condition = "AND"
+paths = ['''^deploy/\.env\.example$''']
+regexTarget = "line"
+regexes = ['''^OK_[A-Z_]+=(?:[a-z0-9.-]+:[a-z0-9.-]+|https://[a-z0-9.-]*example\.com|127\.0\.0\.1|[0-9]{2,5})?$''']
+
+[[rules]]
+id = "generic-api-key"
+[[rules.allowlists]]
+description = "Upstream test fixtures, storage keys and the public OAuth client ID"
+paths = [
+  '''^\.github/workflows/select-beta-to-promote\.yml$''',
+  '''^docs/src/lib/deferred-share\.test\.ts$''',
+  '''^packages/app/src/components/properties-collapsed-store(?:\.test)?\.ts$''',
+  '''^packages/app/src/components/skills-dock-expanded-store\.ts$''',
+  '''^packages/cli/src/diagnose/diagnostic-reports\.test\.ts$''',
+  '''^packages/cli/src/report-bundle\.test\.ts$''',
+  '''^packages/core/src/constants/github\.ts$''',
+  '''^packages/core/src/logging/qa-secret-pattern-canary\.test\.ts$''',
+  '''^packages/desktop/src/main/ipc/bug-report\.test\.ts$''',
+  '''^packages/desktop/src/main/share-handoff\.test\.ts$''',
+  '''^packages/desktop/tests/smoke/_helpers/terminal-ready\.test\.ts$''',
+  '''^packages/desktop/tests/smoke/_helpers/terminal-scrollback\.test\.ts$''',
+  '''^packages/server/src/mcp-mount\.test\.ts$''',
+  '''^packages/server/src/remote-mcp\.test\.ts$''',
+  '''^patches/@xterm%2Fxterm@6\.0\.0\.patch$''',
+  '''^test-support/fixtures/share-url-v1-v2\.json$''',
+]
+
+[[rules]]
+id = "github-pat"
+[[rules.allowlists]]
+description = "Upstream test fixtures, storage keys and the public OAuth client ID"
+paths = [
+  '''^packages/cli/src/commands/clone\.test\.ts$''',
+  '''^packages/cli/src/report-bundle\.test\.ts$''',
+]
+
+[[rules]]
+id = "jwt"
+[[rules.allowlists]]
+description = "Upstream test fixtures, storage keys and the public OAuth client ID"
+paths = [
+  '''^packages/cli/src/commands/bug-report-redact\.test\.ts$''',
+  '''^packages/cli/src/report-bundle\.test\.ts$''',
+  '''^packages/core/src/logging/qa-secret-pattern-canary\.test\.ts$''',
+  '''^packages/core/src/logging/secret-scrub\.test\.ts$''',
+]
+
+[[rules]]
+id = "gcp-api-key"
+[[rules.allowlists]]
+description = "Upstream test fixtures, storage keys and the public OAuth client ID"
+paths = [
+  '''^packages/core/src/logging/qa-secret-pattern-canary\.test\.ts$''',
+]
+
+[[rules]]
+id = "gitlab-pat"
+[[rules.allowlists]]
+description = "Upstream test fixtures, storage keys and the public OAuth client ID"
+paths = [
+  '''^packages/core/src/logging/qa-secret-pattern-canary\.test\.ts$''',
+]
+
+[[rules]]
+id = "stripe-access-token"
+[[rules.allowlists]]
+description = "Upstream test fixtures, storage keys and the public OAuth client ID"
+paths = [
+  '''^packages/core/src/logging/qa-secret-pattern-canary\.test\.ts$''',
+]
+
+[[rules]]
+id = "private-key"
+[[rules.allowlists]]
+description = "Upstream test fixtures, storage keys and the public OAuth client ID"
+paths = [
+  '''^packages/desktop/src/main/bug-report-agent-chat\.test\.ts$''',
+]
