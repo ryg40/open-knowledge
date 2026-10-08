@@ -54,7 +54,12 @@ import { createMcpHttpHandler } from './mcp-http.ts';
 import { mountMcpAndApi, type ReadinessState } from './mcp-mount.ts';
 import { MissingOkConfigError } from './missing-ok-config-error.ts';
 import { createProjectRuntime, type ProjectRuntime } from './project-runtime.ts';
-import { createServer, type ServerInstance, type ServerOptions } from './server-factory.ts';
+import {
+  createServer,
+  observeShutdownDocumentRetirements,
+  type ServerInstance,
+  type ServerOptions,
+} from './server-factory.ts';
 import { installServerMemoryGauge, installServerRuntimeGauges } from './server-memory-telemetry.ts';
 import {
   genuineInPlaceNames,
@@ -131,6 +136,7 @@ export interface BootServerOptions
     | 'commitDebounceMs'
     | 'wipRef'
     | 'destroyTimeoutMs'
+    | 'authorityRegistryPath'
     | 'localOpCliArgs'
     | 'authStreamHeartbeatMs'
     | 'onAgentWrite'
@@ -372,6 +378,7 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
   let collabClientCounter: CollabClientCounter | null = null;
 
   const serverInstance = createServer({
+    authorityRegistryPath: opts.authorityRegistryPath,
     getCollabClientCount: () => collabClientCounter?.getCount() ?? 0,
     acpRegistryFetchImpl: opts.acpRegistryFetchImpl,
     contentDir: opts.contentDir,
@@ -450,6 +457,7 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
           assetExtensions: ASSET_EXTENSIONS,
           blocklistExtensions: EXECUTABLE_BLOCKLIST_EXTENSIONS,
           ingressPolicy,
+          resolveTrackedFile: serverInstance.resolveTrackedFile,
         })
       : undefined;
 
@@ -643,19 +651,45 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
   );
 
   let destroyed = false;
-  const withDestroyTimeout = async (name: string, work: () => Promise<void>): Promise<void> => {
+  const withDestroyTimeout = async (
+    name: string,
+    work: () => Promise<void>,
+    retirementSource?: ServerInstance['hocuspocus'],
+  ): Promise<void> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopObserving: (() => void) | undefined;
+    let finished = false;
+    const timeout = Promise.withResolvers<never>();
+    const expire = () => {
+      if (finished) return;
+      finished = true;
+      timeout.reject(
+        new Error(
+          retirementSource
+            ? `${name} timed out: no document retired for ${DESTROY_STEP_TIMEOUT_MS}ms`
+            : `${name} timed out after ${DESTROY_STEP_TIMEOUT_MS}ms`,
+        ),
+      );
+    };
+    const arm = () => {
+      timer = setTimeout(expire, DESTROY_STEP_TIMEOUT_MS);
+      timer.unref?.();
+    };
     try {
-      await Promise.race([
-        work(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
-            reject(new Error(`${name} timed out after ${DESTROY_STEP_TIMEOUT_MS}ms`));
-          }, DESTROY_STEP_TIMEOUT_MS);
-          timer.unref?.();
-        }),
-      ]);
+      if (retirementSource) {
+        stopObserving = observeShutdownDocumentRetirements(retirementSource, () => {
+          if (finished) return;
+          if (timer !== undefined) clearTimeout(timer);
+          arm();
+        });
+        arm();
+      }
+      const workPromise = work();
+      if (!retirementSource) arm();
+      await Promise.race([workPromise, timeout.promise]);
     } finally {
+      finished = true;
+      stopObserving?.();
       if (timer !== undefined) clearTimeout(timer);
     }
   };
@@ -665,9 +699,13 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
     log.info({ reason, pid: process.pid, lockDir }, `[server] shutdown initiated (${reason})`);
     readinessState = 'draining';
     const errors: unknown[] = [];
-    const runStep = async (name: string, work: () => Promise<void>): Promise<void> => {
+    const runStep = async (
+      name: string,
+      work: () => Promise<void>,
+      retirementSource?: ServerInstance['hocuspocus'],
+    ): Promise<void> => {
       try {
-        await withDestroyTimeout(name, work);
+        await withDestroyTimeout(name, work, retirementSource);
       } catch (err) {
         errors.push(err);
         log.warn({ err, step: name }, 'bootServer destroy step failed');
@@ -734,7 +772,7 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
           );
         }),
     );
-    await runStep('destroyHocuspocus', () => destroyHocuspocus());
+    await runStep('destroyHocuspocus', () => destroyHocuspocus(), hocuspocus);
     await runStep('shutdownTelemetry', () => shutdownTelemetry());
     await runStep('teardownToleranceTelemetry', () => teardownToleranceTelemetryWriter());
     await runStep('flushLogFileSinks', () => loggerFactory.flushAllFileSinks());

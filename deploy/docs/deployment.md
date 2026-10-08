@@ -17,7 +17,7 @@ This guide builds and runs OpenKnowledge in a container from this repository. Th
 | `scripts/tenant/setup-remotes.sh` | Makes `upstream` a fetch-only remote. Creates the release remote `github` when `SHARED_URL` is set. |
 | `scripts/tenant/scan.sh` | Scans the repository for secrets. It also applies your host rules when you give them. |
 | `scripts/tenant/public-check.sh` | Checks fork files for private content and checks publication identities. |
-| `scripts/tenant/public-check.rules`, `scripts/tenant/public-check.allow` | Generic content patterns and exact-place exceptions. |
+| `scripts/tenant/public-check.rules`, `scripts/tenant/public-check.allow` | Generic content patterns and exact-line exceptions. |
 | `scripts/tenant/install-hooks.sh` | Installs the `pre-commit` and `pre-push` hooks. |
 | `scripts/tenant/promote.sh` | Writes one snapshot release of `local-dev` on the branch `public`, tags it and pushes the two refs to a remote. |
 | `.gitleaks.toml` | Configures the secret scan. It holds no value of a specific host. |
@@ -186,12 +186,12 @@ A finding or an error stops promotion; no option bypasses it.
 The generic patterns are in `scripts/tenant/public-check.rules` as tab-separated class, rule ID and PCRE pattern fields.
 PCRE means Perl-compatible regular expressions; Git and `grep` must support them for the kit's content filters.
 The host list admits GitHub, Docker documentation, npm, Debian, Node.js, loopback addresses and example domains.
-A public host outside this short list needs an exact-place exception, not a whole-file exemption.
+A public host outside this short list needs an exact-line exception, not a whole-file exemption.
 Host-specific values and patterns belong only in the ignored file named by `ok.hostRules`.
 An unset key or `none` uses generic patterns only and prints `host rules: none`.
 A configured file must pass `scan.sh --validate-only` and use the single-line forms required by promotion.
 Path-only host rules flag matching fork paths; content rules check every matching line.
-Host-rule allowlists do not exempt this check. The tracked exact-place list rejects every `host-*` rule ID.
+Host-rule allowlists do not exempt this check. The tracked exact-line list rejects every `host-*` rule ID.
 A malformed rule, missing file or failed filter exits with 2 without printing private patterns.
 
 A finding prints only `file:line class-N`, never matched content.
@@ -201,18 +201,20 @@ Deleted files have no content to check.
 Changed submodules stop the check; unchanged upstream submodules remain outside its scope.
 Encoded or compressed values need a separate review.
 
-Each line of `scripts/tenant/public-check.allow` has five tab-separated fields: exact path, line number, rule ID, line hash and reason.
-Two rows may name the same path, line and rule with different hashes. This carries an exception through an upstream edit that moves the line: the row for the new position joins the list before the sync, and the row for the old position leaves after it.
+Each line of `scripts/tenant/public-check.allow` has four tab-separated fields: exact path, rule ID, line hash and reason.
+A row holds no line number, so an edit that moves the line keeps its exception. One row covers each line of the file that has the same content and matches the same rule. Two rows with the same path, rule and hash exit with 2 and name the second row.
 The hash comes from `git hash-object --stdin` with the complete line and one final newline.
-A changed line, moved exception or different rule therefore needs a new review.
+A changed line or different rule therefore needs a new review.
 No path glob or whole-file exception is accepted.
 The last field must contain a short, non-private reason. A missing or empty reason exits with 2 and names the row.
 Keep the reason in the commit message too, not in a code comment.
+A row that no match uses is stale. The check names the row on standard error and does not fail for it, so an upstream release that deletes an excepted line does not stop an update. Remove the row in the next change to the list.
+The test of the exception list is `scripts/tenant/public-check.test.sh`. It needs Git and no network.
 
 `scripts/tenant/public-check.development` lists exact files or directory prefixes ending in `/`, one path per line.
 The list includes `docs/agents/`; those documents describe development, not the public product.
 The content check skips these paths for all four classes and prints each skipped path as `development-only`.
-No exact-place exception may admit a development-only path.
+No exact-line exception may admit a development-only path.
 The dedicated `--development-only` check reads every release path, including unchanged upstream paths, and exits with 1 when any matches.
 Promotion removes these paths from the snapshot tree. It then runs the dedicated check on the snapshot commit and refuses a snapshot that still contains one.
 The same rule applies to `--visibility public` and `--visibility private`.

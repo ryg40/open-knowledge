@@ -122,9 +122,9 @@ It reads public GitHub release notes without authentication, for stable releases
 Missing target notes fail the action instead of producing an empty success.
 
 The JSON includes `breaking: true|false`, `text`, `breaking_changes`, and the original `releases`.
-`Major Changes`, `Minor Changes`, and explicit breaking-change sections appear before other text.
-Both change headings set `breaking: true`, because this repository uses minor releases for pre-1.0 breaking changes.
-Explicit breaking-change entries also set the flag. The command does not infer compatibility from source code.
+`Major Changes` sections, explicit breaking-change sections, and single entries with the word `breaking` or `backward-incompatible` appear before other text, and each sets `breaking: true`.
+A `Minor Changes` heading alone does not set the flag, because upstream uses a minor release for a new feature below 1.0.
+A phrase such as `no breaking changes` or `non-breaking` does not set the flag. The command does not infer compatibility from source code, and the `drift` object does not set the flag.
 
 The `drift` object lists these kit inputs:
 

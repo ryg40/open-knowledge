@@ -43,7 +43,7 @@ name: Desktop release
 #     GITHUB_TOKEN-authored release events. repository_dispatch is the
 #     documented exemption.
 #     See https://docs.github.com/en/actions/concepts/security/github_token.
-# Required secrets:
+# Required secrets, held in the release-signing environment (main only):
 #   macOS (identical shape to desktop-build.yml):
 #     CSC_LINK / CSC_KEY_PASSWORD
 #     APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID
@@ -123,6 +123,7 @@ jobs:
   # as it was; unifying it onto the bundle is a separate, QA-able change.)
   prepare:
     runs-on: ubuntu-latest
+    cache-mode: none
     timeout-minutes: 30
     permissions:
       # write, not read, for one reason: the "Assert the target Release
@@ -286,16 +287,11 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "24"
+          package-manager-cache: false
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-      - name: Get pnpm store directory
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
-      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-ok-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-ok-pnpm-store-
+          cache: false
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -471,6 +467,7 @@ jobs:
             packages/native-config/*.node
           retention-days: 3
           if-no-files-found: error
+          include-hidden-files: true
 
   # Deliberately does NOT `needs: prepare` — the mac job is self-contained
   # (own workspace build, no bundle consumption) and is the longest job in
@@ -490,6 +487,8 @@ jobs:
     # electron-builder compiles `build/okglass.icon` → `Assets.car` via
     # `actool`, which only ships with Xcode 26+.
     runs-on: macos-26
+    cache-mode: none
+    environment: release-signing
     timeout-minutes: 75
     permissions:
       # Explicit so a future step needing more fails at review, not with a
@@ -551,17 +550,11 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "24"
+          package-manager-cache: false
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-      - name: Get pnpm store directory
-        shell: bash
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
-      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-ok-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-ok-pnpm-store-
+          cache: false
 
       - name: Install dependencies
         env:
@@ -618,6 +611,41 @@ jobs:
             echo "::error::Cannot publish unsigned release — CSC_LINK is not set. auto-update requires signed DMGs."
             exit 1
           fi
+
+      # Force-install both darwin-arm64 and darwin-x64 prebuilt binaries for
+      # @napi-rs/keyring before electron-builder's universal merge runs. pnpm
+      # under workspace conditions only installs the host-arch optionalDependency
+      # (cpu constraint), so the darwin-x64 binary is missing on an arm64
+      # runner. @electron/universal's lipo merge then either errors or hangs
+      # waiting for x64 inputs that don't exist.
+      - name: Force-install darwin keyring prebuilds for universal merge
+        working-directory: packages/desktop
+        run: node scripts/prepare-universal.mjs
+
+      # Stage @parcel/watcher onto the bundled CLI's module path. This workflow
+      # invokes electron-builder directly (not the build:mac npm script, which
+      # DOES run this), so the step must be explicit here or the published DMG
+      # ships without @parcel/watcher on the CLI path and the server degrades to
+      # chokidar (#760).
+      - name: Stage @parcel/watcher for the bundled CLI
+        working-directory: packages/desktop
+        run: node scripts/stage-parcel-watcher.mjs
+
+      - name: Build desktop main/preload/renderer
+        working-directory: packages/desktop
+        run: pnpm run build:desktop
+
+      - name: Validate variant provisioning profile
+        if: steps.channel.outputs.variant == 'beta'
+        working-directory: packages/desktop
+        run: |
+          set -euo pipefail
+          PROFILE_PATH="build/embedded.${OK_DESKTOP_VARIANT}.provisionprofile"
+          if [[ ! -f "$PROFILE_PATH" ]]; then
+            echo "::error::The committed ${OK_DESKTOP_VARIANT} Developer ID provisioning profile is missing."
+            exit 1
+          fi
+          security cms -D -i "$PROFILE_PATH" >/dev/null
 
       # Stage the Developer ID cert in a keychain this job owns and hand it to
       # electron-builder via CSC_KEYCHAIN, instead of letting electron-builder
@@ -759,41 +787,6 @@ jobs:
           echo "APPLE_API_KEY=$KEY_PATH" >> "$GITHUB_ENV"
           echo "::notice::APPLE_API_KEY materialized to $KEY_PATH"
 
-      # Force-install both darwin-arm64 and darwin-x64 prebuilt binaries for
-      # @napi-rs/keyring before electron-builder's universal merge runs. pnpm
-      # under workspace conditions only installs the host-arch optionalDependency
-      # (cpu constraint), so the darwin-x64 binary is missing on an arm64
-      # runner. @electron/universal's lipo merge then either errors or hangs
-      # waiting for x64 inputs that don't exist.
-      - name: Force-install darwin keyring prebuilds for universal merge
-        working-directory: packages/desktop
-        run: node scripts/prepare-universal.mjs
-
-      # Stage @parcel/watcher onto the bundled CLI's module path. This workflow
-      # invokes electron-builder directly (not the build:mac npm script, which
-      # DOES run this), so the step must be explicit here or the published DMG
-      # ships without @parcel/watcher on the CLI path and the server degrades to
-      # chokidar (#760).
-      - name: Stage @parcel/watcher for the bundled CLI
-        working-directory: packages/desktop
-        run: node scripts/stage-parcel-watcher.mjs
-
-      - name: Build desktop main/preload/renderer
-        working-directory: packages/desktop
-        run: pnpm run build:desktop
-
-      - name: Validate variant provisioning profile
-        if: steps.channel.outputs.variant == 'beta'
-        working-directory: packages/desktop
-        run: |
-          set -euo pipefail
-          PROFILE_PATH="build/embedded.${OK_DESKTOP_VARIANT}.provisionprofile"
-          if [[ ! -f "$PROFILE_PATH" ]]; then
-            echo "::error::The committed ${OK_DESKTOP_VARIANT} Developer ID provisioning profile is missing."
-            exit 1
-          fi
-          security cms -D -i "$PROFILE_PATH" >/dev/null
-
       - name: Build + sign + notarize DMG/ZIP
         # electron-builder signs with the identity in CSC_KEYCHAIN (pushed
         # into $GITHUB_ENV by the "Prepare signing keychain" step). CSC_LINK
@@ -874,8 +867,12 @@ jobs:
           echo "::notice::Retry wrapper materialized from workflow SHA ${GITHUB_WORKFLOW_SHA}."
           node "$WRAPPER" --label "electron-builder (macOS)" --max-attempts 3 --deadline-epoch-ms "$PACKAGING_DEADLINE_EPOCH_MS" --attempt-timeout "30m" --retry-warning "A macOS packaging retry can create a duplicate Apple notarization submission; up to 3 attempts bound this to at most 2 duplicates." --shell -- "$PKG_CMD"
 
-      # Placed HERE, not at the end of the job (where desktop-build.yml keeps
-      # its twin): release-cascade-shape.test.mjs forbids `if: always()` on any
+      - name: Remove App Store Connect API key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
+
+      # Placed HERE, not at the end of the job:
+      # release-cascade-shape.test.mjs forbids `if: always()` on any
       # step from the DMG smoke gate onward, and nothing after packaging needs
       # the key (notarize + staple run inside afterSign.mjs). Tearing down
       # before the smoke also keeps the private key out of reach of the
@@ -954,6 +951,9 @@ jobs:
       - name: Smoke the packaged DMG (FR5b)
         id: dmg_smoke
         if: steps.channel.outputs.channel == 'latest'
+        # WARN: interim diagnostic bound behind the smoke driver's no-progress
+        #   watchdog; RELEASES.md "When the smoke stalls" derives it, so change both together.
+        timeout-minutes: 30
         env:
           RELEASE_TAG: ${{ github.event.client_payload.release_tag || inputs.release_tag }}
         run: |
@@ -1027,6 +1027,8 @@ jobs:
       matrix:
         variant: ${{ fromJSON(contains(github.event.client_payload.release_tag || inputs.release_tag, '-beta.') && '["legacy-beta","beta"]' || '["stable"]') }}
     runs-on: windows-latest
+    cache-mode: none
+    environment: release-signing
     timeout-minutes: 45
     env:
       OK_DESKTOP_VARIANT: ${{ matrix.variant }}
@@ -1053,16 +1055,11 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "24"
+          package-manager-cache: false
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-      - name: Get pnpm store directory
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
-      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-ok-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-ok-pnpm-store-
+          cache: false
 
       - name: Install dependencies
         env:
@@ -1072,7 +1069,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Download workspace bundle
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v5.0.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: workspace-bundle
           path: packages/
@@ -1161,7 +1158,7 @@ jobs:
           [[ -n "${AZURE_SIGNING_PROFILE:-}" ]] || missing+=(AZURE_SIGNING_PROFILE)
           [[ -n "${AZURE_SIGNING_PUBLISHER:-}" ]] || missing+=(AZURE_SIGNING_PUBLISHER)
           if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "::error::Cannot publish unsigned Windows installers — missing Azure Trusted Signing config: ${missing[*]}. Set the AZURE_* secrets + AZURE_SIGNING_* repo variables (see the workflow header), or use desktop-build-win-linux.yml for unsigned internal-QA builds."
+            echo "::error::Cannot publish unsigned Windows installers — missing Azure Trusted Signing config: ${missing[*]}. Set the AZURE_* secrets in the release-signing environment and the AZURE_SIGNING_* repo variables (see the workflow header), or use desktop-build-win-linux.yml for unsigned internal-QA builds."
             exit 1
           fi
           echo "::notice::Azure Trusted Signing credentials present — building SIGNED installers."
@@ -1353,6 +1350,7 @@ jobs:
     needs: prepare
     if: contains(needs.prepare.outputs.platforms, 'linux')
     runs-on: ${{ matrix.runner }}
+    cache-mode: none
     timeout-minutes: 45
     env:
       OK_DESKTOP_VARIANT: ${{ matrix.variant }}
@@ -1395,20 +1393,11 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "24"
+          package-manager-cache: false
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-      - name: Get pnpm store directory
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
-      # `runner.arch` is part of the key: both Linux cells report
-      # `runner.os == 'Linux'`, and a store populated on x64 carries none of the
-      # arm64 prebuilds (and vice versa), so a shared key would thrash the cache
-      # between cells on every run.
-      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-${{ runner.arch }}-ok-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-ok-pnpm-store-
+          cache: false
 
       - name: Install dependencies
         env:
@@ -1416,7 +1405,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Download workspace bundle
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v5.0.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: workspace-bundle
           path: packages/
@@ -1609,6 +1598,7 @@ jobs:
       (needs.build-windows.result == 'success' || !contains(needs.prepare.outputs.required, 'windows')) &&
       (needs.build-linux.result == 'success' || !contains(needs.prepare.outputs.required, 'linux'))
     runs-on: ubuntu-latest
+    cache-mode: none
     # Sized to the upload retry envelope: 3 bounded 300s attempts + backoffs
     # (see the upload step) plus download/verify overhead.
     timeout-minutes: 20
@@ -1630,7 +1620,7 @@ jobs:
       REQUIRED: ${{ needs.prepare.outputs.required }}
     steps:
       - name: Download all platform release assets
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v5.0.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: "*-release-assets"
           merge-multiple: true
@@ -1802,6 +1792,7 @@ jobs:
       needs.publish-assets.result == 'success' &&
       needs.build-macos.result == 'success'
     runs-on: ubuntu-latest
+    cache-mode: none
     timeout-minutes: 15
     permissions:
       # Body edit, draft→published flip, and the repository_dispatch POST all
@@ -1821,6 +1812,27 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Refuse to promote a superseded stable on a re-run
+        if: success() && needs.prepare.outputs.channel == 'latest' && github.run_attempt != '1' && github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! LATEST="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>"$RUNNER_TEMP/latest.err")"; then
+            if grep -q 'HTTP 404' "$RUNNER_TEMP/latest.err"; then
+              LATEST=""
+            else
+              cat "$RUNNER_TEMP/latest.err" >&2
+              echo "::error::Could not read the latest stable release, so ${RELEASE_TAG} is not promoted on re-run attempt ${GITHUB_RUN_ATTEMPT}."
+              exit 1
+            fi
+          fi
+          if [[ -n "$LATEST" && "$LATEST" != "$RELEASE_TAG" ]] \
+            && [[ "$(printf '%s\n%s\n' "$RELEASE_TAG" "$LATEST" | sort -V | tail -n1)" == "$LATEST" ]]; then
+            echo "::error::Refusing to promote ${RELEASE_TAG} on re-run attempt ${GITHUB_RUN_ATTEMPT}: the newer stable ${LATEST} has already shipped. Cut a new release from main instead."
+            exit 1
+          fi
 
       # Marker-delimited (`<!-- ok-downloads:start/end -->`) so re-renders are
       # idempotent and the rest of the body — the changelog and the beta
@@ -2078,6 +2090,7 @@ jobs:
     needs: finalize
     if: ${{ !cancelled() && needs.finalize.outputs.published == 'true' }}
     runs-on: ubuntu-latest
+    cache-mode: none
     timeout-minutes: 5
     permissions:
       contents: write
@@ -2124,10 +2137,12 @@ jobs:
     # below treat that as "not stable" (FR5c skips, STUCK-DRAFT still logs).
     if: ${{ !cancelled() && needs.finalize.result != 'success' }}
     runs-on: ubuntu-latest
+    cache-mode: none
     timeout-minutes: 10
     permissions:
-      # Reads scripts from the checkout, posts to a webhook — nothing more.
       contents: read
+      actions: read
+      checks: read
     defaults:
       run:
         shell: bash
@@ -2137,6 +2152,28 @@ jobs:
     steps:
       # $GITHUB_SHA — CI tooling, not release content (see finalize's header).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Decide on one automatic re-run
+        id: retry
+        if: needs.prepare.outputs.channel == 'latest'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SMOKE_VERDICT: ${{ needs.build-macos.outputs.smoke_verdict }}
+          DECISION_PATH: ${{ runner.temp }}/release-auto-retry/decision.json
+          REQUIRED_PLATFORMS: ${{ needs.prepare.outputs.required }}
+        run: node .github/scripts/decide-release-retry.mjs
+
+      - name: Hand the re-run to the follower workflow
+        id: handoff
+        if: steps.retry.outputs.action == 'retry'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-auto-retry
+          path: ${{ runner.temp }}/release-auto-retry/decision.json
+          retention-days: 1
+          if-no-files-found: error
 
       # FR5c — page the release channel when the gate refuses a stable
       # release. Without this a blocked release is silent: the Release simply
@@ -2158,8 +2195,12 @@ jobs:
       # .github/scripts/build-smoke-alert-payload.mjs. Ratcheted by
       # build-smoke-alert-payload.test.mjs so this cannot drift back.
       - name: Alert on a blocked release (FR5c)
-        if: needs.prepare.outputs.channel == 'latest'
+        if: needs.prepare.outputs.channel == 'latest' && (steps.retry.outputs.action != 'retry' || steps.handoff.outcome != 'success')
         env:
+          RETRY_OUTCOME: ${{ steps.retry.outcome }}
+          RETRY_ACTION: ${{ steps.retry.outputs.action }}
+          RETRY_REASON: ${{ steps.retry.outputs.reason }}
+          HANDOFF_OUTCOME: ${{ steps.handoff.outcome }}
           SLACK_RELEASES_WEBHOOK_URL: ${{ secrets.SLACK_RELEASES_WEBHOOK_URL }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SMOKE_VERDICT: ${{ needs.build-macos.outputs.smoke_verdict }}
@@ -2201,13 +2242,13 @@ jobs:
           is_required() { case ",${REQUIRED}," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
           blocked=()
           [[ "${RESULT_PREPARE}" == "failure" ]] && blocked+=("release preparation")
-          if [[ "${RESULT_MACOS}" == "failure" ]] && is_required mac; then
+          if [[ "${RESULT_MACOS}" == "failure" || "${RESULT_MACOS}" == "cancelled" ]] && is_required mac; then
             blocked+=("macOS packaging")
           fi
-          if [[ "${RESULT_WINDOWS}" == "failure" ]] && is_required windows; then
+          if [[ "${RESULT_WINDOWS}" == "failure" || "${RESULT_WINDOWS}" == "cancelled" ]] && is_required windows; then
             blocked+=("Windows packaging")
           fi
-          if [[ "${RESULT_LINUX}" == "failure" ]] && is_required linux; then
+          if [[ "${RESULT_LINUX}" == "failure" || "${RESULT_LINUX}" == "cancelled" ]] && is_required linux; then
             blocked+=("Linux packaging")
           fi
           [[ "${RESULT_PUBLISH}" == "failure" ]] && blocked+=("asset publication")
@@ -2221,6 +2262,13 @@ jobs:
             BLOCKED_BY="${BLOCKED_BY:+${BLOCKED_BY}, }${b}"
           done
           REASON="${SMOKE_REASON:-the release pipeline failed before completing — see the run}"
+          if [[ "${RETRY_OUTCOME:-}" == "failure" ]]; then
+            REASON="${REASON}. Not re-run automatically: the re-run decision failed, see the run"
+          elif [[ "${RETRY_ACTION:-}" == "retry" && "${HANDOFF_OUTCOME:-}" != "success" ]]; then
+            REASON="${REASON}. Not re-run automatically: handing the re-run to the follower workflow failed"
+          elif [[ -n "${RETRY_REASON:-}" ]]; then
+            REASON="${REASON}. Not re-run automatically: ${RETRY_REASON}"
+          fi
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           post() {
             local webhook="$1" label="$2"

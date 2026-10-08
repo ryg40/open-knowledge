@@ -4,6 +4,7 @@ import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 import type { EventChannels } from '../shared/ipc-events.ts';
 import { createHandler } from '../shared/ipc-handler.ts';
 import { type SendableWebContents, sendToRenderer } from '../shared/ipc-send.ts';
+import { PUBLIC_RELEASES_URL, releaseUrlFor } from '../shared/release-links.ts';
 import {
   classifyInstallFailure,
   type LinuxManualInstallContext,
@@ -90,6 +91,9 @@ export type DispatchKind =
   | 'relaunch-double-invoke-blocked'
   | 'check-now-already-pending'
   | 'check-now-watchdog-fired'
+  | 'check-now-relaunch-chosen'
+  | 'check-now-ready-reoffered'
+  | 'check-now-download-failed-shown'
   | 'toast-a-deferred-post-update-quiet'
   | 'toast-a-quiet-window-elapsed';
 
@@ -120,7 +124,7 @@ interface StartAutoUpdaterOpts {
     showManualInstallFallback: (ctx: LinuxManualInstallContext) => undefined | Promise<unknown>;
     stagedInstallerExists?: (path: string) => boolean;
   };
-  showCheckNowResult?: (result: CheckNowResult) => void;
+  showCheckNowResult?: (result: CheckNowResult) => undefined | Promise<CheckNowResultResponse>;
   clock?: Clock;
   now?: () => Date;
   random?: () => number;
@@ -128,17 +132,28 @@ interface StartAutoUpdaterOpts {
   logger?: Logger;
 }
 
+type CheckNowResultResponse = 'relaunch' | 'dismiss';
+
+type StagedRelaunch = 'available' | 'installing' | 'not-pending';
+
 type CheckNowResult =
   | { kind: 'available'; currentVersion: string; latestVersion: string }
-  | { kind: 'ready-to-install'; currentVersion: string; stagedVersion: string }
+  | {
+      kind: 'ready-to-install';
+      currentVersion: string;
+      stagedVersion: string;
+      relaunch: StagedRelaunch;
+    }
   | { kind: 'not-available'; currentVersion: string }
+  | { kind: 'updater-inactive' }
+  | { kind: 'download-failed'; latestVersion: string; message: string }
   | { kind: 'error'; message: string };
 
 export interface StartAutoUpdaterHandle {
   destroy(): void;
   checkForUpdatesNow(): Promise<unknown>;
   getActiveWhatsNew(): { version: string; releaseUrl: string } | null;
-  isWithinPostUpdateQuietWindow(): boolean;
+  getPendingUpdate(): { version: string } | null;
   suppressAutoInstallOnQuit(): void;
   recordInstallHandoffOnQuit(): void;
 }
@@ -183,9 +198,11 @@ const INSTALL_IN_FLIGHT_GRACE_MS = 30 * 60 * 1000;
 
 const INSTALL_DEFER_MAX_BOOTS = 3;
 
-export const STUCK_HINT_DOWNLOAD_URL = 'https://github.com/inkeep/open-knowledge/releases';
+export const STUCK_HINT_DOWNLOAD_URL = PUBLIC_RELEASES_URL;
 
 export const UPDATE_CHECK_FAILED_MESSAGE = 'The update check failed. Try again in a moment.';
+
+export const UPDATE_DOWNLOAD_FAILED_MESSAGE = 'Try Check for updates… again in a few minutes.';
 
 export const UPDATE_CHECK_WEDGED_MESSAGE = `OpenKnowledge is still waiting on the update server and will not check again until it restarts. Restart the app, or download the latest build from ${STUCK_HINT_DOWNLOAD_URL}.`;
 
@@ -197,9 +214,7 @@ export const POST_UPDATE_QUIET_MS = 10 * 60 * 1000;
 
 const WHATS_NEW_LIVE_WINDOW_MS = 60_000;
 
-export function releaseUrlFor(version: string): string {
-  return `https://github.com/inkeep/open-knowledge/releases/tag/v${encodeURIComponent(version)}`;
-}
+export { releaseUrlFor };
 
 function errorCode(err: unknown): string | undefined {
   if (!(err instanceof Error) || !('code' in err)) return undefined;
@@ -566,6 +581,8 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
       if (retrySettled || destroyed) return;
       retrySettled = true;
       fallbackRetryPending = false;
+      const owedDownloadFailure = menuDownloadFailureOwed;
+      menuDownloadFailureOwed = null;
       if (outcome !== 'resolved') {
         const ctx = {
           code: errorCode(outcome.rejected),
@@ -581,6 +598,7 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
         });
         settleMenuCheck({ kind: 'not-available', currentVersion: getAppVersion() });
       }
+      if (owedDownloadFailure !== null) reportMenuDownloadFailure(owedDownloadFailure);
     };
     void retryPromise.then(
       () => settleRetry('resolved'),
@@ -678,16 +696,61 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
     clock.clearTimeout(menuCheck.watchdog);
     menuCheck = null;
     broadcastToAllWindows('ok:update:manual-check', { phase: 'settled' });
-    if (result !== null) {
-      try {
-        showCheckNowResult?.(result);
-      } catch (err) {
-        logger.error('showCheckNowResult threw, check-now result dialog not shown', {
-          err,
-          result,
-        });
-      }
+    if (result === null) return;
+    if (result.kind === 'ready-to-install') reofferStagedForMenuCheck(result.stagedVersion);
+    presentCheckNowResult(result);
+  };
+
+  const presentCheckNowResult = (result: CheckNowResult): void => {
+    let response: ReturnType<NonNullable<typeof showCheckNowResult>>;
+    try {
+      response = showCheckNowResult?.(result);
+    } catch (err) {
+      logger.error('showCheckNowResult threw, check-now result dialog not shown', {
+        err,
+        result,
+      });
+      return;
     }
+    if (response === undefined) return;
+    void Promise.resolve(response).then(
+      (choice) => {
+        logger.info('check-now result dialog answered', { kind: result.kind, choice });
+        if (result.kind !== 'ready-to-install' || result.relaunch !== 'available') return;
+        if (choice !== 'relaunch' || destroyed) return;
+        onDispatch?.('check-now-relaunch-chosen');
+        return relaunchNow(result.stagedVersion).then(undefined, (err: unknown) => {
+          logger.error('check-now Update Ready dialog Quit and Restart failed', {
+            err,
+            stagedVersion: result.stagedVersion,
+          });
+        });
+      },
+      (err: unknown) => {
+        logger.error('check-now result dialog failed', { err, kind: result.kind });
+      },
+    );
+  };
+
+  const relaunchableVersion = (): string | null =>
+    installRequested ? null : readState().versionPendingInstall;
+
+  const stagedRelaunchFor = (version: string): StagedRelaunch => {
+    if (relaunchableVersion() === version) return 'available';
+    return installRequested ? 'installing' : 'not-pending';
+  };
+
+  const pendingToastA = (): { version: string } | null => {
+    if (withinPostUpdateQuietWindow()) return null;
+    const version = relaunchableVersion();
+    return version === null ? null : { version };
+  };
+
+  const reofferStagedForMenuCheck = (version: string): void => {
+    if (pendingToastA()?.version !== version) return;
+    broadcastToAllWindows('ok:update:downloaded', { version });
+    logger.info('check-now found the staged build ready — re-offered Toast A', { version });
+    onDispatch?.('check-now-ready-reoffered');
   };
 
   let relaunchInFlight: {
@@ -696,6 +759,20 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
   } | null = null;
 
   let stagingInFlight: { version: string } | null = null;
+
+  let menuDownloadFailureOwed: string | null = null;
+
+  const downloadFailedResult = (version: string): CheckNowResult => ({
+    kind: 'download-failed',
+    latestVersion: version,
+    message: UPDATE_DOWNLOAD_FAILED_MESSAGE,
+  });
+
+  const reportMenuDownloadFailure = (version: string): void => {
+    if (destroyed) return;
+    onDispatch?.('check-now-download-failed-shown');
+    presentCheckNowResult(downloadFailedResult(version));
+  };
 
   let stagedThisSession: string | null = null;
 
@@ -838,12 +915,16 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
     };
     const checkPromise = checkForUpdatesFromConfiguredFeed();
     void checkPromise
-      .then(() => {
-        // UPSTREAM(electron-updater@6.8.4): checkForUpdates emits its verdict event before its promise resolves, so a check still pending at resolve time produced no verdict; an inactive dev updater resolves the same way.
-        if (menuCheck !== null) {
-          logger.info('check-now resolved without a verdict');
-          settleMenuCheck(null);
+      .then((result) => {
+        // UPSTREAM(electron-updater@6.8.4): checkForUpdates emits its verdict event before its promise resolves, and resolves null without any event only when the updater is inactive.
+        if (menuCheck === null) return;
+        if (result === null) {
+          logger.info('check-now resolved null, updater inactive');
+          settleMenuCheck({ kind: 'updater-inactive' });
+          return;
         }
+        logger.info('check-now resolved without a verdict');
+        settleMenuCheck(null);
       })
       .catch((err: unknown) => {
         const retrying = revertToGithubFeed(err);
@@ -870,6 +951,16 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
     return channelFromVersion(offeredVersion) === buildChannel
       ? 'same-channel'
       : 'channel-mismatch';
+  };
+
+  const reportedDownloadFailures = new WeakSet<Promise<unknown>>();
+
+  const startDownload = (): { download: Promise<unknown>; threwSynchronously: boolean } => {
+    try {
+      return { download: updater.downloadUpdate(), threwSynchronously: false };
+    } catch (err) {
+      return { download: Promise.reject(err), threwSynchronously: true };
+    }
   };
 
   const onUpdateAvailable = (info: { version?: string }): void => {
@@ -910,9 +1001,15 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
         'x-ok-to-version': offeredVersion,
       };
     }
-    stagingInFlight = { version: offeredVersion ?? 'unknown' };
+    const staging = {
+      version: offeredVersion ?? 'unknown',
+      fromMenuCheck: menuCheck !== null || menuDownloadFailureOwed !== null,
+    };
+    menuDownloadFailureOwed = null;
+    stagingInFlight = staging;
     settleCheckWaiters('available');
-    void updater.downloadUpdate().catch((err: unknown) => {
+    const { download, threwSynchronously } = startDownload();
+    void download.catch((err: unknown) => {
       const code = err instanceof Error ? (err as Error & { code?: unknown }).code : undefined;
       const logFn = isClassifiedUpdaterError(err) ? logger.warn : logger.debug;
       logFn('downloadUpdate rejected', {
@@ -924,7 +1021,23 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
         stagingInFlight = null;
         settleStagingWaiters(false);
       }
+      if (!staging.fromMenuCheck || destroyed) return;
+      if (reportedDownloadFailures.has(download)) return;
+      reportedDownloadFailures.add(download);
+      if (fallbackRetryPending) {
+        menuDownloadFailureOwed = staging.version;
+        logger.info('menu-offered download failure deferred to the GitHub retry', {
+          version: staging.version,
+        });
+        return;
+      }
+      reportMenuDownloadFailure(staging.version);
     });
+    if (threwSynchronously && menuCheck !== null) {
+      reportedDownloadFailures.add(download);
+      onDispatch?.('check-now-download-failed-shown');
+      settleMenuCheck(downloadFailedResult(staging.version));
+    }
   };
 
   const onUpdateAvailableForMenuCheck = (info: { version?: string }): void => {
@@ -935,10 +1048,19 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
     }
     const armedVersion = declinedForStagedVersion(info.version);
     if (armedVersion !== null) {
+      const relaunch = stagedRelaunchFor(armedVersion);
+      if (relaunch !== 'available') {
+        logger.info('check-now found the staged build but withholds Quit and Restart', {
+          stagedVersion: armedVersion,
+          reason: relaunch,
+          pendingVersion: readState().versionPendingInstall,
+        });
+      }
       settleMenuCheck({
         kind: 'ready-to-install',
         currentVersion: getAppVersion(),
         stagedVersion: armedVersion,
+        relaunch,
       });
       return;
     }
@@ -1159,8 +1281,7 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
     );
   };
 
-  const register = createHandler(ipcMain as IpcMain);
-  register('ok:update:relaunch-now', async (_event: IpcMainInvokeEvent): Promise<undefined> => {
+  const relaunchNow = async (requestedVersion?: string): Promise<undefined> => {
     if (installRequested) {
       logger.warn('relaunch-now invoked while an install is already committed — ignoring');
       onDispatch?.('relaunch-double-invoke-blocked');
@@ -1168,7 +1289,14 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
     }
     const preRefresh = readState();
     if (!preRefresh.versionPendingInstall) {
-      logger.warn('relaunch-now invoked without versionPendingInstall — ignoring');
+      logger.warn('relaunch-now invoked without versionPendingInstall — ignoring', {
+        requestedVersion,
+      });
+      broadcastToAllWindows('ok:update:relaunch-failed', {
+        version: requestedVersion ?? stagedThisSession ?? '',
+        reason: 'no-longer-pending',
+        dismissPending: true,
+      });
       return undefined;
     }
     installRequested = true;
@@ -1182,7 +1310,7 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
       installRequested = false;
       broadcastToAllWindows('ok:update:relaunch-failed', {
         version: preRefresh.versionPendingInstall,
-        message: 'the update stopped being available',
+        reason: 'no-longer-pending',
         dismissPending: true,
       });
       return undefined;
@@ -1280,7 +1408,13 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
       throw err;
     }
     return undefined;
-  });
+  };
+
+  const register = createHandler(ipcMain as IpcMain);
+  register(
+    'ok:update:relaunch-now',
+    (_event: IpcMainInvokeEvent): Promise<undefined> => relaunchNow(),
+  );
 
   register('ok:update:check-now', (_event: IpcMainInvokeEvent): undefined => {
     void runMenuDrivenCheck();
@@ -1593,8 +1727,8 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
       }
       return { version: activeWhatsNew.version, releaseUrl: activeWhatsNew.releaseUrl };
     },
-    isWithinPostUpdateQuietWindow(): boolean {
-      return withinPostUpdateQuietWindow();
+    getPendingUpdate(): { version: string } | null {
+      return pendingToastA();
     },
     suppressAutoInstallOnQuit(): void {
       updater.autoInstallOnAppQuit = false;
@@ -1655,6 +1789,7 @@ export function startAutoUpdater(opts: StartAutoUpdaterOpts): StartAutoUpdaterHa
       settleMenuCheck(null);
       settleCheckWaiters('settled');
       stagingInFlight = null;
+      menuDownloadFailureOwed = null;
       settleStagingWaiters(false);
       const detach = (event: string, handler: (...args: unknown[]) => void): void => {
         try {

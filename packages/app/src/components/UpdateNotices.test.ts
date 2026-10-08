@@ -27,7 +27,13 @@ import {
 type UpdateDownloadedCb = (info: { version: string }) => void;
 type RelaunchingCb = (info: { version: string }) => void;
 type FetchingLatestCb = (info: { version: string }) => void;
-type RelaunchFailedCb = (info: { version: string; message?: string; downloadUrl?: string }) => void;
+type RelaunchFailedCb = (info: {
+  version: string;
+  message?: string;
+  downloadUrl?: string;
+  dismissPending?: boolean;
+  reason?: 'no-longer-pending';
+}) => void;
 type WhatsNewCb = (info: { version: string; releaseUrl: string }) => void;
 type WhatsNewDismissedCb = (info: { version: string }) => void;
 type StuckHintCb = (info: { downloadUrl: string }) => void;
@@ -44,6 +50,7 @@ interface FakeBridge {
   onUpdateManualCheck: ReturnType<typeof vi.fn>;
   update: {
     relaunchNow: ReturnType<typeof vi.fn>;
+    checkNow: ReturnType<typeof vi.fn>;
     dismissWhatsNew: ReturnType<typeof vi.fn>;
   };
   state: {
@@ -89,6 +96,7 @@ function makeFakeBridge(): FakeBridge {
     onUpdateManualCheck: vi.fn(() => {}),
     update: {
       relaunchNow: vi.fn(() => Promise.resolve(undefined)),
+      checkNow: vi.fn(() => Promise.resolve(undefined)),
       dismissWhatsNew: vi.fn(() => Promise.resolve(undefined)),
     },
     state: {
@@ -442,7 +450,7 @@ describe('Notice A cross-window relaunch — ok:update:relaunching', () => {
     bridge._fetchingLatest?.({ version: '0.1.1' });
     bridge._relaunchFailed?.({
       version: '0.1.1',
-      message: 'the update stopped being available',
+      message: 'the update timed out',
       dismissPending: true,
     });
 
@@ -450,7 +458,104 @@ describe('Notice A cross-window relaunch — ok:update:relaunching', () => {
     const error = addNotice.mock.calls.at(-1)?.[0] as UpdateNotice;
     expect(error.id).toBe('relaunch-error-0.1.1');
     expect(error.variant).toBe('error');
-    expect(error.body).toContain('the update stopped being available');
+    expect(error.body).toBe(`${TOAST_A_ERROR_BODY}: the update timed out`);
+  });
+
+  test('no-longer-pending says the update is not ready and offers a check, not a manual restart', () => {
+    const bridge = makeFakeBridge();
+    const addNotice = vi.fn<(notice: UpdateNotice) => void>(() => {});
+    const dismissed: string[] = [];
+    attachUpdateSubscribers(castBridge(bridge), addNotice, (id: string) => {
+      dismissed.push(id);
+    });
+
+    bridge._fetchingLatest?.({ version: '0.1.1' });
+    bridge._relaunchFailed?.({
+      version: '0.1.1',
+      reason: 'no-longer-pending',
+      dismissPending: true,
+    });
+
+    expect(dismissed).toContain('update-downloaded');
+    const notice = addNotice.mock.calls.at(-1)?.[0] as UpdateNotice;
+    expect(notice.id).toBe('update-no-longer-pending');
+    expect(notice.body).toBe('This update is no longer ready to install.');
+    expect(notice.body).not.toContain(TOAST_A_ERROR_BODY);
+    expect(notice.variant).toBeUndefined();
+    expect(notice.priority).toBe(1);
+    expect(notice.action?.label).toBe('Check for updates');
+    expect(notice.secondaryAction).toBeUndefined();
+  });
+
+  test('the no-longer-pending notice id does not depend on the version, even an empty one', () => {
+    const bridge = makeFakeBridge();
+    const addNotice = vi.fn<(notice: UpdateNotice) => void>(() => {});
+    attachUpdateSubscribers(castBridge(bridge), addNotice);
+
+    bridge._relaunchFailed?.({ version: '', reason: 'no-longer-pending', dismissPending: true });
+    bridge._relaunchFailed?.({
+      version: '0.1.1',
+      reason: 'no-longer-pending',
+      dismissPending: true,
+    });
+
+    expect(addNotice.mock.calls.map(([n]) => n.id)).toEqual([
+      'update-no-longer-pending',
+      'update-no-longer-pending',
+    ]);
+  });
+
+  test('Check for updates dismisses the notice and starts a check', async () => {
+    const bridge = makeFakeBridge();
+    const addNotice = vi.fn<(notice: UpdateNotice) => void>(() => {});
+    const dismissNotice = vi.fn<(id: string) => void>(() => {});
+    attachUpdateSubscribers(castBridge(bridge), addNotice, dismissNotice);
+    bridge._relaunchFailed?.({ version: '', reason: 'no-longer-pending', dismissPending: true });
+    dismissNotice.mockClear();
+
+    const notice = addNotice.mock.calls.at(-1)?.[0] as UpdateNotice;
+    notice.action?.onClick();
+    await Promise.resolve();
+
+    expect(dismissNotice).toHaveBeenCalledExactlyOnceWith('update-no-longer-pending');
+    expect(bridge.update.checkNow).toHaveBeenCalledTimes(1);
+    expect(bridge.update.relaunchNow).not.toHaveBeenCalled();
+  });
+
+  test('a rejected check from the no-longer-pending notice is logged, not thrown', async () => {
+    const bridge = makeFakeBridge();
+    const failure = new Error('updater offline');
+    bridge.update.checkNow = vi.fn(() => Promise.reject(failure));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const addNotice = vi.fn<(notice: UpdateNotice) => void>(() => {});
+    attachUpdateSubscribers(castBridge(bridge), addNotice);
+    bridge._relaunchFailed?.({ version: '', reason: 'no-longer-pending', dismissPending: true });
+
+    const notice = addNotice.mock.calls.at(-1)?.[0] as UpdateNotice;
+    notice.action?.onClick();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(warn).toHaveBeenCalledWith(
+      '[update-notice] check-for-updates from no-longer-pending rejected',
+      failure,
+    );
+    warn.mockRestore();
+  });
+
+  test('a newly downloaded build clears a stale no-longer-pending notice so the card can show', () => {
+    const bridge = makeFakeBridge();
+    const addNotice = vi.fn<(notice: UpdateNotice) => void>(() => {});
+    const dismissNotice = vi.fn<(id: string) => void>(() => {});
+    attachUpdateSubscribers(castBridge(bridge), addNotice, dismissNotice);
+    bridge._relaunchFailed?.({ version: '', reason: 'no-longer-pending', dismissPending: true });
+    dismissNotice.mockClear();
+
+    bridge._downloaded?.({ version: '0.1.2' });
+
+    expect(dismissNotice).toHaveBeenCalledExactlyOnceWith('update-no-longer-pending');
+    const card = addNotice.mock.calls.at(-1)?.[0] as UpdateNotice;
+    expect(card.id).toBe('update-downloaded');
   });
 
   test('an ordinary relaunch-failed leaves the banner alone (main re-arms it)', () => {
@@ -555,7 +660,7 @@ describe('Notice A — ok:update:downloaded', () => {
     expect(notice.id).toBe('update-downloaded');
     expect(notice.action?.label).toBe(TOAST_A_ACTION);
     expect(notice.variant).toBeUndefined();
-    expect(notice.priority).toBe(2);
+    expect(notice.priority).toBe(4);
     expect(notice.dismissible).toBeUndefined();
   });
 
@@ -642,6 +747,7 @@ describe('Notice A — ok:update:downloaded', () => {
     const dismissNotice = vi.fn<(id: string) => void>(() => {});
     attachUpdateSubscribers(castBridge(bridge), addNotice, dismissNotice);
     bridge._downloaded?.({ version: '0.1.1' });
+    dismissNotice.mockClear();
     const notice = addNotice.mock.calls[0]?.[0] as UpdateNotice;
     notice.action?.onClick();
     await Promise.resolve();
@@ -657,6 +763,7 @@ describe('Notice A — ok:update:downloaded', () => {
     const dismissNotice = vi.fn<(id: string) => void>(() => {});
     attachUpdateSubscribers(castBridge(bridge), addNotice, dismissNotice);
     bridge._downloaded?.({ version: '0.1.1' });
+    dismissNotice.mockClear();
     const notice = addNotice.mock.calls[0]?.[0] as UpdateNotice;
     notice.action?.onClick();
     await Promise.resolve();
@@ -715,7 +822,7 @@ describe('Notice B — ok:update:whats-new', () => {
     expect(notice.id).toBe('whats-new-0.3.1');
     expect(notice.action?.label).toBe(TOAST_B_ACTION);
     expect(notice.variant).toBe('success');
-    expect(notice.priority).toBe(4);
+    expect(notice.priority).toBe(5);
     notice.action?.onClick();
     expect(bridge.shell.openExternal).toHaveBeenCalledWith(releaseUrl);
   });
@@ -965,9 +1072,9 @@ describe('Notice E — schema-incompatibility refuse-downgrade', () => {
 });
 
 describe('pickActiveNotice', () => {
-  const a: UpdateNotice = { id: 'a', body: 'A', priority: 2 };
+  const a: UpdateNotice = { id: 'a', body: 'A', priority: 4 };
   const checking: UpdateNotice = { id: 'update-checking', body: 'Checking', priority: 3 };
-  const b: UpdateNotice = { id: 'b', body: 'B', priority: 4 };
+  const b: UpdateNotice = { id: 'b', body: 'B', priority: 5 };
   const c: UpdateNotice = { id: 'c', body: 'C', priority: 0 };
   const err: UpdateNotice = { id: 'err', body: 'Err', priority: 1, variant: 'error' };
 
@@ -987,14 +1094,60 @@ describe('pickActiveNotice', () => {
     expect(pickActiveNotice([b, a])).toBe(a);
   });
 
-  test('checking ranks below update notices and above whats-new', () => {
+  test('checking outranks the ready card and whats-new but not errors, stuck hint or schema', () => {
     expect(pickActiveNotice([b, checking])).toBe(checking);
-    expect(pickActiveNotice([b, checking, a])).toBe(a);
+    expect(pickActiveNotice([b, checking, a])).toBe(checking);
     expect(pickActiveNotice([b, checking, err])).toBe(err);
     expect(pickActiveNotice([b, checking, c])).toBe(c);
   });
 
-  test('relaunch-error (1) wins over A (2) and B (4) but not C (0)', () => {
+  test('an in-flight manual check shows over the ready card and gives it back when it settles', () => {
+    const bridge = makeFakeBridge();
+    let notices: UpdateNotice[] = [];
+    attachUpdateSubscribers(
+      castBridge(bridge),
+      (notice) => {
+        notices = [...notices.filter((n) => n.id !== notice.id), notice];
+      },
+      (id) => {
+        notices = notices.filter((n) => n.id !== id);
+      },
+    );
+
+    bridge._downloaded?.({ version: '0.1.1' });
+    bridge._manualCheck?.({ phase: 'started' });
+    expect(pickActiveNotice(notices)?.id).toBe('update-checking');
+
+    bridge._manualCheck?.({ phase: 'settled' });
+    expect(pickActiveNotice(notices)?.id).toBe('update-downloaded');
+  });
+
+  test.each(['relaunching', 'fetching-latest'] as const)(
+    'a manual check started during a relaunch (%s) keeps the relaunch progress on top',
+    (stage) => {
+      const bridge = makeFakeBridge();
+      let notices: UpdateNotice[] = [];
+      attachUpdateSubscribers(
+        castBridge(bridge),
+        (notice) => {
+          notices = [...notices.filter((n) => n.id !== notice.id), notice];
+        },
+        (id) => {
+          notices = notices.filter((n) => n.id !== id);
+        },
+      );
+
+      bridge._downloaded?.({ version: '0.1.1' });
+      if (stage === 'relaunching') bridge._relaunching?.({ version: '0.1.1' });
+      else bridge._fetchingLatest?.({ version: '0.1.1' });
+      bridge._manualCheck?.({ phase: 'started' });
+      expect(pickActiveNotice(notices)?.body).toBe(
+        stage === 'relaunching' ? TOAST_A_PROGRESS_BODY : TOAST_A_FETCHING_LATEST_BODY,
+      );
+    },
+  );
+
+  test('relaunch-error (1) wins over A (4) and B (5) but not C (0)', () => {
     expect(pickActiveNotice([a, b, err])).toBe(err);
     expect(pickActiveNotice([a, b, err, c])).toBe(c);
   });

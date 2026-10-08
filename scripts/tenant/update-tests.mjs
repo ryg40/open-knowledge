@@ -163,6 +163,9 @@ function glue(f, args, env) {
     held.on('close', (code) => done({ code, text }));
   });
 }
+function releases(f, body) {
+  writeFileSync(join(f.bin, 'releases'), `#!${process.execPath}\nconsole.log(${JSON.stringify(JSON.stringify([{ tag_name: `v${next}`, body }]))});\n`);
+}
 
 test('detect: no update, newest stable, changed base digest, and registry error', (context) => {
   const f = fixture(context);
@@ -274,18 +277,48 @@ test('notes: breaking sections come first and every kit input drift is listed', 
   const compatible = f.call('notes', ['--from', current, '--to', next, '--workdir', f.work]);
   assert.equal(compatible.code, 0); assert.equal(compatible.result.breaking, false);
 });
-test('notes: Minor Changes and Major Changes sections count as breaking and come first', (context) => {
+test('notes: a Major Changes section counts as breaking and comes first', (context) => {
   const f = fixture(context);
-  for (const section of ['Minor Changes', 'Major Changes']) {
-    const body = `### Patch Changes\n\n- A normal fix.\n\n### ${section}\n\n- Replace the old setting.\n\n### Improvements\n\n- A new option.`;
-    writeFileSync(join(f.bin, 'releases'), `#!${process.execPath}\nconsole.log(${JSON.stringify(JSON.stringify([{ tag_name: `v${next}`, body }]))});\n`);
-    const { result, code } = f.call('notes', ['--from', current, '--to', next, '--workdir', f.work]);
-    assert.equal(code, 0); assert.equal(result.breaking, true);
-    assert.match(result.breaking_changes[0].text, new RegExp(section));
-    assert.ok(result.breaking_changes.some((entry) => entry.text.includes('Replace the old setting')));
-    assert.ok(result.text.indexOf(section) < result.text.indexOf('A normal fix'));
-    assert.ok(result.text.indexOf('Replace the old setting') < result.text.indexOf('A new option'));
-  }
+  const body = '### Patch Changes\n\n- A normal fix.\n\n### Major Changes\n\n- Replace the old setting.\n\n### Improvements\n\n- A new option.';
+  releases(f, body);
+  const { result, code } = f.call('notes', ['--from', current, '--to', next, '--workdir', f.work]);
+  assert.equal(code, 0); assert.equal(result.breaking, true);
+  assert.match(result.breaking_changes[0].text, /Major Changes/);
+  assert.ok(result.breaking_changes.some((entry) => entry.text.includes('Replace the old setting')));
+  assert.ok(result.text.indexOf('Major Changes') < result.text.indexOf('A normal fix'));
+  assert.ok(result.text.indexOf('Replace the old setting') < result.text.indexOf('A new option'));
+});
+test('notes: a Minor Changes section with a plain feature note is not breaking, and the pull request title carries no marker', async (context) => {
+  const f = fixture(context);
+  const body = '### Minor Changes\n\n- Store an access token for any git host with `ok auth token --host <host> --username <username>` or from Settings → Git. `ok auth status` reports it without contacting GitHub.\n\n### Patch Changes\n\n- A normal fix.';
+  releases(f, body);
+  const tmp = dirname(f.work), bundle = join(tmp, 'sync.bundle'), token = 'test-not-a-credential-3';
+  const qualified = f.call('qualify', ['--version', next, '--workdir', f.work, '--bundle', bundle]).result;
+  const { result, code } = f.call('notes', ['--from', current, '--to', next, '--workdir', f.work]);
+  assert.equal(code, 0, JSON.stringify(result)); assert.equal(result.breaking, false);
+  assert.deepEqual(result.breaking_changes, []);
+  assert.ok(result.text.indexOf('Minor Changes') < result.text.indexOf('Patch Changes'));
+  const api = await tracker(context, []);
+  git(tmp, 'init', '-q', '--bare', 'remote/team/kit.git');
+  writeFileSync(join(tmp, 'qualify.json'), JSON.stringify(qualified)); writeFileSync(join(tmp, 'notes.json'), JSON.stringify(result));
+  const opened = await glue(f, ['pull-request', '--result', join(tmp, 'qualify.json'), '--notes', join(tmp, 'notes.json'), '--bundle', bundle], { OK_API_URL: api.url, OK_REPOSITORY: 'team/kit', OK_TOKEN: token, OK_SERVER_URL: `file://${join(tmp, 'remote')}`, GITHUB_OUTPUT: join(tmp, 'output') });
+  assert.equal(opened.code, 0, opened.text);
+  const posts = api.requests.filter((request) => request.method === 'POST');
+  assert.equal(posts.length, 1); assert.equal(posts[0].body.title, `Upstream sync v${next}`);
+  assert.doesNotMatch(posts[0].body.title, /BREAKING/);
+  assert.match(posts[0].body.body, /^No breaking change is marked in the release notes\./);
+  assert.match(posts[0].body.body, /ok auth token/);
+});
+test('notes: a note with the word BREAKING under Minor Changes is breaking and comes first', (context) => {
+  const f = fixture(context);
+  const body = '### Minor Changes\n\n- A new option.\n\n- BREAKING: Replace the old setting.\n\n### Patch Changes\n\n- A normal fix.';
+  releases(f, body);
+  const { result, code } = f.call('notes', ['--from', current, '--to', next, '--workdir', f.work]);
+  assert.equal(code, 0); assert.equal(result.breaking, true);
+  assert.equal(result.breaking_changes.length, 1);
+  assert.match(result.breaking_changes[0].text, /BREAKING: Replace the old setting/);
+  assert.ok(result.text.startsWith(`## ${next}\n- BREAKING: Replace the old setting.`));
+  assert.ok(result.text.indexOf('Replace the old setting') < result.text.indexOf('A new option'));
 });
 test('missing Node prints one JSON error object with exit 2', (context) => {
   const empty = mkdtempSync(join(tmpdir(), 'ok-update-path-'));

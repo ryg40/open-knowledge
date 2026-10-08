@@ -374,7 +374,7 @@ async function notes() {
     for (const text of entry.text.split(/\n(?=[-*] |#{1,6} )|\n\n+/).filter((block) => block.trim())) {
       const heading = text.match(/^(#{1,6}) /);
       const notice = text.replace(/\b(?:no|without) breaking changes?\b|\bnon[- ]breaking\b/gi, '');
-      const explicit = /\bbreaking\b|\bbackward.incompatible\b|\bmajor changes\b/i.test(notice) || Boolean(heading && /\bminor changes\b/i.test(notice));
+      const explicit = /\bbreaking\b|\bbackward.incompatible\b|\bmajor changes\b/i.test(notice);
       if (heading && heading[1].length <= breakingDepth) breakingDepth = 0;
       if (heading && explicit) breakingDepth = heading[1].length;
       (explicit || breakingDepth ? breaking : remaining).push({ version: entry.version, text });

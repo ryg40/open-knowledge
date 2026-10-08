@@ -20,6 +20,7 @@ vi.mock('electron', () => ({
 
 type BridgeProbe = {
   mcpServerName: string | null;
+  state: { query(): Promise<unknown> };
   config: {
     languagePreference?: string;
     themePreference?: string;
@@ -47,6 +48,9 @@ type BridgeProbe = {
       activeKey: string | null;
       terminalSnapshot: { tabs: []; activeOrdinal: null };
     }): Promise<{ ok: true } | { ok: false; reason: string }>;
+  };
+  userConfig: {
+    onChanged(cb: (snapshot: { text: string }) => void): () => void;
   };
   editor: {
     notifyViewMenuStateChanged(state: {
@@ -113,6 +117,26 @@ describe('preload argv config', () => {
     const bridge = await loadBridge();
 
     expect(bridge.mcpServerName).toBe('open-knowledge-beta');
+  });
+});
+
+describe('preload state query marshalling', () => {
+  it('state.query forwards to ok:state:query and passes the snapshot through', async () => {
+    const about = {
+      productName: 'OpenKnowledge',
+      version: '0.82.3',
+      releasesUrl: 'https://example.test/releases',
+      releaseNotesUrl: 'https://example.test/releases/tag/v0.82.3',
+      updateChecks: 'available',
+    };
+    const bridge = await loadBridge();
+    const snapshot = { channel: 'latest', schemaIncompatibility: null, about };
+    invokeMock.mockResolvedValueOnce(snapshot as never);
+
+    const result = await bridge.state.query();
+
+    expect(invokeMock.mock.calls.map((c) => c[0])).toEqual(['ok:state:query']);
+    expect(result).toEqual(snapshot);
   });
 });
 
@@ -197,6 +221,7 @@ describe('preload bugReport.create marshalling', () => {
       includeCrashDump: true,
       includeScreenshot: true,
       attachments: [{ contentType: 'image/png', bytes: new Uint8Array([1, 2, 3]) }],
+      crashEventId: 'boot:dump:1751871600000',
     };
 
     await bridge.bugReport.create(request);
@@ -289,5 +314,35 @@ describe('preload terminal dock-state marshalling', () => {
         terminalSnapshot: { tabs: [], activeOrdinal: null },
       }),
     ).resolves.toEqual({ ok: false, reason: 'ipc-unavailable' });
+  });
+});
+
+describe('preload userConfig subscription', () => {
+  function userConfigRequests(): unknown[] {
+    return invokeMock.mock.calls
+      .filter((c) => c[0] === 'ok:user-config:dispatch')
+      .map((c) => c[1] as unknown);
+  }
+
+  it('subscribes on listen and unsubscribes when the listener is disposed', async () => {
+    const bridge = await loadBridge();
+
+    const dispose = bridge.userConfig.onChanged(() => {});
+    expect(userConfigRequests()).toEqual([{ kind: 'subscribe' }]);
+
+    dispose();
+    expect(userConfigRequests()).toEqual([{ kind: 'subscribe' }, { kind: 'unsubscribe' }]);
+  });
+
+  it('does not hand the subscribe reply to the listener as a change', async () => {
+    invokeMock.mockResolvedValueOnce({ text: 'appearance:\n  theme: dark\n' } as never);
+    const bridge = await loadBridge();
+    const cb = vi.fn();
+
+    bridge.userConfig.onChanged(cb);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(cb).not.toHaveBeenCalled();
   });
 });

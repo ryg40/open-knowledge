@@ -40,6 +40,7 @@ export const okVitestBase = {
     testTimeout: 30_000,
     hookTimeout: 30_000,
     env: { DO_NOT_TRACK: '1' },
+    clearMocks: false,
     expect: { requireAssertions: true },
     tags: [
       {
@@ -60,6 +61,8 @@ export const okVitestBase = {
       '**/*.spec.*',
       '**/*.e2e.*',
       '**/*.dom.test.ts?(x)',
+      '**/*.browser.test.ts?(x)',
+      '**/*.node.test.ts?(x)',
       ...UNCACHED_TEST_GLOBS,
       '**/dist/**',
       '**/.next/**',

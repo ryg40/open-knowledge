@@ -119,7 +119,7 @@ Port, user ID and project name examples repeat values from the table. Review the
 |---|---|---|
 | Portable release tag | `portable-v0.3.1` | Target release for this file. Not verified: the tag exists. `git tag --list 'portable-v*'` lists available tags. |
 | Portable version | `0.3.1` | The release tag without `portable-v` |
-| Upstream version | `0.81.4` | `ARG OK_VERSION` in `deploy/Dockerfile` |
+| Upstream version | `0.83.2` | `ARG OK_VERSION` in `deploy/Dockerfile` |
 | Image tag | `open-knowledge:<upstream version>-p<portable version>` | The "Release identity" format in `deploy/docs/deployment.md`, with this release's versions |
 | Base image | `node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20` | `ARG NODE_IMAGE` in `deploy/Dockerfile` |
 | Node.js in the base image | `v24.21.0` | `node --version` in the image |
@@ -131,7 +131,7 @@ Port, user ID and project name examples repeat values from the table. Review the
 | Dockerfile frontend image | `docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e` | The `# syntax=` line of `deploy/Dockerfile` |
 | Scanner image | `zricethezav/gitleaks:v8.28.0@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854` | `default_image=` in `scripts/tenant/scan.sh` |
 | npm tarball of the native addons | `open-knowledge-<upstream version>.tgz` from `registry.npmjs.org` | Stage `native` of `deploy/Dockerfile` |
-| Tarball sha512 | `sha512-ZyS9zwX/wk32z9Kk/YXDO3ebldCQvc3YpVSB9pEpwebcxIkUVZZ+CIhJ3SUWB/Pk1tkJ7rdl3Tm49sBpMXc93Q==` | `ARG OK_NPM_INTEGRITY` in `deploy/Dockerfile` |
+| Tarball sha512 | `sha512-SdAjilt0vHnGsMPhBBP0WyAWeQJ4FZl+uQX0VKCEx7v41/0PjL0VHLORzBmjZ3RwYPCzm4xNSFVG7E80on+Xdw==` | `ARG OK_NPM_INTEGRITY` in `deploy/Dockerfile` |
 | pnpm version | `12.8.1` | `packageManager` in `package.json` |
 | Port in the container | `8080` | `PORT` in `deploy/compose.yaml`, `EXPOSE` in `deploy/Dockerfile` |
 | Default published address and port | `127.0.0.1:8080` | `OK_PUBLISH_ADDRESS` and `OK_PUBLISH_PORT` in `deploy/compose.yaml` |
@@ -161,7 +161,7 @@ The steps are the same as on Linux. The table gives the differences.
 |---|---|
 | Requirements | The Mac has Apple silicon (`arm64`). Podman is the container engine of this kit on a Mac. Install it with `brew install podman podman-compose`; both formulas have an `arm64` bottle. Node.js 24 comes with `brew install node@24`, also with an `arm64` bottle. |
 | Requirements | Make the VM with `podman machine init --cpus 4 --memory 8192` and start it with `podman machine start`. The build needs more than the default 2 CPUs and 2 GiB. |
-| 1 | Set `OK_CONTAINER_CLI=podman` in your shell. Each kit script then runs `podman` where this file shows `docker`. Type `podman compose` where this file shows `docker compose`. |
+| 1 | Put `export OK_CONTAINER_CLI=podman` in `~/.zshrc`, the startup file of zsh, the shell of macOS. Each kit script then runs `podman` where this file shows `docker`. Type `podman compose` where this file shows `docker compose`. |
 | 2 | Keep the clone under your home directory. The Podman VM shares that directory with the containers. |
 | 4, 6 | `scan.sh` and `smoke.sh` start their containers through the same CLI. Not verified on a Mac. |
 | 5 | The build makes a `linux/arm64` image. The `native` stage picks the `linux-arm64-gnu` addon file. Podman 4.8 or newer builds the heredoc `RUN` blocks of the Dockerfile and ignores its `# syntax=` line. Not verified: `deploy/Dockerfile.dockerignore` as the ignore file of the build. |
@@ -684,9 +684,9 @@ A configured file must pass the secret scanner's configuration validation and us
 The check prints only `file:line class-N`, without matched text.
 Exit 0 means clean, exit 1 means findings, and exit 2 means the check cannot run.
 
-Exceptions are in `scripts/tenant/public-check.allow` as exact path, line number, rule ID, line hash and reason fields.
+Exceptions are in `scripts/tenant/public-check.allow` as exact path, rule ID, line hash and reason fields.
 The fields use tabs; the hash covers the full line with one final newline.
-A moved or changed line needs a new exception review.
+A changed line needs a new exception review; a moved line keeps its exception. A row that no match uses gets a note on standard error.
 The last field needs a short, non-private reason. A missing reason or a `host-*` rule ID exits with 2.
 No whole-file exception exists; explain each exact exception in the commit message too.
 

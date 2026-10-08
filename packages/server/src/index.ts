@@ -260,9 +260,11 @@ export {
 } from './handoff-api.ts';
 export { type ProjectHeadState, readProjectHeadState } from './head-watcher.ts';
 export {
-  assertNotHomeProjectRoot,
+  assertSafeProjectRoot,
   canonicalizeForCompare,
+  FilesystemRootProjectError,
   HomeProjectRootError,
+  isFilesystemRoot,
   isHomeDir,
 } from './home-project-root.ts';
 export {
@@ -508,6 +510,7 @@ export {
   type StarterPackInfo,
 } from './seed/index.ts';
 export { serializeError } from './serialize-error.ts';
+export { ServerAuthorityCollisionError, ServerAuthorityRegistryError } from './server-authority.ts';
 export { createServer, type ServerInstance, type ServerOptions } from './server-factory.ts';
 export {
   acquireServerLock,
@@ -569,6 +572,7 @@ export {
   type GitHubAuthHostResult,
   loginShapedUserinfoUser,
   readDeclaredGitHubHosts,
+  readOriginCredentialHost,
   readOriginGitHubRepo,
   resolveGitHubAuthHost,
   sameGitHubLogin,
@@ -637,7 +641,11 @@ export {
   writeBundleDecision,
   writeTargetVersion,
 } from './skill-state.ts';
-export { reportSkillInstall, type SkillInstallReport } from './skills-sh-install-report.ts';
+export {
+  isSkillInstallReportEnvOptOut,
+  reportSkillInstall,
+  type SkillInstallReport,
+} from './skills-sh-install-report.ts';
 export {
   CURSOR_BUNDLE_PATHS_BY_PLATFORM,
   type HandleSpawnCursorDeps,

@@ -245,7 +245,7 @@ scripts/tenant/ci.sh image
 
 When `qualify` fails, the run fails, the artifact `qualify` holds the log of each stage, and the job `pull-request` does not start. The workflow then opens no pull request.
 
-The pull request carries the release notes as its text, and the changed kit inputs as JSON. For a breaking change, the title starts with `[BREAKING]` and the first line of the text is `BREAKING CHANGE`. A change of the base image digest or of the scanner image digest opens no pull request: the job `detect` prints a warning line that names the pin.
+The pull request carries the release notes as its text, and the changed kit inputs as JSON. When the release notes hold a `Major Changes` section or an entry with the word `breaking`, the title starts with `[BREAKING]` and the first line of the text is `BREAKING CHANGE`. A `Minor Changes` heading alone does not set the marker. A change of the base image digest or of the scanner image digest opens no pull request: the job `detect` prints a warning line that names the pin.
 
 At most one pull request is open for each version. The job `detect` stops the run when one is open, and the job `pull-request` looks again before the push. A closed pull request does not stop the next run: turn the schedule off, or merge a newer version, to stop a version that you refuse.
 

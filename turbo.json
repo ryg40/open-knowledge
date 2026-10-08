@@ -2,6 +2,9 @@
   "$schema": "https://turbo.build/schema.json",
   "cacheDir": ".turbo/cache",
   "agentGuidance": false,
+  "futureFlags": {
+    "experimentalTaskCommand": true
+  },
   "remoteCache": {
     "signature": true
   },
@@ -18,6 +21,16 @@
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".next/**", "!.next/cache/**", "!.next/dev/**"]
+    },
+    "@inkeep/open-knowledge-core#build:output": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"],
+      "command": ["node", "scripts/build-output.mjs", "produce"]
+    },
+    "@inkeep/open-knowledge-core#build": {
+      "dependsOn": ["build:output"],
+      "cache": false,
+      "command": ["node", "scripts/build-output.mjs", "complete"]
     },
     "build:desktop": {
       "dependsOn": ["^build", "@inkeep/open-knowledge#build"],
@@ -60,6 +73,7 @@
       ]
     },
     "//#test:uncached": {
+      "dependsOn": ["@inkeep/open-knowledge-core#build"],
       "cache": false,
       "inputs": []
     },
@@ -70,6 +84,10 @@
         "scripts/check-published-dts.mjs",
         "$TURBO_ROOT$/scripts/read-jsonc.mjs"
       ]
+    },
+    "@inkeep/open-knowledge-core#check:dts": {
+      "dependsOn": ["build"],
+      "inputs": ["tsconfig.json", "tsconfig.check.json", "tests/contract/subpath-types/consumer.ts"]
     },
     "@inkeep/open-knowledge-docs#build": {
       "dependsOn": ["^build", "typecheck"],
@@ -165,6 +183,19 @@
         "../md-conformance/src/**/*.json",
         "../md-conformance/corpora/typed-view-scripts.json"
       ]
+    },
+    "test:browser": {
+      "dependsOn": ["^build"],
+      "cache": false,
+      "passThroughEnv": [
+        "VITEST_CHROMIUM_GC_DISK_THRESHOLD_GB",
+        "VITEST_CHROMIUM_GC_FORCE",
+        "DEBUG"
+      ]
+    },
+    "test:node": {
+      "dependsOn": ["^build"],
+      "cache": false
     },
     "test:integration": {
       "dependsOn": ["^build"],

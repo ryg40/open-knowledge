@@ -156,11 +156,14 @@ awk -F '\t' '
 ' "$tmp/generic" || cannot_run "invalid generic rules"
 awk -F '\t' '
   FILENAME == ARGV[1] { development[$0] = 1; next }
-  $3 ~ /^host-/ {
+  $2 ~ /^host-/ {
     printf "public-check: allow list line %s: host rule IDs cannot be allowed\n", FNR > "/dev/stderr"; exit 2
   }
-  NF != 5 || $1 == "" || $1 ~ /(^\/|(^|\/)\.\.?(\/|$)|[*?\[\\])/ || $2 !~ /^[1-9][0-9]*$/ || $3 !~ /^[a-z][a-z0-9-]+$/ || $4 !~ /^[a-f0-9]+$/ || (length($4) != 40 && length($4) != 64) || $5 !~ /[^[:space:]]/ || seen[$1 SUBSEP $2 SUBSEP $3 SUBSEP $4]++ {
+  NF != 4 || $1 == "" || $1 ~ /(^\/|(^|\/)\.\.?(\/|$)|[*?\[\\])/ || $2 !~ /^[a-z][a-z0-9-]+$/ || $3 !~ /^[a-f0-9]+$/ || (length($3) != 40 && length($3) != 64) || $4 !~ /[^[:space:]]/ {
     printf "public-check: allow list line %s: invalid row or empty reason\n", FNR > "/dev/stderr"; exit 2
+  }
+  seen[$1 SUBSEP $2 SUBSEP $3]++ {
+    printf "public-check: allow list line %s: duplicate row\n", FNR > "/dev/stderr"; exit 2
   }
   {
     for (path in development) {
@@ -170,9 +173,9 @@ awk -F '\t' '
         printf "public-check: allow list line %s: development-only paths cannot be allowed\n", FNR > "/dev/stderr"; exit 2
       }
     }
-    print $1 "\t" $2 "\t" $3 "\t" $4
+    print $1 "\t" $2 "\t" $3
   }
-' "$tmp/development" "$tmp/allow" > "$tmp/allow-keys" || cannot_run "invalid exact-place allow list"
+' "$tmp/development" "$tmp/allow" > "$tmp/allow-keys" || cannot_run "invalid exact-line allow list"
 awk -F '\t' -v separator="$separator" '{ print $1 separator $2 separator "" separator $3 }' "$tmp/generic" > "$tmp/rules" || cannot_run "generic rules cannot be read"
 host_file=$(git config --type=path --get ok.hostRules || true)
 if [ -n "$host_file" ] && [ "$host_file" != none ]; then
@@ -243,6 +246,7 @@ for list in fork selected; do
 done
 awk 'FILENAME == ARGV[1] { fork[$0] = 1; next } fork[$0] && !seen[$0]++ { print }' "$tmp/fork" "$tmp/selected" > "$tmp/files" || cannot_run "fork paths cannot be selected"
 : > "$tmp/findings"
+: > "$tmp/allow-used"
 while IFS= read -r file; do
   if development_only "$file"; then
     printf '%s development-only\n' "$file"
@@ -279,14 +283,25 @@ while IFS= read -r file; do
     while IFS= read -r line; do
       awk -v number="$line" 'NR == number { print; exit }' "$tmp/content" > "$tmp/line" || cannot_run "matched line cannot be read"
       hash=$(git hash-object --stdin < "$tmp/line") || cannot_run "line hash cannot be read"
-      allowance=$(printf '%s\t%s\t%s\t%s' "$file" "$line" "$rule" "$hash")
+      allowance=$(printf '%s\t%s\t%s' "$file" "$rule" "$hash")
       allow_status=0
       grep -Fqx -- "$allowance" "$tmp/allow-keys" || allow_status=$?
       [ "$allow_status" -le 1 ] || cannot_run "allow list cannot be read"
-      if [ "$allow_status" -eq 1 ]; then printf '%s:%s %s\n' "$file" "$line" "$class" >> "$tmp/findings"; fi
+      if [ "$allow_status" -eq 1 ]; then
+        printf '%s:%s %s\n' "$file" "$line" "$class" >> "$tmp/findings"
+      else
+        printf '%s\n' "$allowance" >> "$tmp/allow-used"
+      fi
     done < "$tmp/matches"
   done < "$tmp/rules"
 done < "$tmp/files"
+awk -F '\t' -v mode="$mode" '
+  FILENAME == ARGV[1] { used[$0] = 1; next }
+  FILENAME == ARGV[2] { checked[$0] = 1; next }
+  !used[$0] && (mode != "staged" || checked[$1]) {
+    printf "public-check: allow list line %s: stale row, no %s match in %s has this hash\n", FNR, $2, $1 > "/dev/stderr"
+  }
+' "$tmp/allow-used" "$tmp/files" "$tmp/allow-keys" || cannot_run "stale allow rows cannot be listed"
 sort -u "$tmp/findings" || cannot_run "findings cannot be sorted"
 [ ! -s "$tmp/findings" ] || exit 1
 exit 0

@@ -3,6 +3,7 @@ import type {
   OkDeepLinkPayload,
   OkNoteWindowMainAction,
   OkOnboardingToastPayload,
+  OkUserConfigSnapshot,
 } from '@inkeep/open-knowledge-core/desktop-bridge';
 import type {
   OkDesktopConfig,
@@ -16,6 +17,7 @@ import type {
   OkServerRestartedInfo,
   OkServerVersionDriftInfo,
   OkShareReceivedPayload,
+  OkUpdateRelaunchFailedInfo,
 } from './bridge-contract.ts';
 import type {
   McpWiringEditorDetection,
@@ -33,14 +35,7 @@ export interface EventChannels {
   'ok:update:downloaded': { payload: { version: string } };
   'ok:update:relaunching': { payload: { version: string } };
   'ok:update:fetching-latest': { payload: { version: string } };
-  'ok:update:relaunch-failed': {
-    payload: {
-      version: string;
-      message?: string;
-      downloadUrl?: string;
-      dismissPending?: boolean;
-    };
-  };
+  'ok:update:relaunch-failed': { payload: OkUpdateRelaunchFailedInfo };
   'ok:update:whats-new': { payload: { version: string; releaseUrl: string } };
   'ok:update:whats-new-dismissed': { payload: { version: string } };
   'ok:update:stuck-hint': { payload: { downloadUrl: string } };
@@ -80,4 +75,5 @@ export interface EventChannels {
   'ok:pty:notice': { payload: OkPtyNotice };
   'ok:accessibility:changed': { payload: { screenReaderActive: boolean } };
   'ok:bug-report:crash-detected': { payload: OkBugReportCrashDetectedEvent };
+  'ok:user-config:changed': { payload: OkUserConfigSnapshot };
 }

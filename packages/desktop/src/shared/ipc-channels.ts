@@ -2,6 +2,7 @@ import type {
   ApplyReport,
   BranchInfoResponse,
   CheckoutResponse,
+  ConfigPatch,
   CreateNewBannerKind,
   EditorId,
   HandoffFailureReason,
@@ -61,11 +62,13 @@ import type {
   OkSharingStatusResult,
   OkSlidesOpenResult,
   OkSlidesStatusResult,
+  OkStateSnapshot,
   OkTerminalDockState,
   OkTerminalDockStateUpdate,
   OkTerminalDockStateWriteResult,
   OkThemeSource,
-  OkUpdateChannel,
+  OkUserConfigPatchResult,
+  OkUserConfigSnapshot,
   OkSeedApplyOptions as SeedApplyOptions,
   OkSeedPlanOptions as SeedPlanOptions,
   SlidevOpenFailureReason,
@@ -177,14 +180,7 @@ export interface HandoffStatsLine {
 
 export type McpWiringEditorId = EditorId;
 
-type OnboardingWarningKind =
-  | 'root'
-  | 'home'
-  | 'home-documents'
-  | 'home-desktop'
-  | 'home-downloads'
-  | 'volumes-mount'
-  | 'drive-root';
+type OnboardingWarningKind = 'home-documents' | 'home-desktop' | 'home-downloads' | 'volumes-mount';
 
 type OnboardingGitState = 'present' | 'absent' | 'shell-only';
 
@@ -373,6 +369,13 @@ interface DialogOpenFolderOpts {
   readonly defaultPath?: string;
 }
 
+export type UserConfigDispatchRequest =
+  | { kind: 'set-language-preference'; preference: LanguagePreference }
+  | { kind: 'read' }
+  | { kind: 'subscribe' }
+  | { kind: 'unsubscribe' }
+  | { kind: 'patch'; patch: ConfigPatch };
+
 export const TYPED_IPC_MIGRATION_CHANNEL_CAP = 95;
 
 export interface RequestChannels {
@@ -553,22 +556,12 @@ export interface RequestChannels {
   'ok:update:relaunch-now': { args: []; result: undefined };
   'ok:update:check-now': { args: []; result: undefined };
   'ok:update:whats-new-dismiss': { args: [{ version: string }]; result: undefined };
-  'ok:state:query': {
-    args: [];
-    result: {
-      channel: OkUpdateChannel;
-      schemaIncompatibility: {
-        currentBuild: string;
-        persistedSchemaVersion: number;
-        maxSupported: number;
-      } | null;
-    };
-  };
+  'ok:state:query': { args: []; result: Required<OkStateSnapshot> };
   'ok:state:reset-incompatible': { args: []; result: undefined };
   'ok:theme:set-source': { args: [params: { source: OkThemeSource }]; result: { ok: true } };
-  'ok:locale:set-preference': {
-    args: [params: { preference: LanguagePreference }];
-    result: { ok: true };
+  'ok:user-config:dispatch': {
+    args: [request: UserConfigDispatchRequest];
+    result: { ok: true } | OkUserConfigSnapshot | OkUserConfigPatchResult;
   };
   'ok:theme:applied': {
     args: [opts?: { reducedTransparency?: boolean; chrome?: OkChromeColors }];

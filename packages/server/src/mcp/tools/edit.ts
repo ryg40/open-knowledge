@@ -28,6 +28,7 @@ import {
   agentIdentityFields,
   CANONICAL_COMPONENT_GUIDANCE,
   documentResultBaseShape,
+  errorTextWithDetail,
   HOCUSPOCUS_NOT_RUNNING_ERROR,
   httpPost,
   httpPut,
@@ -185,14 +186,7 @@ async function handleDocBody(
     ...(args.summary !== undefined ? { summary: args.summary } : {}),
     ...agentIdentityFields(identity),
   });
-  if (!result.ok) {
-    const detail =
-      typeof result.detail === 'string' && result.detail.length > 0 ? result.detail : '';
-    return textResult(
-      detail ? `Error: ${result.error} (${detail})` : `Error: ${result.error}`,
-      true,
-    );
-  }
+  if (!result.ok) return textResult(errorTextWithDetail(result), true);
   return composeWritePreviewResult(
     result,
     normalized.docName,
@@ -222,16 +216,16 @@ async function handleDocFrontmatter(
     ...agentIdentityFields(identity),
   });
   if (!result.ok) {
-    const errorText = result.error as string;
+    const errorText = errorTextWithDetail(result);
     const fieldErrors =
       result.fieldErrors && typeof result.fieldErrors === 'object'
         ? (result.fieldErrors as Record<string, string>)
         : undefined;
     if (fieldErrors) {
       const lines = Object.entries(fieldErrors).map(([k, m]) => `  ${k}: ${m}`);
-      return textResult(`Error: ${errorText}\n${lines.join('\n')}`, true);
+      return textResult(`${errorText}\n${lines.join('\n')}`, true);
     }
-    return textResult(`Error: ${errorText}`, true);
+    return textResult(errorText, true);
   }
   const setKeys: string[] = [];
   const deleteKeys: string[] = [];
@@ -656,7 +650,7 @@ export function register(server: ServerInstance, deps: EditDeps): void {
           .object(documentResultBaseShape)
           .optional()
           .describe(
-            'Document edit result. Always present on a successful document edit (body or frontmatter) — it carries `brokenLinks` (possibly `[]`) plus any `brokenLinkSuppression`/`summary`/`warnings`. Read `brokenLinkSuppression` before concluding anything from an empty `brokenLinks`: when it is present, a project policy withheld findings and none of them is yours to repair. Absent only for folder/template edits.',
+            'Document edit result. Always present on a successful document edit (body or frontmatter) — it carries `brokenLinks` (possibly `[]`) plus any `brokenLinkSuppression`/`summary`/`warnings`. Read `brokenLinkSuppression` and `warnings` before concluding anything from an empty `brokenLinks`: a suppression means a project policy withheld findings that are not yours to repair; a `link-check-deferred` warning means links were not checked yet. Absent only for folder/template edits.',
           ),
         folder: z
           .object({

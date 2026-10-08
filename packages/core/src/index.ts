@@ -443,10 +443,13 @@ export { SHOW_INSTALL_SKILL } from './constants/feature-flags.ts';
 export type { OkFolderState } from './constants/folder-state.ts';
 export {
   classifyGitHubShareHost,
+  credentialHostFromRemoteUrl,
   DEFAULT_GITHUB_OAUTH_CLIENT_ID,
   declaredGitHubHostsFrom,
   GIT_HOST_PROVIDERS,
   type GitHostProvider,
+  gitCredentialHostKey,
+  isGitCredentialHost,
   isGitHubHost,
   normalizeGitHostname,
 } from './constants/github.ts';
@@ -499,6 +502,8 @@ export {
   MENU_LABELS,
   type MenuLabelKey,
   menuLabelForPlatform,
+  OPEN_KNOWLEDGE_DISCORD_URL,
+  OPEN_KNOWLEDGE_DOCS_URL,
   OPEN_KNOWLEDGE_GITHUB_URL,
   PLATFORM_MENU_LABELS,
 } from './constants/menu-labels.ts';
@@ -557,6 +562,8 @@ export { isReservedLogDoc } from './constants/reserved-docs.ts';
 export { DEFAULT_SERVER_HOST } from './constants/server.ts';
 export {
   MACHINE_ID_FILENAME,
+  SERVER_AUTHORITY_LEASES_DIRNAME,
+  SERVER_AUTHORITY_REGISTRY_FILENAME,
   SHARED_OK_ENTRIES,
   SKILL_MOVE_RETAINED_FILENAME,
   SKILL_PLACEMENTS_FILENAME,
@@ -1374,6 +1381,8 @@ export {
   isWriteWarningKind,
   type LifecycleStatus,
   LifecycleStatusSchema,
+  type LinkCheckDeferredWarning,
+  LinkCheckDeferredWarningSchema,
   type LinkGraphDocNode,
   LinkGraphDocNodeSchema,
   type LinkGraphEdge,
@@ -1406,6 +1415,10 @@ export {
   LocalOpAuthSetIdentityRequestSchema,
   type LocalOpAuthStatusSuccess,
   LocalOpAuthStatusSuccessSchema,
+  type LocalOpAuthTokenRequest,
+  LocalOpAuthTokenRequestSchema,
+  type LocalOpAuthTokenSuccess,
+  LocalOpAuthTokenSuccessSchema,
   type LocalOpCloneRequest,
   LocalOpCloneRequestSchema,
   type LocalOpEmbeddingsMutationSuccess,
@@ -2143,6 +2156,26 @@ export {
 } from './utils/slug.ts';
 export { expandTagToHierarchy, tagsMatchingPrefix } from './utils/tag-rollup.ts';
 export {
+  type DependencySlug,
+  dependencySlug,
+  type IdentityKey,
+  identityKey,
+  leafKey,
+  TARGET_IDENTITY,
+  type TargetKind,
+  wikiAssetPathKey,
+} from './utils/target-identity.ts';
+export {
+  addDocumentFolders,
+  asTargetNamespace,
+  createTargetNamespace,
+  isTargetNamespace,
+  type MutableTargetNamespace,
+  resolveName,
+  type TargetMatch,
+  type TargetNamespace,
+} from './utils/target-namespace.ts';
+export {
   hasUninstallFeedbackContent,
   type PostUninstallFeedbackOptions,
   postUninstallFeedback,
@@ -2156,6 +2189,7 @@ export {
   buildPagesByBasenameIndex,
   buildPagesBySlugIndex,
   buildWikiLinkAssetTargetKeys,
+  createWikiAssetResolver,
   getWikiLinkResolutionCandidates,
   isResolvedWikiLinkTarget,
   resolveWikiLinkAssetTarget,

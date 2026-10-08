@@ -29,6 +29,7 @@ import {
   UPDATE_CHECK_INTERVAL_MS,
   UPDATE_CHECK_JITTER_MS,
   UPDATE_CHECK_WEDGED_MESSAGE,
+  UPDATE_DOWNLOAD_FAILED_MESSAGE,
   type UpdaterLike,
   versionAtLeast,
 } from '../../src/main/auto-updater.ts';
@@ -38,6 +39,10 @@ import {
   evaluateSchemaCompatibility,
   MAX_SUPPORTED_SCHEMA_VERSION,
 } from '../../src/main/state-store.ts';
+import {
+  replayUpdateNoticesOnEveryLoad,
+  type UpdateNoticeReplayTarget,
+} from '../../src/main/update-notice-replay.ts';
 import type { SendableWebContents } from '../../src/shared/ipc-send.ts';
 
 interface SendTarget {
@@ -4119,7 +4124,10 @@ describe('check-now → showCheckNowResult feedback dispatch', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(rig.clock.clearTimeout).toHaveBeenCalledWith(watchdogHandle);
       expect(manualCheckPhases(rig)).toEqual(['started', 'settled']);
-      expect(showCheckNowResult).toHaveBeenCalledTimes(outcome === 'resolve' ? 0 : 1);
+      expect(showCheckNowResult).toHaveBeenCalledTimes(1);
+      if (outcome === 'resolve') {
+        expect(showCheckNowResult).toHaveBeenCalledWith({ kind: 'updater-inactive' });
+      }
       showCheckNowResult.mockClear();
       watchdog.cb();
       expect(showCheckNowResult).not.toHaveBeenCalled();
@@ -4160,11 +4168,41 @@ describe('check-now → showCheckNowResult feedback dispatch', () => {
     );
   });
 
+  test('an inactive updater shows the updater-inactive result and allows another manual check', async () => {
+    const showCheckNowResult = vi.fn(() => {});
+    const { rig } = makeRig({ showCheckNowResult });
+    await Promise.resolve();
+    let phasesAtDialog: Array<'started' | 'settled'> = [];
+    showCheckNowResult.mockImplementation(() => {
+      phasesAtDialog = manualCheckPhases(rig);
+    });
+    rig.updater.checkForUpdates = vi.fn(() => Promise.resolve(null));
+
+    rig.ipc.invoke('ok:update:check-now');
+    const [watchdogHandle, watchdog] = liveTimerFor(rig.clock, MANUAL_CHECK_WATCHDOG_MS);
+    expect(manualCheckPhases(rig)).toEqual(['started']);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(phasesAtDialog).toEqual(['started', 'settled']);
+    expect(showCheckNowResult).toHaveBeenCalledTimes(1);
+    expect(showCheckNowResult).toHaveBeenCalledWith({ kind: 'updater-inactive' });
+    expect(rig.clock.clearTimeout).toHaveBeenCalledWith(watchdogHandle);
+    watchdog.cb();
+    expect(showCheckNowResult).toHaveBeenCalledTimes(1);
+
+    rig.ipc.invoke('ok:update:check-now');
+    expect(rig.updater.checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(manualCheckPhases(rig)).toEqual(['started', 'settled', 'started']);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(manualCheckPhases(rig)).toEqual(['started', 'settled', 'started', 'settled']);
+    expect(showCheckNowResult).toHaveBeenCalledTimes(2);
+    expect(showCheckNowResult).toHaveBeenLastCalledWith({ kind: 'updater-inactive' });
+  });
+
   test('a verdict-less check settles silently and allows another manual check', async () => {
     const showCheckNowResult = vi.fn(() => {});
     const { rig } = makeRig({ showCheckNowResult });
     await Promise.resolve();
-    rig.updater.checkForUpdates = vi.fn(() => Promise.resolve(null));
+    rig.updater.checkForUpdates = vi.fn(() => Promise.resolve(undefined));
 
     rig.ipc.invoke('ok:update:check-now');
     expect(manualCheckPhases(rig)).toEqual(['started']);
@@ -4329,6 +4367,238 @@ describe('check-now → showCheckNowResult feedback dispatch', () => {
       kind: 'not-available',
       currentVersion: '0.5.0-beta.21',
     });
+  });
+});
+
+describe('a download that fails after the menu check said "available"', () => {
+  const offered = { kind: 'available', currentVersion: '0.4.0', latestVersion: '0.5.0' } as const;
+  const downloadFailed = {
+    kind: 'download-failed',
+    latestVersion: '0.5.0',
+    message: UPDATE_DOWNLOAD_FAILED_MESSAGE,
+  } as const;
+
+  function assetMissing(): Error {
+    return Object.assign(new Error('Cannot find OpenKnowledge-amd64.deb in the latest release'), {
+      code: 'ERR_UPDATER_ASSET_NOT_FOUND',
+    });
+  }
+
+  test.each(['error-then-reject', 'reject-only'] as const)(
+    'shows a download-failed dialog after the available dialog (%s)',
+    async (failure) => {
+      const showCheckNowResult = vi.fn(() => {});
+      const { rig } = makeRig({
+        appVersion: '0.4.0',
+        platform: 'linux',
+        proxyFeed: { base: PROXY_BASE, channels: new Set(['latest']) },
+        showCheckNowResult,
+      });
+      await Promise.resolve();
+      rig.updater.downloadUpdate.mockImplementation(() =>
+        failure === 'error-then-reject'
+          ? rejectAfterErrorEvent(rig.updater, assetMissing())
+          : Promise.reject(assetMissing()),
+      );
+      rig.ipc.invoke('ok:update:check-now');
+      rig.updater.emit('update-available', { version: '0.5.0' });
+      expect(showCheckNowResult).toHaveBeenCalledExactlyOnceWith(offered);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(showCheckNowResult.mock.calls).toEqual([[offered], [downloadFailed]]);
+      expect(manualCheckPhases(rig)).toEqual(['started', 'settled']);
+      expect(rig.dispatches).toContain('check-now-download-failed-shown');
+    },
+  );
+
+  test('a synchronous asset-not-found throw from downloadUpdate reports only the download failure', async () => {
+    const showCheckNowResult = vi.fn(() => {});
+    const { rig } = makeRig({
+      appVersion: '0.4.0',
+      platform: 'linux',
+      proxyFeed: { base: PROXY_BASE, channels: new Set(['latest']) },
+      showCheckNowResult,
+    });
+    await Promise.resolve();
+    rig.updater.downloadUpdate.mockImplementation(() => {
+      throw assetMissing();
+    });
+    rig.ipc.invoke('ok:update:check-now');
+    expect(() => rig.updater.emit('update-available', { version: '0.5.0' })).not.toThrow();
+    expect(showCheckNowResult).toHaveBeenCalledExactlyOnceWith(downloadFailed);
+    expect(manualCheckPhases(rig)).toEqual(['started', 'settled']);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(showCheckNowResult.mock.calls).toEqual([[downloadFailed]]);
+    expect(rig.dispatches.filter((kind) => kind === 'check-now-download-failed-shown')).toEqual([
+      'check-now-download-failed-shown',
+    ]);
+  });
+
+  test('two menu checks sharing one in-flight download report its failure once', async () => {
+    const showCheckNowResult = vi.fn(() => {});
+    const download = Promise.withResolvers<never>();
+    const { rig } = makeRig({
+      appVersion: '0.4.0',
+      platform: 'linux',
+      proxyFeed: { base: PROXY_BASE, channels: new Set(['latest']) },
+      showCheckNowResult,
+      updaterSetup: (updater) => {
+        updater.downloadUpdate = vi.fn(() => download.promise);
+      },
+    });
+    await Promise.resolve();
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.5.0' });
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.5.0' });
+    download.reject(assetMissing());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(showCheckNowResult.mock.calls).toEqual([[offered], [offered], [downloadFailed]]);
+  });
+
+  test('a menu check that joins a background download in flight reports its failure once', async () => {
+    const showCheckNowResult = vi.fn(() => {});
+    const download = Promise.withResolvers<never>();
+    const { rig } = makeRig({
+      appVersion: '0.4.0',
+      platform: 'linux',
+      proxyFeed: { base: PROXY_BASE, channels: new Set(['latest']) },
+      showCheckNowResult,
+      updaterSetup: (updater) => {
+        updater.downloadUpdate = vi.fn(() => download.promise);
+      },
+    });
+    await Promise.resolve();
+    rig.updater.emit('update-available', { version: '0.5.0' });
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.5.0' });
+    expect(rig.updater.downloadUpdate).toHaveBeenCalledTimes(2);
+    download.reject(assetMissing());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(showCheckNowResult.mock.calls).toEqual([[offered], [downloadFailed]]);
+  });
+
+  test('a launch or periodic download failure stays log-only', async () => {
+    const showCheckNowResult = vi.fn(() => {});
+    const { rig } = makeRig({
+      appVersion: '0.4.0',
+      proxyFeed: { base: PROXY_BASE, channels: new Set(['latest']) },
+      showCheckNowResult,
+    });
+    await Promise.resolve();
+    rig.updater.downloadUpdate.mockImplementation(() =>
+      rejectAfterErrorEvent(rig.updater, assetMissing()),
+    );
+    rig.updater.emit('update-available', { version: '0.5.0' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(rig.updater.downloadUpdate).toHaveBeenCalledTimes(1);
+    expect(showCheckNowResult).not.toHaveBeenCalled();
+    expect(rig.dispatches).not.toContain('check-now-download-failed-shown');
+  });
+
+  test('a failed download never arms the ready card or a pending install', async () => {
+    const showCheckNowResult = vi.fn(() => {});
+    const { rig } = makeRig({
+      appVersion: '0.4.0',
+      platform: 'linux',
+      proxyFeed: { base: PROXY_BASE, channels: new Set(['latest']) },
+      showCheckNowResult,
+    });
+    await Promise.resolve();
+    rig.updater.downloadUpdate.mockImplementation(() =>
+      rejectAfterErrorEvent(rig.updater, assetMissing()),
+    );
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.5.0' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.5.0' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(rig.captured.filter((entry) => entry.channel === 'ok:update:downloaded')).toEqual([]);
+    expect(rig.state.versionPendingInstall).toBeNull();
+    expect(rig.state.attemptedInstall).toBeNull();
+    expect(showCheckNowResult.mock.calls).toEqual([
+      [offered],
+      [downloadFailed],
+      [offered],
+      [downloadFailed],
+    ]);
+  });
+
+  test.each([
+    { retry: 'downloads', dialogs: [[offered]] },
+    { retry: 'not-available', dialogs: [[offered], [downloadFailed]] },
+    { retry: 'download-fails', dialogs: [[offered], [downloadFailed]] },
+    { retry: 'check-fails', dialogs: [[offered], [downloadFailed]] },
+  ] as const)(
+    'a proxy download failure waits for the GitHub retry before reporting (retry $retry)',
+    async ({ retry, dialogs }) => {
+      const showCheckNowResult = vi.fn(() => {});
+      const { rig } = makeRig({
+        appVersion: '0.4.0',
+        proxyFeed: { base: PROXY_BASE, channels: new Set(['latest']) },
+        showCheckNowResult,
+      });
+      await Promise.resolve();
+      const proxyDownloadError = Object.assign(new Error('proxy unavailable'), {
+        code: 'HTTP_ERROR_503',
+      });
+      rig.updater.checkForUpdates.mockImplementation(() => {
+        const feed = rig.updater.setFeedURL.mock.calls.at(-1)?.[0];
+        if (typeof feed !== 'object' || feed.provider !== 'github') {
+          return Promise.resolve(undefined);
+        }
+        if (retry === 'check-fails') {
+          return rejectAfterErrorEvent(
+            rig.updater,
+            Object.assign(new Error('GitHub unavailable'), { code: 'HTTP_ERROR_503' }),
+          );
+        }
+        return new Promise<undefined>((resolve) => setTimeout(resolve, 0)).then(() => {
+          rig.updater.emit(
+            retry === 'not-available' ? 'update-not-available' : 'update-available',
+            { version: '0.5.0' },
+          );
+          return undefined;
+        });
+      });
+      rig.updater.downloadUpdate.mockImplementation(() => {
+        if (rig.updater.downloadUpdate.mock.calls.length === 1) {
+          return rejectAfterErrorEvent(rig.updater, proxyDownloadError);
+        }
+        if (retry === 'download-fails') {
+          return rejectAfterErrorEvent(rig.updater, assetMissing());
+        }
+        rig.updater.emit('update-downloaded', { version: '0.5.0' });
+        return Promise.resolve([]);
+      });
+      rig.ipc.invoke('ok:update:check-now');
+      rig.updater.emit('update-available', { version: '0.5.0' });
+      for (let tick = 0; tick < 4; tick++) await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(rig.updater.setFeedURL).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: 'github' }),
+      );
+      expect(showCheckNowResult.mock.calls).toEqual(dialogs);
+      expect(manualCheckPhases(rig)).toEqual(['started', 'settled']);
+    },
+  );
+
+  test('destroy before the download fails shows no dialog', async () => {
+    const showCheckNowResult = vi.fn(() => {});
+    const download = Promise.withResolvers<never>();
+    const { rig, handle } = makeRig({
+      appVersion: '0.4.0',
+      proxyFeed: { base: PROXY_BASE, channels: new Set(['latest']) },
+      showCheckNowResult,
+      updaterSetup: (updater) => {
+        updater.downloadUpdate = vi.fn(() => download.promise);
+      },
+    });
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.5.0' });
+    handle.destroy();
+    download.reject(assetMissing());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(showCheckNowResult.mock.calls).toEqual([[offered]]);
   });
 });
 
@@ -5494,6 +5764,7 @@ describe('single-flight install handoff', () => {
       kind: 'ready-to-install',
       currentVersion: '0.3.1',
       stagedVersion: '0.3.2',
+      relaunch: 'available',
     });
   });
 
@@ -5515,6 +5786,7 @@ describe('single-flight install handoff', () => {
       kind: 'ready-to-install',
       currentVersion: '0.3.1',
       stagedVersion: '0.3.2',
+      relaunch: 'available',
     });
   });
 
@@ -5539,6 +5811,7 @@ describe('single-flight install handoff', () => {
         kind: 'ready-to-install',
         currentVersion: '0.3.1',
         stagedVersion: '0.3.2',
+        relaunch: 'available',
       });
     },
   );
@@ -5752,7 +6025,11 @@ describe('click-gated freshness check', () => {
     for (const win of rig.windows) {
       const failed = win.filter((c) => c.channel === 'ok:update:relaunch-failed');
       expect(failed).toHaveLength(1);
-      expect(failed[0]?.payload).toMatchObject({ version: '0.3.2', dismissPending: true });
+      expect(failed[0]?.payload).toEqual({
+        version: '0.3.2',
+        reason: 'no-longer-pending',
+        dismissPending: true,
+      });
       expect(win.filter((c) => c.channel === 'ok:update:downloaded')).toHaveLength(0);
     }
   });
@@ -5858,29 +6135,50 @@ describe('the commit flag releases on every path that re-offers the click', () =
 describe('post-update quiet window', () => {
   test('a banner arriving right after an update is held, not dropped', () => {
     const { rig, handle } = makeRig({ lastSeenVersion: '0.3.0', appVersion: '0.3.1' });
-    expect(handle.isWithinPostUpdateQuietWindow()).toBe(true);
 
     rig.updater.emit('update-downloaded', { version: '0.3.2' });
 
     expect(rig.captured.filter((c) => c.channel === 'ok:update:downloaded')).toHaveLength(0);
     expect(rig.dispatches).toContain('toast-a-deferred-post-update-quiet' as DispatchKind);
     expect(rig.state.versionPendingInstall).toBe('0.3.2');
+    expect(handle.getPendingUpdate()).toBeNull();
 
     fireTimerFor(rig.clock, POST_UPDATE_QUIET_MS);
 
     expect(rig.captured.filter((c) => c.channel === 'ok:update:downloaded')).toHaveLength(1);
     expect(rig.dispatches).toContain('toast-a-quiet-window-elapsed' as DispatchKind);
-    expect(handle.isWithinPostUpdateQuietWindow()).toBe(false);
+    expect(handle.getPendingUpdate()).toEqual({ version: '0.3.2' });
   });
 
   test('a fresh install does not arm it', () => {
-    const { handle } = makeRig({ lastSeenVersion: null, appVersion: '0.3.1' });
-    expect(handle.isWithinPostUpdateQuietWindow()).toBe(false);
+    const { handle } = makeRig({
+      lastSeenVersion: null,
+      appVersion: '0.3.1',
+      versionPendingInstall: '0.3.2',
+    });
+    expect(handle.getPendingUpdate()).toEqual({ version: '0.3.2' });
   });
 
   test('a plain relaunch on the same version does not arm it', () => {
-    const { handle } = makeRig({ lastSeenVersion: '0.3.1', appVersion: '0.3.1' });
-    expect(handle.isWithinPostUpdateQuietWindow()).toBe(false);
+    const { handle } = makeRig({
+      lastSeenVersion: '0.3.1',
+      appVersion: '0.3.1',
+      versionPendingInstall: '0.3.2',
+    });
+    expect(handle.getPendingUpdate()).toEqual({ version: '0.3.2' });
+  });
+
+  test('a build staged by an earlier session is held while the window runs', () => {
+    const { rig, handle } = makeRig({
+      lastSeenVersion: '0.3.0',
+      appVersion: '0.3.1',
+      versionPendingInstall: '0.3.2',
+    });
+    expect(handle.getPendingUpdate()).toBeNull();
+
+    rig.now = new Date(rig.now.getTime() + POST_UPDATE_QUIET_MS);
+
+    expect(handle.getPendingUpdate()).toEqual({ version: '0.3.2' });
   });
 
   test('linux does not arm it — the banner there is the only install route', () => {
@@ -5889,21 +6187,561 @@ describe('post-update quiet window', () => {
       lastSeenVersion: '0.3.0',
       appVersion: '0.3.1',
     });
-    expect(handle.isWithinPostUpdateQuietWindow()).toBe(false);
 
     rig.updater.emit('update-downloaded', { version: '0.3.2' });
 
     expect(rig.captured.filter((c) => c.channel === 'ok:update:downloaded')).toHaveLength(1);
     expect(rig.dispatches).not.toContain('toast-a-deferred-post-update-quiet' as DispatchKind);
+    expect(handle.getPendingUpdate()).toEqual({ version: '0.3.2' });
   });
 
   test('outside the window the banner fires immediately, as before', () => {
     const { rig, handle } = makeRig({ lastSeenVersion: '0.3.1', appVersion: '0.3.1' });
-    expect(handle.isWithinPostUpdateQuietWindow()).toBe(false);
 
     rig.updater.emit('update-downloaded', { version: '0.3.2' });
 
     expect(rig.captured.filter((c) => c.channel === 'ok:update:downloaded')).toHaveLength(1);
     expect(rig.dispatches).toContain('update-downloaded-toast-a' as DispatchKind);
+    expect(handle.getPendingUpdate()).toEqual({ version: '0.3.2' });
+  });
+});
+
+function downloadedBroadcasts(sends: CapturedSend[]): unknown[] {
+  return sends.filter((c) => c.channel === 'ok:update:downloaded').map((c) => c.payload);
+}
+
+async function settleAsyncWork(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+describe('Update Ready dialog offers Quit and Restart', () => {
+  test('choosing Quit and Restart installs through the same path as the in-app Relaunch', async () => {
+    const showCheckNowResult = vi.fn(() => Promise.resolve('relaunch' as const));
+    const prepareForRelaunch = vi.fn(() => {});
+    const { rig } = makeRig({
+      versionPendingInstall: null,
+      showCheckNowResult,
+      prepareForRelaunch,
+      extraWindowCount: 1,
+    });
+    stageInSession(rig, '0.3.2');
+
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.3.2' });
+    await settleAsyncWork();
+
+    expect(showCheckNowResult).toHaveBeenCalledWith({
+      kind: 'ready-to-install',
+      currentVersion: '0.3.1',
+      stagedVersion: '0.3.2',
+      relaunch: 'available',
+    });
+    expect(rig.logger.info).toHaveBeenCalledWith('check-now result dialog answered', {
+      kind: 'ready-to-install',
+      choice: 'relaunch',
+    });
+    expect(rig.dispatches).toContain('check-now-relaunch-chosen' as DispatchKind);
+    expect(prepareForRelaunch).toHaveBeenCalledTimes(1);
+    expect(rig.updater.quitAndInstall).toHaveBeenCalledTimes(1);
+    expect(rig.state.versionPendingInstall).toBeNull();
+    expect(rig.state.attemptedInstall).toBe('0.3.2');
+    for (const win of rig.windows) {
+      expect(win.filter((c) => c.channel === 'ok:update:relaunching')).toHaveLength(1);
+    }
+    expect(rig.dispatches).toContain('relaunch-now' as DispatchKind);
+    expect(rig.logger.error).not.toHaveBeenCalled();
+  });
+
+  test('choosing Later logs the answer and leaves the staged build alone', async () => {
+    const showCheckNowResult = vi.fn(() => Promise.resolve('dismiss' as const));
+    const { rig } = makeRig({ versionPendingInstall: null, showCheckNowResult });
+    stageInSession(rig, '0.3.2');
+
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.3.2' });
+    await settleAsyncWork();
+
+    expect(showCheckNowResult).toHaveBeenCalledTimes(1);
+    expect(rig.logger.info).toHaveBeenCalledWith('check-now result dialog answered', {
+      kind: 'ready-to-install',
+      choice: 'dismiss',
+    });
+    expect(rig.updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(rig.captured.filter((c) => c.channel === 'ok:update:relaunching')).toHaveLength(0);
+    expect(rig.dispatches).not.toContain('check-now-relaunch-chosen' as DispatchKind);
+    expect(rig.state.versionPendingInstall).toBe('0.3.2');
+    expect(rig.logger.error).not.toHaveBeenCalled();
+  });
+
+  test('a relaunch answer to any other verdict is ignored, even with a build staged', async () => {
+    const showCheckNowResult = vi.fn(() => Promise.resolve('relaunch' as const));
+    const { rig } = makeRig({ versionPendingInstall: null, showCheckNowResult });
+    stageInSession(rig, '0.3.2');
+
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-not-available', { version: '0.3.1' });
+    await settleAsyncWork();
+
+    expect(showCheckNowResult).toHaveBeenCalledWith({
+      kind: 'not-available',
+      currentVersion: '0.3.1',
+    });
+    expect(rig.state.versionPendingInstall).toBe('0.3.2');
+    expect(rig.dispatches).not.toContain('check-now-relaunch-chosen' as DispatchKind);
+    expect(rig.updater.quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  test('a dialog that rejects logs the dialog failure and installs nothing', async () => {
+    const dialogError = new Error('dialog torn down');
+    const showCheckNowResult = vi.fn(() => Promise.reject(dialogError));
+    const { rig } = makeRig({ versionPendingInstall: null, showCheckNowResult });
+    stageInSession(rig, '0.3.2');
+
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.3.2' });
+    await settleAsyncWork();
+
+    expect(rig.updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(rig.logger.error).toHaveBeenCalledTimes(1);
+    expect(rig.logger.error).toHaveBeenCalledWith('check-now result dialog failed', {
+      err: dialogError,
+      kind: 'ready-to-install',
+    });
+    expect(rig.logger.info).not.toHaveBeenCalledWith(
+      'check-now result dialog answered',
+      expect.anything(),
+    );
+  });
+
+  test('a failed Quit and Restart logs the relaunch failure and re-arms the card', async () => {
+    const showCheckNowResult = vi.fn(() => Promise.resolve('relaunch' as const));
+    const { rig } = makeRig({ versionPendingInstall: null, showCheckNowResult });
+    stageInSession(rig, '0.3.2');
+    const handoffError = new Error('squirrel refused the handoff');
+    rig.updater.quitAndInstall = vi.fn(() => {
+      throw handoffError;
+    });
+    rig.captured.length = 0;
+
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.3.2' });
+    await settleAsyncWork();
+
+    expect(rig.state.versionPendingInstall).toBe('0.3.2');
+    expect(rig.dispatches).toContain('relaunch-failed-rearm' as DispatchKind);
+    expect(rig.captured.filter((c) => c.channel === 'ok:update:relaunch-failed')).toHaveLength(1);
+    expect(rig.logger.info).toHaveBeenCalledWith('check-now result dialog answered', {
+      kind: 'ready-to-install',
+      choice: 'relaunch',
+    });
+    expect(rig.logger.error).toHaveBeenCalledTimes(1);
+    expect(rig.logger.error).toHaveBeenCalledWith(
+      'check-now Update Ready dialog Quit and Restart failed',
+      { err: handoffError, stagedVersion: '0.3.2' },
+    );
+  });
+});
+
+describe('a manual check that finds the staged build re-offers the card', () => {
+  test('re-broadcasts ok:update:downloaded to every window', () => {
+    const { rig } = makeRig({ versionPendingInstall: null, extraWindowCount: 1 });
+    stageInSession(rig, '0.3.2');
+    for (const win of rig.windows) win.length = 0;
+
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.3.2' });
+
+    for (const win of rig.windows) {
+      expect(downloadedBroadcasts(win)).toEqual([{ version: '0.3.2' }]);
+    }
+    expect(rig.dispatches).toContain('check-now-ready-reoffered' as DispatchKind);
+  });
+
+  test('names the staged build when a newer offer was declined', () => {
+    const { rig } = makeRig({ versionPendingInstall: null });
+    stageInSession(rig, '0.3.2');
+    rig.captured.length = 0;
+
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.3.3' });
+
+    expect(downloadedBroadcasts(rig.captured)).toEqual([{ version: '0.3.2' }]);
+  });
+
+  test('does not re-offer, or offer Quit and Restart, while the click-time freshness check runs', async () => {
+    const showCheckNowResult = vi.fn(() => Promise.resolve('relaunch' as const));
+    const { rig } = makeRig({ versionPendingInstall: null, showCheckNowResult });
+    await Promise.resolve();
+    stageInSession(rig, '0.3.2');
+    rig.updater.checkForUpdates.mockImplementation(() => new Promise(() => {}));
+    const relaunch = Promise.resolve(rig.ipc.invoke('ok:update:relaunch-now'));
+    rig.ipc.invoke('ok:update:check-now');
+    rig.captured.length = 0;
+
+    rig.updater.emit('update-available', { version: '0.3.2' });
+
+    expect(rig.state.versionPendingInstall).toBe('0.3.2');
+    expect(showCheckNowResult).toHaveBeenCalledWith({
+      kind: 'ready-to-install',
+      currentVersion: '0.3.1',
+      stagedVersion: '0.3.2',
+      relaunch: 'installing',
+    });
+    expect(rig.logger.info).toHaveBeenCalledWith(
+      'check-now found the staged build but withholds Quit and Restart',
+      { stagedVersion: '0.3.2', reason: 'installing', pendingVersion: '0.3.2' },
+    );
+    expect(downloadedBroadcasts(rig.captured)).toEqual([]);
+    expect(rig.dispatches).not.toContain('check-now-ready-reoffered' as DispatchKind);
+
+    await relaunch;
+    await settleAsyncWork();
+    expect(rig.dispatches).not.toContain('check-now-relaunch-chosen' as DispatchKind);
+    expect(rig.dispatches).not.toContain('relaunch-double-invoke-blocked' as DispatchKind);
+    expect(rig.updater.quitAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not re-offer while the post-update quiet window holds the card', () => {
+    const showCheckNowResult = vi.fn(() => undefined);
+    const { rig } = makeRig({
+      lastSeenVersion: '0.3.0',
+      appVersion: '0.3.1',
+      versionPendingInstall: null,
+      showCheckNowResult,
+    });
+    stageInSession(rig, '0.3.2');
+    rig.captured.length = 0;
+
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.3.2' });
+
+    expect(showCheckNowResult).toHaveBeenCalledWith({
+      kind: 'ready-to-install',
+      currentVersion: '0.3.1',
+      stagedVersion: '0.3.2',
+      relaunch: 'available',
+    });
+    expect(downloadedBroadcasts(rig.captured)).toEqual([]);
+    expect(rig.dispatches).not.toContain('check-now-ready-reoffered' as DispatchKind);
+  });
+
+  test('withholds Quit and Restart once the pending install was dropped', async () => {
+    const showCheckNowResult = vi.fn(() => Promise.resolve('relaunch' as const));
+    const { rig } = makeRig({ versionPendingInstall: null, showCheckNowResult });
+    stageInSession(rig, '0.3.2');
+    rig.updater.quitAndInstall = vi.fn(() => {
+      rig.failNextPersist = true;
+      throw new Error('squirrel refused the handoff');
+    });
+    await expect(Promise.resolve(rig.ipc.invoke('ok:update:relaunch-now'))).rejects.toThrow(
+      'squirrel refused the handoff',
+    );
+    rig.failNextPersist = false;
+    rig.updater.quitAndInstall = vi.fn();
+    rig.captured.length = 0;
+
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.3.3' });
+    await settleAsyncWork();
+
+    expect(showCheckNowResult).toHaveBeenCalledWith({
+      kind: 'ready-to-install',
+      currentVersion: '0.3.1',
+      stagedVersion: '0.3.2',
+      relaunch: 'not-pending',
+    });
+    expect(rig.logger.info).toHaveBeenCalledWith(
+      'check-now found the staged build but withholds Quit and Restart',
+      { stagedVersion: '0.3.2', reason: 'not-pending', pendingVersion: null },
+    );
+    expect(downloadedBroadcasts(rig.captured)).toEqual([]);
+    expect(rig.dispatches).not.toContain('check-now-ready-reoffered' as DispatchKind);
+    expect(rig.dispatches).not.toContain('check-now-relaunch-chosen' as DispatchKind);
+    expect(rig.updater.quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  test('Quit and Restart after the pending install was dropped behind the open dialog tells the user', async () => {
+    let answer: (choice: 'relaunch' | 'dismiss') => void = () => {};
+    const showCheckNowResult = vi.fn(
+      () =>
+        new Promise<'relaunch' | 'dismiss'>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const { rig } = makeRig({
+      versionPendingInstall: null,
+      showCheckNowResult,
+      extraWindowCount: 1,
+    });
+    stageInSession(rig, '0.3.2');
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.3.2' });
+    expect(showCheckNowResult).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'ready-to-install', relaunch: 'available' }),
+    );
+    rig.updater.quitAndInstall = vi.fn(() => {
+      rig.failNextPersist = true;
+      throw new Error('squirrel refused the handoff');
+    });
+    await expect(Promise.resolve(rig.ipc.invoke('ok:update:relaunch-now'))).rejects.toThrow(
+      'squirrel refused the handoff',
+    );
+    rig.failNextPersist = false;
+    expect(rig.state.versionPendingInstall).toBeNull();
+    rig.updater.quitAndInstall = vi.fn();
+    for (const win of rig.windows) win.length = 0;
+
+    answer('relaunch');
+    await settleAsyncWork();
+
+    expect(rig.dispatches).toContain('check-now-relaunch-chosen' as DispatchKind);
+    expect(rig.updater.quitAndInstall).not.toHaveBeenCalled();
+    for (const win of rig.windows) {
+      expect(win.filter((c) => c.channel === 'ok:update:relaunch-failed')).toEqual([
+        {
+          channel: 'ok:update:relaunch-failed',
+          payload: {
+            version: '0.3.2',
+            reason: 'no-longer-pending',
+            dismissPending: true,
+          },
+        },
+      ]);
+    }
+    expect(rig.logger.warn).toHaveBeenCalledWith(
+      'relaunch-now invoked without versionPendingInstall — ignoring',
+      { requestedVersion: '0.3.2' },
+    );
+  });
+
+  test('an in-app Relaunch with no pending install tells the user instead of doing nothing', async () => {
+    const { rig } = makeRig({ versionPendingInstall: null });
+
+    await rig.ipc.invoke('ok:update:relaunch-now');
+
+    expect(rig.updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(rig.captured.filter((c) => c.channel === 'ok:update:relaunch-failed')).toEqual([
+      {
+        channel: 'ok:update:relaunch-failed',
+        payload: {
+          version: '',
+          reason: 'no-longer-pending',
+          dismissPending: true,
+        },
+      },
+    ]);
+  });
+
+  test('an ordinary available verdict does not broadcast the card', () => {
+    const { rig } = makeRig({ versionPendingInstall: null });
+    rig.captured.length = 0;
+
+    rig.ipc.invoke('ok:update:check-now');
+    rig.updater.emit('update-available', { version: '0.3.2' });
+
+    expect(downloadedBroadcasts(rig.captured)).toEqual([]);
+  });
+});
+
+describe('getPendingUpdate decides whether the ready card is on offer', () => {
+  test('is null before anything downloads', () => {
+    const { handle } = makeRig({ versionPendingInstall: null });
+    expect(handle.getPendingUpdate()).toBeNull();
+  });
+
+  test('offers a build staged by an earlier session that this session never broadcast', () => {
+    const { rig, handle } = makeRig({ versionPendingInstall: '0.3.2' });
+    expect(downloadedBroadcasts(rig.captured)).toEqual([]);
+    expect(handle.getPendingUpdate()).toEqual({ version: '0.3.2' });
+  });
+
+  test('offers a fresh download', () => {
+    const { rig, handle } = makeRig({ versionPendingInstall: null });
+    stageInSession(rig, '0.3.2');
+    expect(handle.getPendingUpdate()).toEqual({ version: '0.3.2' });
+  });
+
+  test('keeps offering a build whose re-download was deduped', () => {
+    const { rig, handle } = makeRig({ versionPendingInstall: '0.3.2' });
+    rig.updater.emit('update-downloaded', { version: '0.3.2' });
+    expect(rig.dispatches).toContain('update-downloaded-deduped' as DispatchKind);
+    expect(downloadedBroadcasts(rig.captured)).toEqual([]);
+    expect(handle.getPendingUpdate()).toEqual({ version: '0.3.2' });
+  });
+
+  test('offers the boot re-offer of a handoff that never committed', () => {
+    const { rig, handle } = makeRig({
+      versionPendingInstall: null,
+      attemptedInstall: '0.3.2',
+      versionPendingInstallStagedAt: COMMITTED_LONG_AGO,
+    });
+    expect(rig.dispatches).toContain('install-never-committed-reoffered' as DispatchKind);
+    expect(handle.getPendingUpdate()).toEqual({ version: '0.3.2' });
+  });
+
+  test('is null once the running build has caught up with the persisted one', () => {
+    const { handle } = makeRig({ versionPendingInstall: '0.3.1', appVersion: '0.3.1' });
+    expect(handle.getPendingUpdate()).toBeNull();
+  });
+
+  test('is null once the relaunch commits', async () => {
+    const { rig, handle } = makeRig({ versionPendingInstall: null });
+    stageInSession(rig, '0.3.2');
+    await rig.ipc.invoke('ok:update:relaunch-now');
+    expect(rig.updater.quitAndInstall).toHaveBeenCalledTimes(1);
+    expect(handle.getPendingUpdate()).toBeNull();
+  });
+
+  test('is null while the click-time freshness check runs, with the build still persisted', async () => {
+    const { rig, handle } = makeRig({ versionPendingInstall: null });
+    await Promise.resolve();
+    stageInSession(rig, '0.3.2');
+    rig.updater.checkForUpdates.mockImplementation(() => new Promise(() => {}));
+    const relaunch = Promise.resolve(rig.ipc.invoke('ok:update:relaunch-now'));
+
+    expect(rig.state.versionPendingInstall).toBe('0.3.2');
+    expect(handle.getPendingUpdate()).toBeNull();
+    expect(rig.updater.quitAndInstall).not.toHaveBeenCalled();
+
+    fireTimerFor(rig.clock, RELAUNCH_REFRESH_CHECK_MS);
+    await relaunch;
+    expect(rig.updater.quitAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  test('offers the build again after a relaunch failure re-arms the card', async () => {
+    const { rig, handle } = makeRig({ versionPendingInstall: null });
+    stageInSession(rig, '0.3.2');
+    rig.updater.quitAndInstall = vi.fn(() => {
+      throw new Error('squirrel refused the handoff');
+    });
+    await expect(Promise.resolve(rig.ipc.invoke('ok:update:relaunch-now'))).rejects.toThrow(
+      'squirrel refused the handoff',
+    );
+    expect(handle.getPendingUpdate()).toEqual({ version: '0.3.2' });
+  });
+
+  test('is null after a relaunch failure that drops the pending install', async () => {
+    const { rig, handle } = makeRig({ versionPendingInstall: null });
+    stageInSession(rig, '0.3.2');
+    rig.updater.quitAndInstall = vi.fn(() => {
+      rig.failNextPersist = true;
+      throw new Error('squirrel refused the handoff');
+    });
+    await expect(Promise.resolve(rig.ipc.invoke('ok:update:relaunch-now'))).rejects.toThrow(
+      'squirrel refused the handoff',
+    );
+    rig.failNextPersist = false;
+    expect(
+      rig.captured.some(
+        (c) =>
+          c.channel === 'ok:update:relaunch-failed' &&
+          (c.payload as { dismissPending?: boolean }).dismissPending === true,
+      ),
+    ).toBe(true);
+    expect(handle.getPendingUpdate()).toBeNull();
+  });
+
+  test('is null after the staged build vanishes during the freshness check', async () => {
+    const { rig, handle } = makeRig({ versionPendingInstall: null });
+    await Promise.resolve();
+    stageInSession(rig, '0.3.2');
+    rig.updater.checkForUpdates.mockImplementation(() => {
+      rig.state = { ...rig.state, versionPendingInstall: null };
+      return Promise.resolve(undefined);
+    });
+
+    await rig.ipc.invoke('ok:update:relaunch-now');
+
+    expect(rig.updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(handle.getPendingUpdate()).toBeNull();
+  });
+
+  test('tracks the newest build when a newer one replaces the staged one', () => {
+    const { rig, handle } = makeRig({ versionPendingInstall: null, platform: 'win32' });
+    stageInSession(rig, '0.3.2');
+    stageInSession(rig, '0.3.3');
+    expect(handle.getPendingUpdate()).toEqual({ version: '0.3.3' });
+  });
+});
+
+function makeReloadableWebContents(): {
+  webContents: UpdateNoticeReplayTarget;
+  sent: CapturedSend[];
+  reload: () => void;
+} {
+  const emitter = new EventEmitter();
+  const sent: CapturedSend[] = [];
+  return {
+    sent,
+    webContents: {
+      send: (channel: string, ...args: unknown[]) => {
+        sent.push({ channel, payload: args[0] });
+      },
+      on: (event, listener) => emitter.on(event, listener),
+      once: (event, listener) => emitter.once(event, listener),
+      removeListener: (event, listener) => emitter.removeListener(event, listener),
+    },
+    reload: () => {
+      sent.length = 0;
+      emitter.emit('did-finish-load');
+    },
+  };
+}
+
+describe('a reloaded window gets the ready card back on every offer route', () => {
+  const routes: Array<[string, () => ReturnType<typeof startAutoUpdater>]> = [
+    [
+      'a fresh download this session',
+      () => {
+        const { rig, handle } = makeRig({ versionPendingInstall: null });
+        stageInSession(rig, '0.3.2');
+        return handle;
+      },
+    ],
+    [
+      'the boot re-offer of a handoff that never committed',
+      () => {
+        const { rig, handle } = makeRig({
+          versionPendingInstall: null,
+          attemptedInstall: '0.3.2',
+          versionPendingInstallStagedAt: COMMITTED_LONG_AGO,
+        });
+        expect(rig.dispatches).toContain('install-never-committed-reoffered' as DispatchKind);
+        return handle;
+      },
+    ],
+    [
+      'a build staged by an earlier session and never broadcast this session',
+      () => {
+        const { rig, handle } = makeRig({ versionPendingInstall: '0.3.2' });
+        expect(downloadedBroadcasts(rig.captured)).toEqual([]);
+        return handle;
+      },
+    ],
+  ];
+
+  test.each(routes)('%s', (_route, boot) => {
+    const handle = boot();
+    const win = makeReloadableWebContents();
+    replayUpdateNoticesOnEveryLoad(win.webContents, () => handle);
+
+    for (let load = 0; load < 3; load++) {
+      win.reload();
+      expect(downloadedBroadcasts(win.sent)).toEqual([{ version: '0.3.2' }]);
+    }
+  });
+
+  test('a reload after the install commits brings no card back', async () => {
+    const { rig, handle } = makeRig({ versionPendingInstall: null });
+    stageInSession(rig, '0.3.2');
+    const win = makeReloadableWebContents();
+    replayUpdateNoticesOnEveryLoad(win.webContents, () => handle);
+    win.reload();
+    expect(downloadedBroadcasts(win.sent)).toEqual([{ version: '0.3.2' }]);
+
+    await rig.ipc.invoke('ok:update:relaunch-now');
+    win.reload();
+
+    expect(downloadedBroadcasts(win.sent)).toEqual([]);
   });
 });

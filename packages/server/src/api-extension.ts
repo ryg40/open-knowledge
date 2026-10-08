@@ -27,11 +27,13 @@ import {
   AgentWriteBatchSuccessSchema,
   AgentWriteRequestSchema,
   AgentWriteSuccessSchema,
+  asTargetNamespace,
   type BatchEntryError,
   type ConfigDiagnosticsReport,
   changedBlockRange,
   colorFromSeed,
   createCodeFenceTracker,
+  createWikiAssetResolver,
   DEFAULT_LINTER_CONFIG,
   type DiskEditReconciledWarning,
   type DocumentListEntry,
@@ -233,6 +235,7 @@ import {
 } from './external-change.ts';
 import { extractActorIdentity } from './extract-actor-identity.ts';
 import {
+  type AllFileEntries,
   contentHash,
   type DiskEvent,
   type FileIndexEntry,
@@ -250,6 +253,14 @@ import {
   tracedWriteFileSync,
 } from './fs-traced.ts';
 import { withParentLock } from './git-handle.ts';
+import { isPathTrackedInGit } from './git-tracked-paths.ts';
+import {
+  AGENT_SESSION_CAPACITY_DETAIL,
+  AGENT_SESSION_CAPACITY_EXTENSIONS,
+  AGENT_SESSION_CAPACITY_TITLE,
+  AGENT_SESSION_CAPACITY_TYPE,
+  respondAgentSessionCapacity,
+} from './http/agent-session-capacity.ts';
 import { type ApiRouteTable, createApiRequestPipeline } from './http/api-pipeline.ts';
 import { createAssetRoutes } from './http/asset-routes.ts';
 import { createCommentRoutes } from './http/comment-routes.ts';
@@ -302,7 +313,10 @@ import {
   isPeerAdmitted,
 } from './ingress-policy.ts';
 import {
+  busyWriteLinkAdvisory,
+  deferredWriteLinkAdvisory,
   type LinkAdvisoryPolicy,
+  type PrepareWriteLinkAdvisory,
   projectWriteAdvisoryLinks,
   type WriteLinkAdvisoryProjection,
 } from './link-advisory-policy.ts';
@@ -311,7 +325,13 @@ import {
   checkLocalOpSecurity as checkLocalOpSecurityBase,
   createConcurrencyGuard,
 } from './local-op-security.ts';
-import { localTargetInventoryFromIndexes } from './local-target-inventory.ts';
+import { isExcludedFileOnDisk } from './local-target-index.ts';
+import {
+  createFileBasenameResolver,
+  createFileExistsOracle,
+  localTargetInventoryFromIndexes,
+  type WatcherLocalTargetInventory,
+} from './local-target-inventory.ts';
 import { getLogger } from './logger.ts';
 import {
   managedArtifactAbsPath,
@@ -335,12 +355,14 @@ import {
   incrementSummariesTruncated,
 } from './metrics.ts';
 import { isWithinDir, toPosix } from './path-utils.ts';
+import { assertProjectContentSubtree } from './project-content-scope.ts';
 import { isValidRelativeContentPath } from './relative-content-path.ts';
 import {
   appendRenameLogEntry,
   getOrLoadRenameLogIndex,
   type RenameLogEntry,
 } from './rename-log.ts';
+import { ServerMutationShuttingDownError } from './server-content-policy.ts';
 import type { PairedWriteOrigin } from './server-observers.ts';
 import { createAssetService } from './services/assets.ts';
 import { createFileOpsService, DuplicateNameExhaustedError } from './services/file-ops.ts';
@@ -350,13 +372,17 @@ import { createSkillInstallOpsService } from './services/skill-install-ops.ts';
 import { createSkillPlacementOpsService } from './services/skill-placement-ops.ts';
 import { createSkillReimportService } from './services/skill-reimport.ts';
 import { SERVICE_WRITER, type ShadowRef, shadowGit } from './shadow-repo.ts';
-import { readDeclaredGitHubHosts } from './share/git-context.ts';
+import {
+  createSyncCredentialConfigResolver,
+  readDeclaredGitHubHosts,
+} from './share/git-context.ts';
 
 import { readSkillInstallModeRaw } from './skill-placements.ts';
 
 import type { SyncEngine } from './sync-engine.ts';
 import { getMeter, withSpan, withSpanSync } from './telemetry.ts';
-import { computeWriteAdvisoryLinks } from './write-advisory-links.ts';
+import { createWriteAdvisoryGate } from './write-advisory-gate.ts';
+import { computeWriteAdvisoryLinks, type WriteAdvisoryTargets } from './write-advisory-links.ts';
 
 let _renameAttributionCounter: ReturnType<ReturnType<typeof getMeter>['createCounter']> | null =
   null;
@@ -960,7 +986,11 @@ function requireNonEmptyDocName(
   return null;
 }
 
-function resolveContentEntryPath(contentDir: string, kind: ContentEntryKind, path: string): string {
+function resolveUncheckedContentEntryPath(
+  contentDir: string,
+  kind: ContentEntryKind,
+  path: string,
+): string {
   if (!isValidRelativeContentPath(path)) {
     throw new PathContainmentError('path must be a relative content path');
   }
@@ -1060,7 +1090,7 @@ function nextAvailableDuplicateFolderPath(
   const { parent, basename } = splitContentPath(sourceFolderPath);
   for (let attempt = 1; attempt <= 10_000; attempt += 1) {
     const candidate = joinContentPath(parent, duplicateBasename(basename, attempt));
-    const fullPath = resolveContentEntryPath(contentDir, 'folder', candidate);
+    const fullPath = resolveUncheckedContentEntryPath(contentDir, 'folder', candidate);
     if (!existsSync(fullPath)) return { folderPath: candidate, attempt };
   }
   throw new DuplicateNameExhaustedError(sourceFolderPath);
@@ -1070,7 +1100,7 @@ function collectMarkdownCopies(
   contentDir: string,
   folderPath: string,
 ): Array<{ docName: string; fullPath: string; content: string }> {
-  const folderAbs = resolveContentEntryPath(contentDir, 'folder', folderPath);
+  const folderAbs = resolveUncheckedContentEntryPath(contentDir, 'folder', folderPath);
   const docs: Array<{ docName: string; fullPath: string; content: string }> = [];
 
   function walk(absDir: string, relDir: string): void {
@@ -1096,7 +1126,7 @@ function collectMarkdownCopies(
 }
 
 function collectFolderPaths(contentDir: string, folderPath: string): string[] {
-  const folderAbs = resolveContentEntryPath(contentDir, 'folder', folderPath);
+  const folderAbs = resolveUncheckedContentEntryPath(contentDir, 'folder', folderPath);
   const folders: string[] = [folderPath];
 
   function walk(absDir: string, relDir: string): void {
@@ -1207,11 +1237,14 @@ export async function renameTrackedPathInGit(
 
   return await withParentLock(async () => {
     const pg = simpleGit({ baseDir: projectDir, timeout: { block: 15_000 } });
-    let tracked = '';
+    let tracked: boolean;
     try {
-      tracked = (await pg.raw('ls-files', ...pathspecArgs([sourceRel]))).trim();
+      tracked = await isPathTrackedInGit(pg, projectDir, sourceRel);
     } catch (err) {
-      log.warn({ err }, '[renameTrackedPathInGit] git ls-files failed, falling back to fs rename');
+      log.warn(
+        { err, projectDir, path: sourceRel },
+        '[renameTrackedPathInGit] tracked-path lookup failed, falling back to fs rename',
+      );
       return false;
     }
     if (!tracked) return false;
@@ -1249,26 +1282,27 @@ export async function renameTrackedPathInGit(
   });
 }
 
-export interface ApiExtensionOptions {
+interface ApiExtensionBaseOptions {
   declaredGitHubHosts?: ReadonlySet<string>;
   ingressPolicy?: IngressPolicy;
   hocuspocus: Hocuspocus;
   durabilityState: DocumentDurabilityState;
   sessionManager: AgentSessionManager;
   contentDir: string;
+  assertContentPath?: (path: string) => void;
+  assertContentSubtree?: (path: string) => void;
   getGeneratedIndexSettingsStatus?: () => GeneratedIndexSettingsStatus;
   setGeneratedIndexEnabled?: (enabled: boolean) => Promise<GeneratedIndexSettingsStatus>;
   ephemeral?: boolean;
   serverInstanceId: string;
   getFileIndex: () => ReadonlyMap<string, FileIndexEntry>;
   getAttachmentFolderPath?: () => string;
-  getAllFilesIndex?: () => ReadonlyMap<string, FileIndexEntry>;
   getFileIndexGeneration?: () => number;
-  mutateFileIndex?: (event: DiskEvent) => void;
   getFolderIndex?: () => ReadonlyMap<string, FolderIndexEntry>;
   onReferencedAssetsCacheInvalidator?: (invalidate: () => void) => void;
   getAliasMap?: () => ReadonlyMap<string, string>;
   getFolderAliasIndex?: () => ReadonlyMap<string, string>;
+  resolveTrackedFile?: (relativePath: string) => string | undefined;
   rescanFiles?: () => void | Promise<void>;
   localOpConcurrencyGuard?: ReturnType<typeof createConcurrencyGuard>;
   enableTestRoutes?: boolean;
@@ -1287,6 +1321,7 @@ export interface ApiExtensionOptions {
   agentPresenceBroadcaster?: AgentPresenceBroadcaster;
   onAgentWrite?: () => void;
   getSyncEngine?: () => SyncEngine | null;
+  resolveSyncCredentialConfig?: () => Promise<string[]>;
   conflicts: ConflictAuthority;
   setBatchInProgress?: (value: boolean) => void;
   localOpCliArgs?: string[];
@@ -1322,6 +1357,18 @@ export interface ApiExtensionOptions {
   getProjectConfigEpoch: () => number;
 }
 
+export type ApiExtensionOptions = ApiExtensionBaseOptions &
+  (
+    | {
+        getAllFilesIndex?: () => ReadonlyMap<string, FileIndexEntry>;
+        mutateFileIndex?: (event: DiskEvent) => void;
+      }
+    | {
+        getAllFilesIndex: () => AllFileEntries;
+        mutateFileIndex: (event: DiskEvent) => void;
+      }
+  );
+
 export function extractHeadings(content: string): HeadingEntry[] {
   const { body } = stripFrontmatter(content);
 
@@ -1347,12 +1394,10 @@ export function isSafeDocName(docName: string): boolean {
 
 function applyDiskEventToLiveAllFilesIndex(
   event: DiskEvent,
-  getAllFilesIndex: () => ReadonlyMap<string, FileIndexEntry>,
+  getAllFilesIndex: () => AllFileEntries,
 ): void {
   const live = getAllFilesIndex();
-  if (live instanceof Map) {
-    updateFileIndex(event, live);
-  }
+  if (live instanceof Map) updateFileIndex(event, live);
 }
 
 export interface CommentDocHooks {
@@ -1422,6 +1467,20 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
   shutdownLocalOps(): Promise<void>;
 } {
   const { durabilityState } = options;
+  let closingMutations = false;
+  const pendingMutations = new Set<Promise<void>>();
+  async function dispatchMutation(operation: () => Promise<void>, pathname: string): Promise<void> {
+    if (closingMutations)
+      throw new ServerMutationShuttingDownError(pathname.startsWith('/api/local-op/'));
+    const task = operation();
+    pendingMutations.add(task);
+    try {
+      await task;
+    } finally {
+      pendingMutations.delete(task);
+    }
+  }
+  const assertContentSubtree = options.assertContentSubtree;
   const ingressPolicy = options.ingressPolicy ?? buildIngressPolicy({});
   const checkLocalOpSecurity = (
     req: IncomingMessage,
@@ -1449,6 +1508,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     onReferencedAssetsCacheInvalidator,
     getAliasMap,
     getFolderAliasIndex,
+    resolveTrackedFile,
     rescanFiles,
     localOpConcurrencyGuard,
     enableTestRoutes = false,
@@ -1502,6 +1562,19 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
   } = options;
   const declaredGitHubHosts =
     options.declaredGitHubHosts ?? readDeclaredGitHubHosts(homeDirOverride);
+  const resolveSyncCredentialConfig =
+    options.resolveSyncCredentialConfig ??
+    createSyncCredentialConfigResolver({
+      projectDir: projectDir ?? contentDir,
+      tokenStore: null,
+      localOpCliArgs,
+      declaredGitHubHosts,
+    });
+  function resolveContentEntryPath(dir: string, kind: ContentEntryKind, path: string): string {
+    const resolved = resolveUncheckedContentEntryPath(dir, kind, path);
+    options.assertContentPath?.(resolved);
+    return resolved;
+  }
   const catalogCache = createSkillsCatalogCache({ homeDirOverride, log });
   const { bumpSkillsCatalogGen, enumerateInstalledSkillsCached, pluginSkillsByName } = catalogCache;
   const signalChannel: typeof rawSignalChannel = rawSignalChannel
@@ -1523,6 +1596,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     resolveDocPath,
     extractHeadings,
     getFileIndex,
+    getFileIndexGeneration,
     log,
     ready,
     contentFilter,
@@ -1734,12 +1808,19 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     return readFrontmatterMetadataForDocName(docName);
   }
 
+  const writeAdvisoryGate = createWriteAdvisoryGate();
+
   async function computeOrphanHints(
     docName: string,
   ): Promise<Array<{ type: 'orphan'; parentCandidates: string[]; message: string }> | undefined> {
-    if (!derivedDocumentIndex) return undefined;
+    if (!derivedDocumentIndex?.isReady()) return undefined;
     try {
-      const backlinks = await derivedDocumentIndex.getBacklinks(docName);
+      const backlinks = await writeAdvisoryGate.run(
+        'orphan-hints',
+        () => derivedDocumentIndex.getBacklinks(docName),
+        () => undefined,
+      );
+      if (backlinks === undefined) return undefined;
       if (backlinks.length > 0) return undefined;
       const start = performance.now();
       const candidates = findHubCandidates(docName, getFileIndex());
@@ -1866,6 +1947,38 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     const relPath = docNameToRelativePath(docName);
     return contentFilter.isExcluded(relPath);
   }
+
+  function isDerivedIndexReady(): boolean {
+    return derivedDocumentIndex?.isReady() ?? true;
+  }
+
+  const prepareWriteLinkAdvisory: PrepareWriteLinkAdvisory = async (writtenDocNames) => {
+    if (!isDerivedIndexReady()) return deferredWriteLinkAdvisory;
+    let admitted: Set<string> | null;
+    try {
+      admitted = await writeAdvisoryGate.run('link-check', collectAdmittedDocNames, () => null);
+    } catch (err) {
+      log.warn({ err }, '[link-check] write link advisory failed post-write; skipping link checks');
+      return busyWriteLinkAdvisory;
+    }
+    if (admitted === null) return busyWriteLinkAdvisory;
+    for (const docName of writtenDocNames) admitted.add(docName);
+    const targets: WriteAdvisoryTargets = {
+      fileExists: createLinkedFileExists(),
+      folderExists: createLinkedFolderExists(),
+      fileExcluded: createLinkedFileExcluded(),
+      resolveWikiFile: createLinkedWikiFileResolver(),
+      resolveFileByBasename: createLinkedFileBasenameResolver(),
+    };
+    return (source, docName, suppressLogLinkAdvisories) => ({
+      links: projectWriteAdvisoryLinks(
+        computeWriteAdvisoryLinks(source, docName, admitted, targets),
+        docName,
+        suppressLogLinkAdvisories,
+      ),
+      warnings: [],
+    });
+  };
 
   async function collectAdmittedDocNames(): Promise<Set<string>> {
     const admitted = new Set<string>();
@@ -2004,7 +2117,8 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
   function createLinkedFolderExists(): (folderPath: string) => boolean {
     const folderIndex = getFolderIndex?.();
     if (!folderIndex) return () => false;
-    return (folderPath) => folderIndex.has(folderPath);
+    const folders = asTargetNamespace('folder', folderIndex.keys());
+    return (folderPath) => folders.resolve(folderPath) !== undefined;
   }
 
   function createLinkedFileExists(
@@ -2015,26 +2129,42 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
       getFolderAliasIndex?.() ?? new Map(),
       contentDir,
     );
-    const admittedFiles = new Set(inventory.fileTargets);
-    const canonicalContentDir = realpathSync(contentDir);
-    return (contentRootRelativePath) => {
-      if (admittedFiles.has(contentRootRelativePath)) return true;
-      if (contentFilter?.isPathIgnored(contentRootRelativePath)) return false;
+    return createFileExistsOracle(inventory.fileTargets, contentDir, contentFilter);
+  }
 
-      const candidate = resolve(contentDir, contentRootRelativePath);
-      if (!isWithinDir(candidate, contentDir) || !existsSync(candidate)) return false;
-      try {
-        return isWithinDir(realpathSync(candidate), canonicalContentDir);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-          log.debug(
-            { err, candidate },
-            'linked-file existence fallback could not canonicalize; treating as absent',
-          );
-        }
-        return false;
-      }
+  function linkedLocalTargetInventory(): WatcherLocalTargetInventory {
+    return localTargetInventoryFromIndexes(
+      getAllFilesIndex(),
+      getFolderAliasIndex?.() ?? new Map(),
+      contentDir,
+      getFolderIndex?.(),
+    );
+  }
+
+  function createLinkedWikiFileResolver(): (contentRootRelativePath: string) => string | undefined {
+    let resolveWikiFile: ((contentRootRelativePath: string) => string | undefined) | undefined;
+    return (contentRootRelativePath) => {
+      resolveWikiFile ??= createWikiAssetResolver(linkedLocalTargetInventory().fileTargets);
+      return resolveWikiFile(contentRootRelativePath);
     };
+  }
+
+  function createLinkedFileBasenameResolver(): (
+    basename: string,
+    sourceDocName: string,
+  ) => string | undefined {
+    let resolveByBasename:
+      | ((basename: string, sourceDocName: string) => string | undefined)
+      | undefined;
+    return (basename, sourceDocName) => {
+      resolveByBasename ??= createFileBasenameResolver(linkedLocalTargetInventory().fileTargets);
+      return resolveByBasename(basename, sourceDocName);
+    };
+  }
+
+  function createLinkedFileExcluded(): (contentRootRelativePath: string) => boolean {
+    return (contentRootRelativePath) =>
+      isExcludedFileOnDisk(contentDir, contentFilter, contentRootRelativePath);
   }
 
   /**
@@ -2703,6 +2833,10 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
             (kind === 'folder' && !sourceStat.isDirectory())
           ) {
             throw new ManagedRenameSourceTypeMismatchError(kind);
+          }
+          if (kind === 'folder') {
+            assertProjectContentSubtree(sourcePathRoot, contentDir);
+            assertContentSubtree?.(sourcePathRoot);
           }
           const renamedAssets =
             kind === 'folder'
@@ -3523,13 +3657,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
           return;
         }
         if (e instanceof AgentSessionCapacityError) {
-          errorResponse(
-            res,
-            503,
-            'urn:ok:error:too-many-agent-sessions',
-            'Too many agent sessions.',
-            { handler: 'agent-write', cause: e, extraHeaders: { 'Retry-After': '10' } },
-          );
+          respondAgentSessionCapacity(res, e, 'agent-write');
           return;
         }
         log.error({ err: e, requestId: getRequestId(_req) }, '[agent-write] handler failed');
@@ -3627,8 +3755,10 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
           if (e instanceof AgentSessionCapacityError) {
             return entryError(
               docName,
-              'urn:ok:error:too-many-agent-sessions',
-              'Too many agent sessions.',
+              AGENT_SESSION_CAPACITY_TYPE,
+              AGENT_SESSION_CAPACITY_TITLE,
+              AGENT_SESSION_CAPACITY_DETAIL,
+              AGENT_SESSION_CAPACITY_EXTENSIONS,
             );
           }
           log.error(
@@ -3665,205 +3795,200 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
             ts: Date.now(),
           });
 
-          for (let i = 0; i < body.docs.length; i++) {
-            const entry = body.docs[i];
-            const resolvedDocName = resolveAlias(entry.docName);
+          await sessionManager.withSessions(async (getSession) => {
+            for (let i = 0; i < body.docs.length; i++) {
+              const entry = body.docs[i];
+              const resolvedDocName = resolveAlias(entry.docName);
 
-            if (isSystemDoc(resolvedDocName) || isConfigDoc(resolvedDocName)) {
-              results[i] = entryError(
-                resolvedDocName,
-                'urn:ok:error:reserved-doc-name',
-                `'${resolvedDocName}' is a reserved document name.`,
-              );
-              continue;
-            }
-
-            try {
-              if (
-                entry.extension !== undefined &&
-                !docNameExistsWithAnySupportedExtension(contentDir, resolvedDocName)
-              ) {
-                registerDocExtension(resolvedDocName, entry.extension);
+              if (isSystemDoc(resolvedDocName) || isConfigDoc(resolvedDocName)) {
+                results[i] = entryError(
+                  resolvedDocName,
+                  'urn:ok:error:reserved-doc-name',
+                  `'${resolvedDocName}' is a reserved document name.`,
+                );
+                continue;
               }
 
-              const normalizedSummary = normalizeSummary(entry.summary);
-              const { response: summaryResponse, stored: storedSummary } =
-                summaryResponseFields(normalizedSummary);
-              const session = await sessionManager.getSession(resolvedDocName, agentId, {
-                displayName: agentName,
-                colorSeed,
-                clientName,
-              });
-
-              const reconcile = reconcileDiskBeforeAgentWrite(
-                durabilityState,
-                hocuspocus,
-                resolvedDocName,
-                contentDir,
-                options.resolveEmbed,
-                getBridgeLossReporter?.(),
-                conflicts,
-              );
-
-              const entryEmbedResolver = options.resolveEmbed
-                ? { resolveEmbed: options.resolveEmbed, sourcePath: resolvedDocName }
-                : undefined;
-              const entryPrecomputed = await prepareAgentMarkdownParse(
-                session.dc.document,
-                entry.markdown,
-                entry.position ?? 'append',
-                entryEmbedResolver,
-              );
-
-              let writeDivergence: AgentWriteContentDivergence | undefined;
-              const disposeEntryEffectCapture = captureEffect(
-                session.dc.document.getText('source'),
-                agentId,
-                session.origin,
-                colorSeed,
-                clientName,
-              );
-              agentWritePreDrain(session.dc.document, entry.markdown, entry.position ?? 'append');
               try {
-                session.dc.document.transact(() => {
-                  const beforeBlocks = snapshotBlocks(session.dc.document);
-                  writeDivergence = applyAgentMarkdownWrite(
-                    session.dc.document,
-                    entry.markdown,
-                    entry.position ?? 'append',
-                    entryEmbedResolver,
-                    entryPrecomputed,
-                    agentWriteLossDetect(session),
-                    suppliedWriterId,
-                  );
+                if (
+                  entry.extension !== undefined &&
+                  !docNameExistsWithAnySupportedExtension(contentDir, resolvedDocName)
+                ) {
+                  registerDocExtension(resolvedDocName, entry.extension);
+                }
 
-                  const changedBlocks =
-                    changedBlockRange(beforeBlocks, snapshotBlocks(session.dc.document)) ??
-                    undefined;
-                  const activityMap = session.dc.document.getMap('agent-flash');
-                  activityMap.set(agentId, {
-                    agentId,
-                    timestamp: Date.now(),
-                    type: 'insert',
-                    description: `Added (${agentName}): ${entry.markdown.trim().slice(0, 50)}`,
-                    ...(changedBlocks !== undefined ? { changedBlocks } : {}),
-                  });
-                }, session.origin);
-              } finally {
-                disposeEntryEffectCapture();
-              }
-
-              recordContentDivergenceGate('agent-write-batch', writeDivergence);
-              recordContributor(
-                resolvedDocName,
-                agentId,
-                agentName,
-                colorSeed,
-                undefined,
-                buildAgentActor({ clientName, clientVersion, label }),
-                storedSummary,
-              );
-              incrementAgentWriteCalls();
-              countNormalizedSummary(normalizedSummary);
-
-              const reconcileWarning = buildReconcileWarning(reconcile);
-              const warnings: AdvisoryWarning[] = [
-                ...(writeDivergence !== undefined
-                  ? [toContentDivergenceWarning(writeDivergence)]
-                  : []),
-                ...(reconcileWarning ? [reconcileWarning] : []),
-              ];
-              pending.push({
-                index: i,
-                docName: resolvedDocName,
-                session,
-                summaryResponse,
-                warnings,
-              });
-            } catch (e) {
-              results[i] = classifyEntryFailure(resolvedDocName, e);
-            }
-          }
-
-          const flushErrors = new Map<string, BatchErrorResult['error'] | undefined>();
-          for (const p of pending) {
-            if (flushErrors.has(p.docName)) continue;
-            const flushOutcome = await flushDiskAndDetectOutcome(p.docName);
-            if (flushOutcome?.kind === 'failure') {
-              if (flushOutcome.failure.code === OK_DOC_REMOVED) {
-                flushErrors.set(p.docName, removedDocProblem(flushOutcome.failure));
-              } else if (flushOutcome.failure.code === OK_PATH_UNRESOLVABLE) {
-                flushErrors.set(p.docName, pathFaultProblem(flushOutcome.failure));
-              } else if (flushOutcome.failure.code === OK_STORE_REFUSED) {
-                flushErrors.set(p.docName, refusedStoreProblem(flushOutcome.failure));
-              } else {
-                const reason = classifyUploadErrno({
-                  code: flushOutcome.failure.code,
-                } as NodeJS.ErrnoException);
-                flushErrors.set(p.docName, {
-                  type: reason,
-                  title: 'Write applied in memory but failed to persist to disk.',
-                  detail: `${flushOutcome.failure.code ?? 'unknown error'}: ${flushOutcome.failure.message}. The content was NOT saved and will be lost if the server restarts.`,
+                const normalizedSummary = normalizeSummary(entry.summary);
+                const { response: summaryResponse, stored: storedSummary } =
+                  summaryResponseFields(normalizedSummary);
+                const session = await getSession(resolvedDocName, agentId, {
+                  displayName: agentName,
+                  colorSeed,
+                  clientName,
                 });
+
+                const reconcile = reconcileDiskBeforeAgentWrite(
+                  durabilityState,
+                  hocuspocus,
+                  resolvedDocName,
+                  contentDir,
+                  options.resolveEmbed,
+                  getBridgeLossReporter?.(),
+                  conflicts,
+                );
+
+                const entryEmbedResolver = options.resolveEmbed
+                  ? { resolveEmbed: options.resolveEmbed, sourcePath: resolvedDocName }
+                  : undefined;
+                const entryPrecomputed = await prepareAgentMarkdownParse(
+                  session.dc.document,
+                  entry.markdown,
+                  entry.position ?? 'append',
+                  entryEmbedResolver,
+                );
+
+                let writeDivergence: AgentWriteContentDivergence | undefined;
+                const disposeEntryEffectCapture = captureEffect(
+                  session.dc.document.getText('source'),
+                  agentId,
+                  session.origin,
+                  colorSeed,
+                  clientName,
+                );
+                agentWritePreDrain(session.dc.document, entry.markdown, entry.position ?? 'append');
+                try {
+                  session.dc.document.transact(() => {
+                    const beforeBlocks = snapshotBlocks(session.dc.document);
+                    writeDivergence = applyAgentMarkdownWrite(
+                      session.dc.document,
+                      entry.markdown,
+                      entry.position ?? 'append',
+                      entryEmbedResolver,
+                      entryPrecomputed,
+                      agentWriteLossDetect(session),
+                      suppliedWriterId,
+                    );
+
+                    const changedBlocks =
+                      changedBlockRange(beforeBlocks, snapshotBlocks(session.dc.document)) ??
+                      undefined;
+                    const activityMap = session.dc.document.getMap('agent-flash');
+                    activityMap.set(agentId, {
+                      agentId,
+                      timestamp: Date.now(),
+                      type: 'insert',
+                      description: `Added (${agentName}): ${entry.markdown.trim().slice(0, 50)}`,
+                      ...(changedBlocks !== undefined ? { changedBlocks } : {}),
+                    });
+                  }, session.origin);
+                } finally {
+                  disposeEntryEffectCapture();
+                }
+
+                recordContentDivergenceGate('agent-write-batch', writeDivergence);
+                recordContributor(
+                  resolvedDocName,
+                  agentId,
+                  agentName,
+                  colorSeed,
+                  undefined,
+                  buildAgentActor({ clientName, clientVersion, label }),
+                  storedSummary,
+                );
+                incrementAgentWriteCalls();
+                countNormalizedSummary(normalizedSummary);
+
+                const reconcileWarning = buildReconcileWarning(reconcile);
+                const warnings: AdvisoryWarning[] = [
+                  ...(writeDivergence !== undefined
+                    ? [toContentDivergenceWarning(writeDivergence)]
+                    : []),
+                  ...(reconcileWarning ? [reconcileWarning] : []),
+                ];
+                pending.push({
+                  index: i,
+                  docName: resolvedDocName,
+                  session,
+                  summaryResponse,
+                  warnings,
+                });
+              } catch (e) {
+                results[i] = classifyEntryFailure(resolvedDocName, e);
               }
-            } else if (flushOutcome?.kind === 'divergence') {
-              flushErrors.set(p.docName, {
-                type: 'urn:ok:error:disk-divergence',
-                title:
-                  'The document changed on disk after your edit was prepared; your edit was NOT applied. Re-read the document and retry.',
-              });
-            } else if (flushOutcome?.kind === 'stale-external-write') {
-              flushErrors.set(p.docName, staleExternalWriteProblem(p.docName));
-            } else {
-              flushErrors.set(p.docName, undefined);
             }
-          }
 
-          const admittedForLinks = await collectAdmittedDocNames();
-          for (const p of pending) {
-            if (flushErrors.get(p.docName) === undefined) admittedForLinks.add(p.docName);
-          }
-          const linkedFileExists = createLinkedFileExists();
-          const linkedFolderExists = createLinkedFolderExists();
-
-          let lastWrittenDoc: string | undefined;
-          for (const p of pending) {
-            const flushError = flushErrors.get(p.docName);
-            if (flushError !== undefined) {
-              results[p.index] = { status: 'error', docName: p.docName, error: flushError };
-              continue;
+            const flushErrors = new Map<string, BatchErrorResult['error'] | undefined>();
+            for (const p of pending) {
+              if (flushErrors.has(p.docName)) continue;
+              const flushOutcome = await flushDiskAndDetectOutcome(p.docName);
+              if (flushOutcome?.kind === 'failure') {
+                if (flushOutcome.failure.code === OK_DOC_REMOVED) {
+                  flushErrors.set(p.docName, removedDocProblem(flushOutcome.failure));
+                } else if (flushOutcome.failure.code === OK_PATH_UNRESOLVABLE) {
+                  flushErrors.set(p.docName, pathFaultProblem(flushOutcome.failure));
+                } else if (flushOutcome.failure.code === OK_STORE_REFUSED) {
+                  flushErrors.set(p.docName, refusedStoreProblem(flushOutcome.failure));
+                } else {
+                  const reason = classifyUploadErrno({
+                    code: flushOutcome.failure.code,
+                  } as NodeJS.ErrnoException);
+                  flushErrors.set(p.docName, {
+                    type: reason,
+                    title: 'Write applied in memory but failed to persist to disk.',
+                    detail: `${flushOutcome.failure.code ?? 'unknown error'}: ${flushOutcome.failure.message}. The content was NOT saved and will be lost if the server restarts.`,
+                  });
+                }
+              } else if (flushOutcome?.kind === 'divergence') {
+                flushErrors.set(p.docName, {
+                  type: 'urn:ok:error:disk-divergence',
+                  title:
+                    'The document changed on disk after your edit was prepared; your edit was NOT applied. Re-read the document and retry.',
+                });
+              } else if (flushOutcome?.kind === 'stale-external-write') {
+                flushErrors.set(p.docName, staleExternalWriteProblem(p.docName));
+              } else {
+                flushErrors.set(p.docName, undefined);
+              }
             }
-            const writtenSource = p.session.dc.document.getText('source').toString();
-            registerWrittenDocInFileIndex(p.docName, writtenSource);
-            results[p.index] = {
-              status: 'written',
-              docName: p.docName,
-              ...(p.summaryResponse ? { summary: p.summaryResponse } : {}),
-              ...(p.warnings.length > 0 ? { warnings: p.warnings } : {}),
-              ...projectWriteAdvisoryLinks(
-                computeWriteAdvisoryLinks(
-                  writtenSource,
-                  p.docName,
-                  admittedForLinks,
-                  linkedFileExists,
-                  linkedFolderExists,
-                ),
+
+            const linkAdvisor = await prepareWriteLinkAdvisory(
+              pending.filter((p) => flushErrors.get(p.docName) === undefined).map((p) => p.docName),
+            );
+
+            let lastWrittenDoc: string | undefined;
+            for (const p of pending) {
+              const flushError = flushErrors.get(p.docName);
+              if (flushError !== undefined) {
+                results[p.index] = { status: 'error', docName: p.docName, error: flushError };
+                continue;
+              }
+              const writtenSource = p.session.dc.document.getText('source').toString();
+              registerWrittenDocInFileIndex(p.docName, writtenSource);
+              const linkAdvisory = linkAdvisor(
+                writtenSource,
                 p.docName,
                 linkPolicy.suppressLogLinkAdvisories,
-              ),
-            };
-            lastWrittenDoc = p.docName;
-          }
+              );
+              const warnings = [...p.warnings, ...linkAdvisory.warnings];
+              results[p.index] = {
+                status: 'written',
+                docName: p.docName,
+                ...(p.summaryResponse ? { summary: p.summaryResponse } : {}),
+                ...(warnings.length > 0 ? { warnings } : {}),
+                ...linkAdvisory.links,
+              };
+              lastWrittenDoc = p.docName;
+            }
 
-          if (lastWrittenDoc !== undefined) {
-            agentFocusBroadcaster?.setFocus(agentId, {
-              agentName,
-              currentDoc: lastWrittenDoc,
-              writeKind: 'write',
-              ts: Date.now(),
-            });
-            onAgentWrite?.();
-          }
+            if (lastWrittenDoc !== undefined) {
+              agentFocusBroadcaster?.setFocus(agentId, {
+                agentName,
+                currentDoc: lastWrittenDoc,
+                writeKind: 'write',
+                ts: Date.now(),
+              });
+              onAgentWrite?.();
+            }
+          });
         } finally {
           agentPresenceBroadcaster?.touchMode(agentId, 'idle');
         }
@@ -3904,10 +4029,13 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
 
   const assetService = createAssetService({
     contentDir,
+    assertContentPath: options.assertContentPath,
     isPathIgnored: (relativePath) => contentFilter?.isPathIgnored(relativePath) ?? false,
     getAttachmentFolderPath,
+    resolveTrackedFile,
   });
   const fileOpsService = createFileOpsService({
+    assertContentSubtree,
     contentDir,
     resolveContentEntryPath,
     docNameForPath: (relPath) => docNameForFileOperationPath(contentDir, relPath),
@@ -3934,8 +4062,11 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
       nextAvailableDuplicateDocName(contentDir, sourceDocName),
     nextAvailableDuplicateFolderPath: (sourceFolderPath) =>
       nextAvailableDuplicateFolderPath(contentDir, sourceFolderPath),
-    resolveDuplicateDocPath: (docName, extension) =>
-      resolveDuplicateDocPath(contentDir, docName, extension),
+    resolveDuplicateDocPath: (docName, extension) => {
+      const path = resolveDuplicateDocPath(contentDir, docName, extension);
+      options.assertContentPath?.(path);
+      return path;
+    },
     collectMarkdownCopies: (folderPath) => collectMarkdownCopies(contentDir, folderPath),
     collectFolderPaths: (folderPath) => collectFolderPaths(contentDir, folderPath),
     contentFilter: contentFilter ?? undefined,
@@ -4717,23 +4848,34 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
       const lintFindings = await lintDocument(source, effective, docName);
 
       let linkFindings: ValidationDiagnostic[] = [];
-      if (derivedDocumentIndex && linkPolicy.links !== 'off' && !isLinkIndexExcludedDoc(docName)) {
-        await recordDerivedLinkRewriteBestEffort(docName, source, 'lint-validation');
-        const linksValidator = createProjectValidators({
-          projectDir: projectDir ?? contentDir,
-          contentDir,
-          baseConfig: base,
-          derivedDocumentIndex,
-          linkPolicy,
-          admittedDocNames: collectAdmittedDocNames,
-          docFilePathFor: (d) => resolveDocFilePath(contentDir, d),
-        }).find((validator) => validator.id === 'links');
-        if (linksValidator) {
-          const run = await linksValidator.run({
-            targetPath: resolveDocFilePath(contentDir, docName) ?? `${docName}.md`,
-          });
-          linkFindings = run.files.flatMap((file) => file.diagnostics);
-        }
+      if (
+        derivedDocumentIndex?.isReady() &&
+        linkPolicy.links !== 'off' &&
+        !isLinkIndexExcludedDoc(docName)
+      ) {
+        const index = derivedDocumentIndex;
+        linkFindings = await writeAdvisoryGate.run(
+          'lint-links',
+          async () => {
+            await recordDerivedLinkRewriteBestEffort(docName, source, 'lint-validation');
+            const linksValidator = createProjectValidators({
+              projectDir: projectDir ?? contentDir,
+              contentDir,
+              baseConfig: base,
+              derivedDocumentIndex: index,
+              linkPolicy,
+              admittedDocNames: collectAdmittedDocNames,
+              docFilePathFor: (d) => resolveDocFilePath(contentDir, d),
+              localTargetInventory: linkedLocalTargetInventory,
+            }).find((validator) => validator.id === 'links');
+            if (!linksValidator) return [];
+            const run = await linksValidator.run({
+              targetPath: resolveDocFilePath(contentDir, docName) ?? `${docName}.md`,
+            });
+            return run.files.flatMap((file) => file.diagnostics);
+          },
+          () => [],
+        );
       }
 
       return [...lintFindings, ...linkFindings]
@@ -4804,6 +4946,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     policy: ingressPolicy,
     ephemeral,
     table: apiRouteTable,
+    dispatchMutation,
   });
 
   const linkGraphRoutes = createLinkGraphRoutes({
@@ -4865,6 +5008,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     collectAdmittedDocNames,
     unmatchedGlobProblems,
     readAuditGeneration,
+    localTargetInventory: linkedLocalTargetInventory,
   });
   const lintWriteRoutes = createLintWriteRoutes({
     conflicts,
@@ -5064,10 +5208,10 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     localOpCliArgs,
     localOpGuard,
     getSyncEngine,
+    resolveCredentialConfig: resolveSyncCredentialConfig,
     toGitRelativePath,
   });
   const gitRoutes = createGitRoutes({
-    declaredGitHubHosts,
     projectDir,
     contentDir,
     contentFilter,
@@ -5075,7 +5219,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     checkLocalOpSecurity,
     getSyncEngine,
     getPrincipal,
-    localOpCliArgs,
+    resolveCredentialConfig: resolveSyncCredentialConfig,
   });
   const localOpRoutes = createLocalOpRoutes({
     declaredGitHubHosts,
@@ -5099,7 +5243,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     contentFilter,
     signalChannel,
     conflicts,
-    flushContributors,
+    commitOkArtifactWrite,
     fileOpsService,
     assetService,
     extractAgentIdentity,
@@ -5252,13 +5396,12 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     onAgentWrite,
     computeOrphanHints,
     registerWrittenDocInFileIndex,
-    collectAdmittedDocNames,
-    createLinkedFileExists,
-    createLinkedFolderExists,
+    prepareWriteLinkAdvisory,
     buildReconcileWarning,
     computeLintViolations,
     log,
     flushDocToGit,
+    commitOkArtifactWrite,
     isSafeDocName,
     shadowRef,
     getPrincipal,
@@ -5326,6 +5469,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
       policy: ingressPolicy,
       ephemeral,
       table: group.table,
+      dispatchMutation,
     }),
   );
   const nativeApi: NativeApiHandle = {
@@ -5357,7 +5501,12 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
   const resolveLocalApiNativeDispatch = (pathname: string) => {
     for (const table of localApiNativeTables) {
       const dispatch = table.resolve(pathname)?.dispatch;
-      if (dispatch !== undefined) return dispatch;
+      if (dispatch !== undefined) {
+        return table.isMutating(pathname)
+          ? (req: IncomingMessage, res: ServerResponse) =>
+              dispatchMutation(() => dispatch(req, res), pathname)
+          : dispatch;
+      }
     }
     return undefined;
   };
@@ -5370,7 +5519,11 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     resolve: (pathname) => {
       if (!MCP_LOCAL_API_PATHS.has(pathname)) return undefined;
       const legacy = routes[pathname];
-      if (legacy !== undefined) return legacy;
+      if (legacy !== undefined) {
+        return apiRouteTable.isMutating(pathname)
+          ? (req, res) => dispatchMutation(() => legacy(req, res), pathname)
+          : legacy;
+      }
       return resolveLocalApiNativeDispatch(pathname);
     },
   });
@@ -5382,6 +5535,11 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     },
     nativeApi,
     localApi,
-    shutdownLocalOps: localOpRoutes.shutdown,
+    shutdownLocalOps: async () => {
+      closingMutations = true;
+      const results = await Promise.allSettled([...pendingMutations, localOpRoutes.shutdown()]);
+      const localOps = results.at(-1);
+      if (localOps?.status === 'rejected') throw localOps.reason;
+    },
   };
 }
