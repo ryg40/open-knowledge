@@ -77,6 +77,9 @@ started=1
   --env OK_EXTERNAL_URL=http://127.0.0.1:8080 \
   --env OK_IDLE_SHUTDOWN=off \
   --env DO_NOT_TRACK=1 \
+  --env DISABLE_TELEMETRY=1 \
+  --env OK_DISABLE_LOCAL_SINK=1 \
+  --env OTEL_SDK_DISABLED=true \
   --env OK_LOG_LEVEL=warn \
   --env OK_MCP_AUTOSTART=0 \
   "$image" >/dev/null || fail "container creation failed"
@@ -118,6 +121,10 @@ if [ -z "$ready" ]; then
   fail "/readyz did not answer 200 after ${elapsed}s (limit ${wait_seconds}s); Docker operations and cleanup can add time"
 fi
 echo "smoke: /readyz answered 200"
+
+echo "smoke: check that each telemetry path is off"
+"$container_cli" exec "$name" node /usr/local/lib/ok-no-telemetry.mjs --check \
+  || fail "a telemetry path is on, or the image has no telemetry check"
 
 echo "smoke: stop container $name"
 "$container_cli" rm --force --volumes "$name" >/dev/null || fail "container removal failed"

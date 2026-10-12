@@ -52,11 +52,23 @@ jobs:
       - name: Find the upstream release commit
         run: scripts/tenant/ci.sh upstream-ref
 
+      - name: Test the public-content check
+        run: scripts/tenant/public-check.test.sh
+
       - name: Check the public content
         run: scripts/tenant/public-check.sh
 
+      - name: Test the pin check
+        run: scripts/tenant/pins.test.sh
+
       - name: Check the pins
         run: scripts/tenant/pins.sh
+
+      - name: Test the telemetry check
+        run: scripts/tenant/telemetry.test.sh
+
+      - name: Check the telemetry baseline
+        run: scripts/tenant/telemetry.sh
 
       - name: Find a change under deploy
         id: changed

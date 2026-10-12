@@ -7,14 +7,26 @@ fail() {
   exit 2
 }
 
-[ "$#" -eq 0 ] || fail "usage: $0"
+usage="usage: $0 [--version X.Y.Z]"
+version=
+given=0
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    --version) [ "$#" -ge 2 ] || fail "$usage"; version=$2; given=1; shift 2 ;;
+    *) fail "$usage" ;;
+  esac
+done
 for tool in git awk dirname; do
   command -v "$tool" >/dev/null 2>&1 || fail "missing command: $tool"
 done
+if [ "$given" -eq 1 ]; then
+  printf '%s\n' "$version" | awk 'NR > 1 || !/^[0-9]+\.[0-9]+\.[0-9]+$/ { bad = 1 } END { exit bad || NR != 1 }' || fail "version $version is not X.Y.Z"
+fi
 repo_root=$(CDPATH='' cd "$(dirname "$0")/../.." && pwd) || fail "cannot find the repository"
 cd "$repo_root" || fail "cannot enter the repository"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "not a Git working tree"
 for file in deploy/Dockerfile scripts/tenant/scan.sh package.json EXPLAINER.md deploy/docs/deployment.md deploy/docs/ci.md deploy/docs/hardening.md; do
+  [ -f "$file" ] || fail "not a file: $file"
   [ -r "$file" ] || fail "cannot read $file"
 done
 
@@ -63,6 +75,7 @@ pins=$(awk '
 printf 'Pin\tValue\tSource\n%s\n' "$pins"
 set -- EXPLAINER.md deploy/docs/*.md
 for file do
+  [ -f "$file" ] || fail "not a file: $file"
   [ -r "$file" ] || fail "cannot read $file"
 done
 status=0
@@ -122,8 +135,57 @@ awk -v pins="$pins" '
     if (bad) exit 1
   }
 ' "$@" || status=$?
-case $status in
-  0) echo "pins: ok" ;;
-  1) exit 1 ;;
+tag_status=0
+awk -v version="$version" '
+  function trim(value) {
+    sub(/^[[:space:]]+/, "", value)
+    sub(/[[:space:]]+$/, "", value)
+    return value
+  }
+  function place(name, value) {
+    count++
+    places[count] = sprintf("pins: EXPLAINER.md:%d: %s: %s", FNR, name, value)
+    tags[count] = value
+  }
+  /^## / { facts = $0 == "## Release facts" }
+  facts && /^\|/ {
+    split($0, cells, "|")
+    if (trim(cells[2]) == "Portable release tag") {
+      value = trim(cells[3])
+      gsub(/`/, "", value)
+      rows++
+      place("row Portable release tag", value)
+    }
+  }
+  /^[[:space:]]*RELEASE_TAG=/ {
+    value = trim($0)
+    sub(/^RELEASE_TAG=/, "", value)
+    if (value !~ /^</) {
+      lines++
+      place("RELEASE_TAG line", value)
+    }
+  }
+  END {
+    expected = version == "" ? tags[1] : "portable-v" version
+    if (rows != 1 || lines != 2 || expected !~ /^portable-v[0-9]+\.[0-9]+\.[0-9]+$/) bad = 1
+    for (i = 1; i <= count; i++) {
+      if (tags[i] != expected) bad = 1
+    }
+    if (!bad) exit 0
+    for (i = 1; i <= count; i++) print places[i] > "/dev/stderr"
+    if (rows != 1 || lines != 2) {
+      printf "pins: EXPLAINER.md: expected one row Portable release tag and two RELEASE_TAG= lines, found %d and %d\n", rows, lines > "/dev/stderr"
+    }
+    if (version == "") {
+      print "pins: expected one tag portable-vX.Y.Z in the three places" > "/dev/stderr"
+    } else {
+      printf "pins: expected portable-v%s in the three places\n", version > "/dev/stderr"
+    }
+    exit 1
+  }
+' EXPLAINER.md || tag_status=$?
+case $status$tag_status in
+  00) echo "pins: ok" ;;
+  01 | 10 | 11) exit 1 ;;
   *) fail "cannot check the documentation" ;;
 esac

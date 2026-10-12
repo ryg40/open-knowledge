@@ -609,6 +609,14 @@ case $public_status in
   1) fail "the public content check has a finding; fix it on $source" ;;
   *) scanner_error "the public content check cannot run" ;;
 esac
+[ -x "$scan_dir/scripts/tenant/pins.sh" ] || fail "the snapshot has no scripts/tenant/pins.sh"
+pins_status=0
+(cd "$scan_dir" && ./scripts/tenant/pins.sh --version "$version" >/dev/null) || pins_status=$?
+case $pins_status in
+  0) ;;
+  1) fail "the release facts of EXPLAINER.md do not agree with $tag or with the pin sources; on $source, set the row \"Portable release tag\" and the two RELEASE_TAG= lines to $tag and correct each named pin row, then promote again" ;;
+  *) scanner_error "the release facts check cannot run" ;;
+esac
 check_identities
 echo "ok: commit author and committer: $(identity_of '%an <%ae>' "$new_sha"), $(identity_of '%cn <%ce>' "$new_sha")"
 echo "tagger: $(git var GIT_COMMITTER_IDENT | sed -e 's/ [0-9]* [-+][0-9]*$//')"

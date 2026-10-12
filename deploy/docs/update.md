@@ -73,7 +73,7 @@ A failed step fails the whole run. Independent checks still run.
 | `public-check` | Complete fork files against the selected release. |
 | `port-check` | `ss -ltn` must show no listener on `SMOKE_PORT`. The default is 18080. |
 | `build` | `build.sh -v` receives the upstream version. |
-| `smoke` | `smoke.sh` checks readiness on the checked loopback port. |
+| `smoke` | `smoke.sh` checks readiness on the checked loopback port, and that each telemetry path is off in the container. |
 | `image-version` | The first line of `ok --version` must exactly match the requested version. |
 | `scan-image` | Gitleaks scans added image layers. Findings in pinned base layers are informational notes. |
 | `cleanup` | Removes trial containers, anonymous volumes, image, clone, and temporary files. |
@@ -133,6 +133,7 @@ The `drift` object lists these kit inputs:
 - Newly added upstream workflow files.
 - A newly added `.husky/` directory.
 - Old and new MCP tool names, read from literal `registerTool` calls.
+- `telemetry`: the added and the removed facts of `scripts/tenant/telemetry.sh` between the two releases: configuration defaults, environment variable names, source lines that read a telemetry variable, host names with their number of places, addresses with a host from a variable, and telemetry modules. When `changed` is `true`, the description of the pull request holds a `TELEMETRY CHANGE` line as its third paragraph, after the line about breaking changes and the line with the versions, and `scripts/tenant/telemetry.sh` fails on the branch until a person reviews the change and updates the baseline.
 
 MCP means Model Context Protocol. Dynamic tool names require manual review.
 Exit 0 means notes and drift are available. Exit 2 means invalid input, unavailable notes, or another operation failure.

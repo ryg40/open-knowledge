@@ -102,9 +102,14 @@ COPY --from=build /opt/open-knowledge /opt/open-knowledge
 RUN ln -s /opt/open-knowledge/dist/cli.mjs /usr/local/bin/ok \
  && ln -s /opt/open-knowledge/dist/cli.mjs /usr/local/bin/open-knowledge
 COPY --chmod=0755 deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chmod=0644 deploy/no-telemetry.mjs /usr/local/lib/ok-no-telemetry.mjs
 ENV NODE_ENV=production \
     PORT=8080 \
     OK_BIND=0.0.0.0 \
+    DO_NOT_TRACK=1 \
+    DISABLE_TELEMETRY=1 \
+    OK_DISABLE_LOCAL_SINK=1 \
+    OTEL_SDK_DISABLED=true \
     HOME=/home/openknowledge
 USER ${OK_UID}:${OK_GID}
 WORKDIR /data

@@ -12,6 +12,9 @@ services:
       OK_EXTERNAL_URL: ${OK_EXTERNAL_URL:?set OK_EXTERNAL_URL to the public URL of the service}
       OK_IDLE_SHUTDOWN: "off"
       DO_NOT_TRACK: "1"
+      DISABLE_TELEMETRY: "1"
+      OK_DISABLE_LOCAL_SINK: "1"
+      OTEL_SDK_DISABLED: "true"
       OK_LOG_LEVEL: warn
       OK_MCP_AUTOSTART: "0"
     ports:

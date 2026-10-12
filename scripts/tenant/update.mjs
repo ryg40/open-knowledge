@@ -4,6 +4,7 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, 
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { sourceFacts } from './telemetry.mjs';
 
 const kit = dirname(fileURLToPath(import.meta.url));
 const source = resolve(kit, '../..');
@@ -357,6 +358,15 @@ function tools(ref) {
   if (!names.length) throw new Error('MCP tool names cannot be read statically');
   return [...new Set(names)].sort();
 }
+function telemetry(from, to) {
+  try {
+    const before = sourceFacts(scratch, from), after = sourceFacts(scratch, to);
+    const added = after.filter((fact) => !before.includes(fact)), removed = before.filter((fact) => !after.includes(fact));
+    return { changed: added.length + removed.length > 0, added, removed };
+  } catch (error) {
+    return { changed: true, error: error.message.split('\n')[0] };
+  }
+}
 async function notes() {
   version(options.from); version(options.to);
   if (compare(options.from, options.to) >= 0) throw new Error('--to must be newer than --from');
@@ -391,7 +401,8 @@ async function notes() {
       workspace: changed('pnpm-workspace.yaml'), patches: changed('patches'),
       new_workflows: paths(to, '.github/workflows').filter((file) => !oldWorkflows.includes(file)),
       new_husky: paths(from, '.husky').length === 0 && paths(to, '.husky').length > 0,
-      mcp_tools: { from: oldTools, to: newTools, changed: JSON.stringify(oldTools) !== JSON.stringify(newTools) } } };
+      mcp_tools: { from: oldTools, to: newTools, changed: JSON.stringify(oldTools) !== JSON.stringify(newTools) },
+      telemetry: telemetry(from, to) } };
 }
 async function cleanup() {
   if (action === 'detect') { if (runDirectory) rmSync(runDirectory, { recursive: true, force: true }); return; }

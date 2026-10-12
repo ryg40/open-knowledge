@@ -5,7 +5,7 @@ This page says what each workflow of this fork does, what the runner needs, and 
 | Workflow file | Server | Trigger | Work |
 | --- | --- | --- | --- |
 | `.gitea/workflows/upstream-update.yml` | Development repository | Once each day, and by hand | Detects a new upstream version, tests it, and opens one pull request into `local-dev`. |
-| `.gitea/workflows/checks.yml` | Development repository | Push and pull request of `local-dev`, and by hand | Shell check, secret scan, public-content check, pin check. Image build and smoke test for a change under `deploy/`. |
+| `.gitea/workflows/checks.yml` | Development repository | Push and pull request of `local-dev`, and by hand | Shell check, secret scan, public-content check, pin check and telemetry check, with the tests of the last three. Image build, smoke test and the test of the telemetry program for a change under `deploy/`. |
 | `.github/workflows/public-checks.yml` | Public repository | Each push and pull request | Secret scan and public-content check. |
 | `.github/workflows/portable-release.yml` | Release repository | Tag `portable-vX.Y.Z`, and by hand | The release pipeline: scans, public-content check, build, smoke test, image push, digest record. |
 
@@ -213,15 +213,35 @@ scripts/tenant/workflows.sh check
 scripts/tenant/ci.sh lint
 scripts/tenant/scan.sh
 scripts/tenant/ci.sh upstream-ref
+scripts/tenant/public-check.test.sh
 scripts/tenant/public-check.sh
+scripts/tenant/pins.test.sh
 scripts/tenant/pins.sh
+scripts/tenant/telemetry.test.sh
+scripts/tenant/telemetry.sh
 ```
 
 - `workflows.sh check`: see "Check of the workflow files".
 - `ci.sh lint` runs `shellcheck -s sh` from a pinned image on each tracked `scripts/tenant/*.sh` and on `deploy/entrypoint.sh`. It mounts the checkout read-only and gives the container no network.
 - `scan.sh` scans the tree for secrets. Exit code 1 means a finding.
 - `ci.sh upstream-ref` and `public-check.sh`: see "On a tag".
-- `pins.sh` compares the pin sources with the docs.
+- `public-check.test.sh` tests the exception list of `public-check.sh` in a temporary repository. It needs Git and no network, and it does not need the local tag of `ci.sh upstream-ref`.
+- `pins.sh` compares the pin sources with the docs. It also checks that the row "Portable release tag" and the two `RELEASE_TAG=` lines of `EXPLAINER.md` hold one tag.
+- `pins.test.sh` tests `pins.sh` and the version defaults of `build.sh` on a temporary copy of the pin sources and the docs. It replaces `docker` with a stand-in command, so it starts no container and needs no network.
+- `telemetry.sh` reads `scripts/tenant/telemetry.baseline`. It fails with exit code 1 when `deploy/compose.yaml`, `deploy/Dockerfile`, `scripts/tenant/smoke.sh` or `deploy/no-telemetry.mjs` does not hold a switch or a key of the baseline. It fails too when a kit file names the build setting `VITE_OTEL_ENABLED` of the browser trace exporter, or when `deploy/Dockerfile.dockerignore` does not keep `.env` files out of the build. It also fails when one of these source facts differs from the baseline:
+  - A default of the configuration schema. The default of a parent object is a fact only when it differs from the defaults of its keys.
+  - The name of an environment variable in upper case that the source reads in the form `env.NAME`, `env?.NAME` or `env['NAME']`. The locale names `LANG` and `LC_*` are not facts.
+  - A source line that unpacks the environment object, such as `const { NAME } = process.env` or the same form with `import.meta.env`.
+  - A source line that reads a telemetry variable.
+  - A host name or an IPv4 address after `http`, `https`, `ws` or `wss` in upper or lower case, and the number of places that name it. An address of the machine itself (a full IPv4 address `127.x.x.x`, or `0.0.0.0`) is not a fact. A host name that starts with these numbers is a fact.
+  - The number of addresses in a file whose host comes from a variable.
+  - An imported module with a telemetry name.
+  - A line outside the application source that names the build setting.
+
+  The guard compares names and lines. It cannot see these forms: a variable name in lower case (`process.env.ok_ping_url`); a variable name that the source computes (`process.env[name]`); the environment object under another name (`const e = process.env`, or a parameter with that default) when the name is not `env`; a request to an address that the baseline already counts; a request whose address the source builds from parts or takes from a variable (`fetch(url)`); a request to a path without a host (`navigator.sendBeacon('/api/usage')`); an address with the host `localhost`; a connection that does not use an address text (`net.connect(443, host)`, `dns.resolve(host)`); a module name that the source builds from parts without a telemetry word in one part. It needs Git and Node.js, and no network. `telemetry.sh update` writes the present source facts into the baseline after a review; `telemetry.sh list --ref <revision>` prints the facts of a revision.
+- `telemetry.test.sh` tests `telemetry.sh` in a temporary repository: a changed default, a new key, a changed default of a parent object, a new variable in each access form, an unpacked environment object, a new host, a host in upper case, an IPv4 address, a second place for a listed host, an address with a host from a variable, a `wss` address, a telemetry module, the build setting and a removed switch each give exit code 1. A locale name and an address of the machine itself give exit code 0.
+
+Each test runs immediately before its check. A failed test stops the job, and the step name shows which script is defective.
 
 The job `image` builds the image and runs the smoke test. It runs on a manual trigger, and when a file under `deploy/` differs between the base commit and the head commit. When the base commit is unknown, the job runs. By hand:
 
@@ -230,7 +250,9 @@ scripts/tenant/ci.sh deploy-changed <base commit> <head commit>
 scripts/tenant/ci.sh image
 ```
 
-`ci.sh image` builds the pinned upstream version into a temporary local tag, runs `smoke.sh`, compares the printed version with the pin, and removes the image. It pushes nothing.
+`ci.sh image` builds the pinned upstream version into a temporary local tag, runs `smoke.sh`, compares the printed version with the pin, runs `no-telemetry.test.sh`, and removes the image. It pushes nothing. `smoke.sh` also fails when a telemetry path is on in the started container.
+
+`scripts/tenant/no-telemetry.test.sh <image>` tests `deploy/no-telemetry.mjs` as the image holds it. It starts two containers of the image without a network, with a read-only root and with temporary file systems for `/data` and the home directory, and it removes them. It mounts no host directory. In the first container it runs the program on these files and compares the bytes of the result: a new file, lines added at the end, a second run, CRLF line ends, a replaced value, lines added in a mapping, a file that the parser writes, a file with only `null`, a number that the parser would change, two documents, a link inside `.ok`, a link to a file outside `.ok`, a link to a JSON file, a link to a file that does not exist, a link in the home directory, a `local` directory and a `.ok` directory that are links, and an old temporary file. In the second container `/data` is full, and the test confirms that no byte of the file changes for each write method. It needs Docker or Podman, and no Node.js on the host. The upstream update (`update.sh`) does not run this test. The job `image` of `checks.yml` runs it for a change under `deploy/`.
 
 ## Daily upstream update
 

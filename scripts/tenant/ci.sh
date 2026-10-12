@@ -125,6 +125,7 @@ case $action in
     printf '%s\n' "$smoke_output"
     printed=$(printf '%s\n' "$smoke_output" | sed -n 's/^smoke: ok //p' | tail -n 1)
     [ "$printed" = "$version" ] || fail "the image reports the version $printed, not $version"
+    scripts/tenant/no-telemetry.test.sh "$image" || fail "the test of the telemetry program failed"
     echo "ci: image ok $version"
     ;;
   *) usage ;;

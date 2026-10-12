@@ -20,6 +20,7 @@
 !docs
 !packages
 !deploy/entrypoint.sh
+!deploy/no-telemetry.mjs
 **/node_modules
 **/dist
 **/target

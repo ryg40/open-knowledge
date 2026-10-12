@@ -51,7 +51,7 @@ EXPLAINER.md	account-path	f5b376088b31a7d429be1c9a31a9da34c459dead	Fixed contain
 EXPLAINER.md	account-path	37f84764e69387598d987218ab9fccb0d47ab897	Fixed container account path or the generic account-path detector.
 EXPLAINER.md	tracker-number	bc7171c169ce3da9b1b631dab9000d46038622ca	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	account-path	8519bed2814ddc8be026a73b7cff6819cec394f3	Fixed container account path or the generic account-path detector.
-EXPLAINER.md	tracker-number	250411a85adafedf99c63af1abedf1a460a82014	Public installation or promotion step; not a private tracker reference.
+EXPLAINER.md	tracker-number	3ede2c5ac4f42beb7d5b3a27c1d9641d18adb071	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	tracker-number	f7948dfb91dc00b79c4ec3a5dc9beb663cfb269d	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	tracker-number	9641721b5d79ae184886c8e2833b185a08a1aae0	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	tracker-number	e37b7a9c7422a67e6031c948aa20fe5189b6a4f2	Public installation or promotion step; not a private tracker reference.
@@ -60,7 +60,6 @@ EXPLAINER.md	email	5d4531c994236aaae0e2626d3be811ed5506f388	Documented upstream 
 EXPLAINER.md	tracker-number	a2393f2188a1194dd380ea52ad4cb1daaa0193a0	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	tracker-number	e91fa88dbe4288d078da557cce07fab9d94bf574	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	tracker-number	cb81e4adb5808e2deb3a19d5039e83d4ef6b288f	Public installation or promotion step; not a private tracker reference.
-EXPLAINER.md	session-wording	30bd107ca7efd5cf1f8e84b6873feb88081d0444	Public product terminology, runtime reload mode or generic detector; not a session record.
 EXPLAINER.md	tracker-number	eb2f83258329e7c755929e3e172b09fc0fd4ffbe	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	tracker-number	f780607f31a6056d5b1291b70f716150f2e044e9	Public installation or promotion step; not a private tracker reference.
 EXPLAINER.md	tracker-number	8e4b2e6fcd48a27ec96ff1001ceb3f1ac5720d10	Public installation or promotion step; not a private tracker reference.
@@ -113,10 +112,11 @@ deploy/docs/hardening.md	account-path	1817024f3ebe27294fc4a7ca0cd27c0a22c42447	F
 deploy/docs/hardening.md	session-wording	256ba15addd80e8a96a0361c4701a0c77d5fffa3	Public product terminology, runtime reload mode or generic detector; not a session record.
 deploy/docs/hardening.md	session-wording	585ef507a7d446fed9553f603159744f93ccc1d0	Public product terminology, runtime reload mode or generic detector; not a session record.
 deploy/docs/hardening.md	account-path	056597a895afeaac3ac187644613bbaff0c88027	Fixed container account path or the generic account-path detector.
-deploy/docs/hardening.md	session-wording	b3a3c9cace08455d9118c602ace6b969afd0dc43	Public product terminology, runtime reload mode or generic detector; not a session record.
+deploy/docs/hardening.md	session-wording	b72ad372507533ae320172963d127f4ac1cd6eae	Public product terminology, runtime reload mode or generic detector; not a session record.
 deploy/docs/hardening.md	session-wording	10d0a3ad76825808219c4a5fd3c6a25f2e301f7a	Public product terminology, runtime reload mode or generic detector; not a session record.
 deploy/docs/hardening.md	session-wording	1e7d4d4712b21564f528d710d0e053034913eb69	Public product terminology, runtime reload mode or generic detector; not a session record.
 deploy/docs/hardening.md	setup-product	7ba101ca18065f3498d719e73f86e664b44ea669	Upstream runtime feature, editor exclusion or egress restriction; not a setup choice.
+scripts/tenant/no-telemetry.test.sh	account-path	8027b87adc376998ff4785d5813f49f8b32c7282	Fixed container account path or the generic account-path detector.
 scripts/tenant/pins.test.sh	email	031982cf09a237c97649e1100e812109b5a64c4b	Synthetic fixture address, not a real account.
 scripts/tenant/promote.sh	url-host	44ed4affd46817c5ed816b433c22faa3cf0ff586	Generic URL recognizer; literal pattern text, not a destination host.
 scripts/tenant/promote.sh	tracker-number	aec6783cf9283e38f0d33acde1b62d34446c1fd0	Public installation or promotion step; not a private tracker reference.
@@ -140,3 +140,17 @@ scripts/tenant/public-check.rules	session-wording	db3f4d3da670d85db5300a35f498b5
 scripts/tenant/smoke.sh	account-path	1e4063b343af33c0c444701507fb87a81568c4fd	Fixed container account path or the generic account-path detector.
 scripts/tenant/update.mjs	url-host	5414d5efbbbc31921533b09764fd0cc22ac21279	Public upstream release-notes API; unauthenticated read only.
 EXPLAINER.md	setup-product	503781b2feda71db66302c66059e0902f49bb373	Provenance of the Open Knowledge Format frontmatter names the generating program; not a setup choice.
+EXPLAINER.md	session-wording	9815872d888687332d6cf1a0973e60cf08445c46	Public product terminology, runtime reload mode or generic detector; not a session record.
+scripts/tenant/telemetry.baseline	session-wording	1aed431f55c84d6fe4a91a524f15dd51d2100a41	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
+scripts/tenant/telemetry.baseline	session-wording	3f3997cef0f4523c2da8a423b21ee22fa429b0a5	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
+scripts/tenant/telemetry.baseline	session-wording	fb5e3bc84bf13359323dfc82bfc765ba3b61980c	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
+scripts/tenant/telemetry.baseline	session-wording	ffeccb03a07b8d17276f842eda8dfc8800942bab	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
+scripts/tenant/telemetry.baseline	setup-product	5bdf2227996524b445a5f2bc07396cb2cec91dc8	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
+scripts/tenant/telemetry.baseline	setup-product	88950a542726ce6aa25cb8111cfc3659e1a02d1d	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
+scripts/tenant/telemetry.baseline	setup-product	8c9d0b7db9b992cecb9630b27123c5690dfefa12	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
+scripts/tenant/telemetry.baseline	setup-product	8d336dfd6bf86e02852b41b9acba7b6711187f65	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
+scripts/tenant/telemetry.baseline	setup-product	a3dd0d62054549e521597ed318ebcb2bcd227953	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
+scripts/tenant/telemetry.baseline	setup-product	e6879dae5a35eb8e494d4a514dc66b62d05d3f7f	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
+scripts/tenant/telemetry.baseline	setup-product	efd57f5fb86256190a27656b999f25f159172411	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
+scripts/tenant/telemetry.baseline	setup-product	f16d22fdc683927596a3604fae3ccd4fff124b99	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
+scripts/tenant/telemetry.baseline	setup-product	f5b39e5fed832fee1e47b52360bc37b0aa104311	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.

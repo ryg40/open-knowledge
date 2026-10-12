@@ -67,6 +67,26 @@ expect_status 2 "$tmp/repo/scripts/tenant/pins.sh"
 rmdir "$tmp/repo/deploy/docs/ci.md"
 mv "$tmp/ci.md" "$tmp/repo/deploy/docs/ci.md"
 expect_status 0 "$tmp/repo/scripts/tenant/pins.sh"
+release=$(awk -F'|' '$2 == " Portable release tag " { gsub(/[` ]/, "", $3); sub(/^portable-v/, "", $3); print $3; exit }' "$tmp/facts")
+expect_status 0 "$tmp/repo/scripts/tenant/pins.sh" --version "$release"
+expect_status 1 "$tmp/repo/scripts/tenant/pins.sh" --version 9.9.9
+[ "$(grep -c -E '^pins: EXPLAINER.md:[0-9]+: (row Portable release tag|RELEASE_TAG line): ' "$tmp/output")" -eq 3 ]
+grep -Fx 'pins: expected portable-v9.9.9 in the three places' "$tmp/output" >/dev/null
+awk -F'|' '
+  $2 == " Portable release tag " { $3 = " `portable-v9.9.9` " }
+  { print }
+' OFS='|' "$tmp/facts" > "$tmp/repo/EXPLAINER.md"
+expect_status 1 "$tmp/repo/scripts/tenant/pins.sh"
+grep -E '^pins: EXPLAINER.md:[0-9]+: row Portable release tag: portable-v9.9.9$' "$tmp/output" >/dev/null
+expect_status 1 "$tmp/repo/scripts/tenant/pins.sh" --version "$release"
+expect_status 1 "$tmp/repo/scripts/tenant/pins.sh" --version 9.9.9
+awk '/^[[:space:]]*RELEASE_TAG=portable-v/ && !done { sub(/portable-v.*/, "portable-v9.9.9"); done = 1 } { print }' "$tmp/facts" > "$tmp/repo/EXPLAINER.md"
+expect_status 1 "$tmp/repo/scripts/tenant/pins.sh"
+awk '/^[[:space:]]*RELEASE_TAG=portable-v/ && !done { done = 1; next } { print }' "$tmp/facts" > "$tmp/repo/EXPLAINER.md"
+expect_status 1 "$tmp/repo/scripts/tenant/pins.sh" --version "$release"
+cp "$tmp/facts" "$tmp/repo/EXPLAINER.md"
+expect_status 2 "$tmp/repo/scripts/tenant/pins.sh" --version
+expect_status 2 "$tmp/repo/scripts/tenant/pins.sh" --version v9.9.9
 
 cat > "$tmp/bin/docker" <<'EOF'
 #!/bin/sh
@@ -93,4 +113,4 @@ grep -Fx 'OK_RELEASE_VERSION=9.9.9' "$BUILD_ARGS" >/dev/null
 awk '{ sub(/\| Upstream version \| `[^`]+`/, "| Upstream version | `9.9.9`"); print }' EXPLAINER.md > "$tmp/explainer"
 mv "$tmp/explainer" EXPLAINER.md
 expect_status 0 scripts/tenant/pins.sh
-echo "pins test: ok (six pins, doc drift, exits 0/1/2, build defaults and overrides)"
+echo "pins test: ok (six pins, doc drift, release tag, exits 0/1/2, build defaults and overrides)"

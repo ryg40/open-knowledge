@@ -6,7 +6,7 @@ const args = process.argv.slice(2).map((arg) =>
   arg.replace(/^(container:)?(ok-smoke-[a-f0-9]{8}(?:-version|-probe)?)$/, `$1${process.env.OK_UPDATE_PREFIX}-$2`),
 );
 const command = args[0];
-const allowed = ['build', 'run', 'create', 'start', 'inspect', 'port', 'rm', 'image'];
+const allowed = ['build', 'run', 'create', 'start', 'exec', 'inspect', 'port', 'rm', 'image'];
 if (!allowed.includes(command) || (command === 'image' && !['inspect', 'save', 'rm'].includes(args[1]))) {
   process.stderr.write('update: Docker operation refused\n');
   process.exit(2);
@@ -17,6 +17,10 @@ if (command === 'run' || command === 'create') {
   const name = args[args.indexOf('--name') + 1];
   if (!name.startsWith(`${process.env.OK_UPDATE_PREFIX}-`)) process.exit(2);
   appendFileSync(process.env.OK_UPDATE_CONTAINER_LEDGER, `${name}\n`);
+}
+if (command === 'exec' && !args[1]?.startsWith(`${process.env.OK_UPDATE_PREFIX}-`)) {
+  process.stderr.write('update: container command refused\n');
+  process.exit(2);
 }
 if (command === 'rm' && args.slice(1).some((arg) => !arg.startsWith('-') && !arg.startsWith(`${process.env.OK_UPDATE_PREFIX}-`))) {
   process.stderr.write('update: container removal refused\n');

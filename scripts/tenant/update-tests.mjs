@@ -25,7 +25,7 @@ function fixture(context, scenario = '') {
   const repo = join(tmp, 'repo'), bin = join(tmp, 'bin'), work = join(tmp, 'work');
   mkdirSync(join(repo, 'scripts/tenant'), { recursive: true });
   mkdirSync(bin);
-  for (const name of ['update.sh', 'update.mjs', 'update-ci.mjs', 'update-docker.mjs', 'build.sh', 'scan.sh', 'smoke.sh', 'pins.sh', 'install-hooks.sh', 'public-check.sh', 'public-check.development', 'public-check.rules', 'public-check.allow']) cpSync(join(root, 'scripts/tenant', name), join(repo, 'scripts/tenant', name));
+  for (const name of ['update.sh', 'update.mjs', 'update-ci.mjs', 'update-docker.mjs', 'telemetry.mjs', 'build.sh', 'scan.sh', 'smoke.sh', 'pins.sh', 'install-hooks.sh', 'public-check.sh', 'public-check.development', 'public-check.rules', 'public-check.allow']) cpSync(join(root, 'scripts/tenant', name), join(repo, 'scripts/tenant', name));
   for (const name of ['deploy', 'EXPLAINER.md', '.gitleaks.toml']) cpSync(join(root, name), join(repo, name), { recursive: true });
   mkdirSync(join(repo, 'packages/cli'), { recursive: true });
   mkdirSync(join(repo, 'packages/server/src/mcp/tools'), { recursive: true });
@@ -33,6 +33,9 @@ function fixture(context, scenario = '') {
   writeFileSync(join(repo, 'package.json'), JSON.stringify({ packageManager: JSON.parse(readFileSync(join(root, 'package.json'))).packageManager }, null, 2) + '\n');
   writeFileSync(join(repo, 'pnpm-workspace.yaml'), 'packages: []\n');
   writeFileSync(join(repo, 'packages/server/src/mcp/tools/read.ts'), "server.registerTool('read', {});\n");
+  mkdirSync(join(repo, 'packages/core/src/config'), { recursive: true });
+  const schema = (enabled) => `export const ConfigSchema = z.object({\n  telemetry: z\n    .looseObject({\n      usage: z\n        .looseObject({\n          enabled: z\n            .boolean()\n            .default(${enabled}),\n        })\n        .default({ enabled: ${enabled} }),\n    })\n    .default({ usage: { enabled: ${enabled} } }),\n});\n`;
+  writeFileSync(join(repo, 'packages/core/src/config/schema.ts'), schema(false));
   writeFileSync(join(repo, 'shared'), 'base\n');
   git(repo, 'init', '-q', '-b', 'main'); git(repo, 'add', '.'); git(repo, 'commit', '-qm', `main reset: post-stable v${current}`);
   const base = git(repo, 'rev-parse', 'HEAD');
@@ -49,6 +52,8 @@ function fixture(context, scenario = '') {
   mkdirSync(join(repo, '.github/workflows'), { recursive: true }); writeFileSync(join(repo, '.github/workflows/new.yml'), 'name: new\n');
   mkdirSync(join(repo, '.husky')); writeFileSync(join(repo, '.husky/pre-commit'), 'exit 0\n');
   writeFileSync(join(repo, 'packages/server/src/mcp/tools/write.ts'), "server.registerTool('write', {});\n");
+  writeFileSync(join(repo, 'packages/core/src/config/schema.ts'), schema(true));
+  writeFileSync(join(repo, 'packages/server/src/usage.ts'), "if (process.env.OK_USAGE_REPORT !== '0') fetch('https://collector.example.net/v1');\n");
   if (scenario === 'conflict') writeFileSync(join(repo, 'shared'), 'upstream edit\n');
   git(repo, 'add', '.'); git(repo, 'commit', '-qm', `main reset: post-stable v${next}`);
   const release = git(repo, 'rev-parse', 'HEAD');
@@ -273,6 +278,9 @@ test('notes: breaking sections come first and every kit input drift is listed', 
   assert.deepEqual(result.drift.new_workflows, ['.github/workflows/new.yml']);
   assert.equal(result.drift.new_husky, true); assert.equal(result.drift.mcp_tools.changed, true);
   assert.deepEqual(result.drift.mcp_tools.to, ['read', 'write']);
+  assert.equal(result.drift.telemetry.changed, true);
+  assert.deepEqual(result.drift.telemetry.added, ['default\ttelemetry.usage.enabled\ttrue', 'env\tOK_USAGE_REPORT', 'host\tcollector.example.net\t1', "read\tpackages/server/src/usage.ts\tif (process.env.OK_USAGE_REPORT !== '0') fetch('collector.example.net/v1');"]);
+  assert.deepEqual(result.drift.telemetry.removed, ['default\ttelemetry.usage.enabled\tfalse']);
   writeFileSync(join(f.bin, 'releases'), `#!/bin/sh\nprintf '%s\\n' '[{"tag_name":"v${next}","body":"- A non-breaking improvement. No breaking changes."}]'\n`);
   const compatible = f.call('notes', ['--from', current, '--to', next, '--workdir', f.work]);
   assert.equal(compatible.code, 0); assert.equal(compatible.result.breaking, false);
@@ -404,4 +412,23 @@ test('workflow glue: detect selects a new version once, and the pull request car
   assert.equal(posts[0].body.base, 'local-dev'); assert.equal(posts[0].body.head, branch);
   assert.equal(posts[0].body.title, `[BREAKING] Upstream sync v${next}`);
   assert.match(posts[0].body.body, /^\*\*BREAKING CHANGE/); assert.match(posts[0].body.body, /Replace the old setting/);
+});
+
+test('docker wrapper: exec reaches only a container of its own run', (context) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ok-update-test-'));
+  context.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const calls = join(tmp, 'calls'), docker = join(tmp, 'docker'), prefix = 'ok-update-0123456789abcdef';
+  writeFileSync(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\n`);
+  chmodSync(docker, 0o755);
+  const run = (...args) => spawnSync(process.execPath, [join(root, 'scripts/tenant/update-docker.mjs'), ...args], { encoding: 'utf8',
+    env: { ...process.env, OK_UPDATE_PREFIX: prefix, OK_UPDATE_DOCKER_EXECUTABLE: docker, OK_UPDATE_CONTAINER_LEDGER: join(tmp, 'ledger') } });
+  for (const refused of [['exec', 'another-container', 'cat', '/data/.ok/config.yml'], ['exec', `${prefix}d-1`, 'id'], ['exec', '-u', '0', `${prefix}-1`, 'sh'], ['exec', '--user=root', `${prefix}-1`, 'id'], ['exec']]) {
+    const output = run(...refused);
+    assert.equal(output.status, 2, refused.join(' '));
+    assert.match(output.stderr, /update: container command refused/);
+  }
+  assert.equal(existsSync(calls), false);
+  assert.equal(run('exec', `${prefix}-1`, 'id').status, 0);
+  assert.equal(run('exec', 'ok-smoke-0123abcd', 'node', '/usr/local/lib/ok-no-telemetry.mjs', '--check').status, 0);
+  assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'), [`exec ${prefix}-1 id`, `exec ${prefix}-ok-smoke-0123abcd node /usr/local/lib/ok-no-telemetry.mjs --check`]);
 });

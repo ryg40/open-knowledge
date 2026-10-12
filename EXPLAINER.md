@@ -8,7 +8,7 @@ tags:
   - portable-release
 generated:
   by: process:claude-code
-  at: 2026-10-07T17:30:00Z
+  at: 2026-10-12T02:40:38Z
 ---
 
 # OpenKnowledge portable release: install explainer
@@ -107,7 +107,7 @@ Do these edits for each new portable release:
 5. Update the section "Where the outputs come from". Keep earlier observations distinct from checks of the new release.
 6. Set `generated.at` in the frontmatter to the time of the edit, as an ISO 8601 datetime with the `Z` offset. The frontmatter follows the Open Knowledge Format, version 0.2.
 
-Pin literals belong in their single rows in "Release facts" only. Run `scripts/tenant/pins.sh` after updating the table. It lists the pins and their sources, then checks this file and `deploy/docs/*.md` for drift and repeated literals. Exit 0 means agreement, 1 means a doc mismatch, and 2 means the check cannot run. It needs no Docker or Node.js.
+Pin literals belong in their single rows in "Release facts" only. Run `scripts/tenant/pins.sh` after updating the table. It lists the pins and their sources, then checks this file and `deploy/docs/*.md` for drift and repeated literals. It also checks that the row "Portable release tag" and the two `RELEASE_TAG=` lines hold one tag, and `scripts/tenant/promote.sh` runs it with `--version X.Y.Z` to require `portable-vX.Y.Z` there. Exit 0 means agreement, 1 means a doc mismatch, and 2 means the check cannot run. It needs no Docker or Node.js.
 
 The other sections use `RELEASE_TAG`, `UPSTREAM_VERSION` and `IMAGE`, or refer to the table. Output blocks use placeholders for versions. Portable release tags can also appear in the two `RELEASE_TAG=` lines. The native addon count in step 5 comes from the Dockerfile and needs review after an upstream sync. Numeric sample output in step 4 is illustrative, not a release fact.
 
@@ -117,8 +117,8 @@ Port, user ID and project name examples repeat values from the table. Review the
 
 | Fact | Value | Source |
 |---|---|---|
-| Portable release tag | `portable-v0.3.1` | Target release for this file. Not verified: the tag exists. `git tag --list 'portable-v*'` lists available tags. |
-| Portable version | `0.3.1` | The release tag without `portable-v` |
+| Portable release tag | `portable-v0.3.3` | Target release for this file. Not verified: the tag exists. `git tag --list 'portable-v*'` lists available tags. |
+| Portable version | `0.3.3` | The release tag without `portable-v` |
 | Upstream version | `0.83.2` | `ARG OK_VERSION` in `deploy/Dockerfile` |
 | Image tag | `open-knowledge:<upstream version>-p<portable version>` | The "Release identity" format in `deploy/docs/deployment.md`, with this release's versions |
 | Base image | `node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20` | `ARG NODE_IMAGE` in `deploy/Dockerfile` |
@@ -174,7 +174,7 @@ These commands give you a running container with the fewest steps. They skip ste
 1. Get the source and build the image.
 
    ```sh
-   RELEASE_TAG=portable-v0.3.1
+   RELEASE_TAG=portable-v0.3.3
    git clone --branch "$RELEASE_TAG" https://github.com/<organization>/<repository>.git open-knowledge
    cd open-knowledge
    UPSTREAM_VERSION=$(awk -F= '/^ARG OK_VERSION=/ { print $2; exit }' deploy/Dockerfile)
@@ -236,7 +236,7 @@ Run (steps 7 to 11)
         |
         v
   container ok-portable-openknowledge-1, port 8080
-     entrypoint.sh -> ok init (first start only) -> ok start
+     entrypoint.sh -> ok init (first start only) -> telemetry settings -> ok start
      server process, user 10001: web UI, API, /mcp, /collab, /healthz, /readyz
         |
         v
@@ -291,6 +291,8 @@ Tools that each script calls:
 | `scripts/tenant/scan.sh` | `git`, `tar`, `mktemp`, `docker`, `dirname`, `basename`, `cat`, `awk`, `sed`, `grep`, `od`, `tr`, `rm` |
 | `scripts/tenant/build.sh` | `git`, `tar`, `mktemp`, `cp`, `mkdir`, `rm`, `awk`, `grep`, `docker` |
 | `scripts/tenant/pins.sh` | `git`, `awk`, `dirname` |
+| `scripts/tenant/telemetry.sh` | `git`, `dirname` and Node.js 24 or newer |
+| `scripts/tenant/no-telemetry.test.sh` | `docker`, `od`, `tr` and `cat` |
 | `scripts/tenant/smoke.sh` | `docker`, `od`, `tr`, `sed`, `grep`, `sleep`, `mktemp`, `tail`, `date`, `rm` |
 
 Network hosts that the install contacts:
@@ -317,7 +319,7 @@ This step changes nothing on the machine.
 Clone the release repository at the release tag. The tag gives you one fixed commit of the branch `portable`.
 
 ```sh
-RELEASE_TAG=portable-v0.3.1
+RELEASE_TAG=portable-v0.3.3
 git clone --branch "$RELEASE_TAG" https://github.com/<organization>/<repository>.git open-knowledge
 cd open-knowledge
 git describe --tags
@@ -787,8 +789,9 @@ Stage `runtime` is the image.
 4. It creates `/data` and gives it to that user.
 5. It copies `/opt/open-knowledge` from the stage `build`.
 6. It links `/usr/local/bin/ok` and `/usr/local/bin/open-knowledge` to `/opt/open-knowledge/dist/cli.mjs`.
-7. It copies `deploy/entrypoint.sh` to `/usr/local/bin/entrypoint.sh` with mode 0755.
+7. It copies `deploy/entrypoint.sh` to `/usr/local/bin/entrypoint.sh` with mode 0755, and `deploy/no-telemetry.mjs` to `/usr/local/lib/ok-no-telemetry.mjs`.
 8. It sets `NODE_ENV=production`, `PORT=8080`, `OK_BIND=0.0.0.0` and `HOME=/home/openknowledge`.
+   It also sets the four telemetry switches of `deploy/compose.yaml`, so a container that does not use the Compose file has them too.
 9. It sets the user, the working directory `/data`, the port 8080, the health check and the entrypoint.
 
 </details>
@@ -819,7 +822,7 @@ Not verified: the time of a build with an empty cache.
 
 ## Step 6: Test the image
 
-`smoke.sh` starts the image in a test container and waits for the server. It uses its own container and its own volume, and it removes both.
+`smoke.sh` starts the image in a test container and waits for the server. Then it checks that each telemetry path is off. It uses its own container and its own volume, and it removes both.
 
 ```sh
 scripts/tenant/smoke.sh "$IMAGE"
@@ -832,6 +835,8 @@ smoke: start container ok-smoke-<random>
 smoke: wait up to 90s for /readyz
 smoke: published on 127.0.0.1:<random port>
 smoke: /readyz answered 200
+smoke: check that each telemetry path is off
+no-telemetry: ok
 smoke: stop container ok-smoke-<random>
 smoke: ok <upstream version>
 ```
@@ -856,7 +861,8 @@ The first line of the output must be the upstream version. The portable version 
    Between checks, it sleeps for at most 2 seconds. Docker operations and cleanup can add time.
    Once the container runs, it prints the port and requests `/readyz` with a 2-second request timeout.
 5. Docker selects a free port on `127.0.0.1`. Set `SMOKE_PORT=<free port>` to use a port you checked first. Each request uses another container of the image in the server container's network.
-6. On status 200, it removes the container and its volume with `docker rm --force --volumes`.
+6. On status 200, it runs `node /usr/local/lib/ok-no-telemetry.mjs --check` in the container with `docker exec`. The check fails when a telemetry switch has another value in the environment of the server process, when a telemetry key is not `false` in a configuration file, when a file exists under `/data/.ok/local/telemetry/`, `/data/.ok/local/logs/` or `/data/.ok/local/loss-capture/`, or when the file `skill-install-events.jsonl` exists in the `.ok` directory of the home directory. An image that does not hold the check also fails.
+7. It removes the container and its volume with `docker rm --force --volumes`.
 
 The version and request containers use the suffixes `-version` and `-probe`, with `--rm`. The exit trap removes remaining containers, their anonymous volumes and the temporary log directory.
 
@@ -868,7 +874,7 @@ Settings of the test container:
 | `/data` | An anonymous volume |
 | `/tmp` and `/home/openknowledge` | `tmpfs` |
 | Capabilities | `--cap-drop ALL`, `no-new-privileges:true` |
-| Environment | The 8 variables of `deploy/compose.yaml`, with `OK_EXTERNAL_URL=http://127.0.0.1:8080`. Step 8 lists the variables. |
+| Environment | The 11 variables of `deploy/compose.yaml`, with `OK_EXTERNAL_URL=http://127.0.0.1:8080`. Step 8 lists the variables. |
 
 The exit code is 0 on success, 1 on a failure and 2 on a wrong argument. On a failure, the script prints `smoke: <reason>`. If the container stopped or `/readyz` did not answer, it also prints the last 20 log lines.
 The readiness-timeout message gives the measured elapsed seconds and the limit. It removes the container, its volume and the temporary log in each case.
@@ -1031,8 +1037,13 @@ Environment variables of the container:
 | `OK_EXTERNAL_URL` | From the env file | The public origin. The server admits its host name in the `Host` and `Origin` headers. |
 | `OK_IDLE_SHUTDOWN` | `off` | The server does not stop when no client is connected. |
 | `DO_NOT_TRACK` | `1` | The server sends no skill-install report. |
+| `DISABLE_TELEMETRY` | `1` | The second switch for the same report. Each of the two stops it. |
+| `OK_DISABLE_LOCAL_SINK` | `1` | The server writes no diagnostic spans and no server log under `/data/.ok/local/`. It reads this switch before a configuration file. |
+| `OTEL_SDK_DISABLED` | `true` | The server pushes no traces and no metrics. Only the value `false` turns the push on. |
 | `OK_LOG_LEVEL` | `warn` | The file log keeps warnings and errors only. |
 | `OK_MCP_AUTOSTART` | `0` | A launcher in the container does not start a second server. |
+
+The image sets the same four telemetry switches. `scripts/tenant/telemetry.sh` fails when the Compose file, the Dockerfile or `smoke.sh` does not set one of them, or when a kit file names `VITE_OTEL_ENABLED`, the build setting that turns the trace exporter of the browser application on.
 
 `up -d --no-build` contacts no host: the image is on the machine. It does not change the clone or the image.
 
@@ -1043,10 +1054,11 @@ Environment variables of the container:
 <details>
 <summary>Drill-down: the first start and <code>entrypoint.sh</code></summary>
 
-The entrypoint of the image is `deploy/entrypoint.sh`. It does two things:
+The entrypoint of the image is `deploy/entrypoint.sh`. It does three things:
 
 1. If the directory `/data/.ok` is absent, it prints one line and runs `ok init --no-mcp --no-skills`.
-2. It replaces itself with `ok start`.
+2. It runs `node /usr/local/lib/ok-no-telemetry.mjs`. This program sets each telemetry key to `false` in the configuration files. It writes a file only when a key has another value, and it makes the smallest change that gives the result.
+3. It replaces itself with `ok start`.
 
 On the first start, the log starts with these lines:
 
@@ -1056,6 +1068,8 @@ Initialized git repo at /data/.git/ (default branch: main)
 Seeded .gitignore at /data/.gitignore (.DS_Store)
 Content scaffolded at /data/.ok/
   Created: .gitignore, config.yml, .okignore
+no-telemetry: set to false in /data/.ok/config.yml: telemetry.localSink.enabled (lines added at the end), lossCapture.enabled (lines added at the end)
+no-telemetry: set to false in <home directory>/.ok/global.yml: telemetry.skillInstallReports.enabled (lines added at the end)
 ```
 
 `--no-mcp` skips MCP registration. `--no-skills` skips user-global skill bundles, not project-local skills.
@@ -1068,9 +1082,9 @@ The data volume after the first start:
 | `/data/.git/info/exclude` | Local-only exclusions: `.ok/`, `.okignore`, `.mcp.json`, `.cursor/mcp.json`, `.codex/config.toml`, `opencode.json`, `.pi/extensions/open-knowledge.ts`, `.claude/launch.json` |
 | `/data/.gitignore` | Ignore rules for files of the operating system |
 | `/data/.okignore` | Paths that the document index excludes. Only comment lines at first. |
-| `/data/.ok/config.yml` | The project settings. Each key is a comment line at first. |
+| `/data/.ok/config.yml` | The project settings. Each key of `ok init` is a comment line. The entrypoint adds `telemetry.localSink.enabled: false` and `lossCapture.enabled: false` at the end. |
 | `/data/.ok/.gitignore` | Keeps `/data/.ok/local/` out of the Git repository |
-| `/data/.ok/local/` | State of this install: `cache/`, `logs/`, `telemetry/`, `principal.json`, `server.lock`, `state.json` |
+| `/data/.ok/local/` | State of this install: `cache/`, `principal.json`, `server.lock`, `state.json`. It has no `logs/`, `telemetry/` or `loss-capture/` directory. |
 
 The initial commit uses the fallback author `Open Knowledge <noreply@openknowledge.local>` when no Git identity exists. The repository does not track `.ok/` or `.okignore`.
 
@@ -1089,7 +1103,13 @@ The notice is the effect of `OK_ALLOW_EXTERNAL=1`. Step 10 is the answer to it.
 
 The log of a normal start also has `WARN (process-lock)` lines about `/data/.ok/local/server.lock`. Observed with the earlier image in "Release facts": these lines do not prevent a healthy state.
 
-On each later start, `/data/.ok` exists, so the entrypoint runs only `ok start`.
+On each later start, `/data/.ok` exists, so the entrypoint skips `ok init`. It runs the telemetry program again. A second start changes no byte of `/data/.ok/config.yml`.
+
+The file `.ok/global.yml` in the home directory holds `telemetry.skillInstallReports.enabled: false`. The home directory is not in the data volume, so the entrypoint writes this file again in each new container.
+
+A data volume from an earlier release gets the keys at its next start. When the file does not hold the top-level key `telemetry` or `lossCapture`, the entrypoint adds the lines of the key at the end of the file and changes no other byte. The section [What the entrypoint changes in a configuration file](deploy/docs/hardening.md#what-the-entrypoint-changes-in-a-configuration-file) lists each other case and what it can change. The entrypoint also sets `telemetry.localSink.enabled` and `lossCapture.enabled` to `false` in `/data/.ok/local/config.yml` when that file sets one of them to another value. Old files under `/data/.ok/local/telemetry/` and `/data/.ok/local/logs/` stay, and no byte is added to them. Delete them when your policy requires it.
+
+The entrypoint does not set a key in a configuration file in these cases: the YAML parser reports an error for the file (a syntax error, a second document, a duplicate key, an alias without an anchor); the top level of the file is a list or a single value; the file is a symbolic link that leads out of its `.ok` directory, to no file, or to a file whose name does not end in `.yml` or `.yaml`; the path or the link target is not a regular file; the file has more than one hard link; the `.ok` directory itself is a symbolic link; the file cannot be written, for example on a full disk; or no edit keeps the other data of the file. It can set one key of a file and refuse another key of the same file. It then prints the file and the reason, and a line that starts with `[entrypoint] a telemetry setting is not applied`, and starts the server. The environment switches still keep the local sink, the skill-install report and the push off. Loss capture has no environment switch and can then be on, so correct the file and start the container again.
 
 Not verified: that the server contacts no host when it starts.
 
@@ -1099,22 +1119,9 @@ Not verified: that the server contacts no host when it starts.
 
 The [knowledge base checklist](deploy/docs/hardening.md#knowledge-base-committed-configuration) explains the settings and their configuration scopes.
 
-Two files in the data volume hold the settings of the knowledge base. Add five settings to turn off diagnostic recording and the listed outbound features. Run each command one time.
+Two files in the data volume hold the settings of the knowledge base. The kit turns diagnostic recording off without a command: the entrypoint writes `telemetry.localSink.enabled: false` and `lossCapture.enabled: false` into `/data/.ok/config.yml` at each start, and the environment of the Compose file turns the local sink off before the server reads a file. Do not add these two keys by hand. Add three settings to turn off the listed outbound features. Run the command one time.
 
-Existing files stay, including `/data/.ok/local/telemetry/spans-current.jsonl` and `/data/.ok/local/logs/server-current.jsonl`. Earlier observations show that startup can still write a few kilobytes of spans after this change.
-
-Add the project settings to `/data/.ok/config.yml`:
-
-```sh
-docker compose -p ok-portable -f deploy/compose.yaml --env-file .local/host/ok.env \
-  exec -T openknowledge tee -a /data/.ok/config.yml > /dev/null <<'EOF'
-telemetry:
-  localSink:
-    enabled: false
-lossCapture:
-  enabled: false
-EOF
-```
+A start with these defaults writes no diagnostic span and no server log. Tested with the release in "Release facts": a new data volume holds no file under `/data/.ok/local/telemetry/`, `/data/.ok/local/logs/` or `/data/.ok/local/loss-capture/`, and a volume of an earlier release gets no new byte in its old files.
 
 Add the local settings to `/data/.ok/local/config.yml`:
 
@@ -1144,7 +1151,7 @@ Read the output, not only the exit code. Both valid configuration and a rejected
 ✓ Configuration valid (sources: /data/.ok/config.yml, /data/.ok/local/config.yml)
 ```
 
-Warning: a second run adds duplicate keys. `ok config validate` then prints `Map keys must be unique` and reports issues with a configuration layer. The server drops that layer and can restore defaults, including diagnostic recording.
+Warning: a second run adds duplicate keys. `ok config validate` then prints `Map keys must be unique` and reports issues with a configuration layer. The server drops that layer and can restore defaults. The entrypoint cannot set a telemetry key in a file with a duplicate key.
 
 <details>
 <summary>Drill-down: the two files and the five settings</summary>
@@ -1153,13 +1160,13 @@ Warning: a second run adds duplicate keys. `ok config validate` then prints `Map
 
 | File | Scope | State after the first start |
 |---|---|---|
-| `/data/.ok/config.yml` | The project. The schema calls this scope `project`. | Exists. Each key is a comment line. |
+| `/data/.ok/config.yml` | The project. The schema calls this scope `project`. | Exists. It holds the two telemetry keys of the entrypoint. |
 | `/data/.ok/local/config.yml` | This install only. The schema calls this scope `project-local`. `/data/.ok/.gitignore` excludes the directory `local/`. | Absent |
 
 | Key | File | Default | Effect of the value in this step |
 |---|---|---|---|
-| `telemetry.localSink.enabled` | Project | `true` | `false`: disables the local diagnostic sink after configuration loads. Startup can still write spans. |
-| `lossCapture.enabled` | Project | `true` | `false`: the server records no loss events under `/data/.ok/local/loss-capture/`. |
+| `telemetry.localSink.enabled` | Project | `true` | `false`, set by the entrypoint: the server writes no diagnostic spans and no server log. |
+| `lossCapture.enabled` | Project | `true` | `false`, set by the entrypoint: the server records no loss events under `/data/.ok/local/loss-capture/`. |
 | `search.semantic.enabled` | Local | `false` | `false`: the search sends no document text to an embeddings provider. |
 | `autoSync.mode` | Local | Not set | `off`: the server does no scheduled pull or push of the Git repository. |
 | `linkPreviews.enabled` | Local | `true` | `false`: the editor requests no preview of an external link. |
@@ -1168,11 +1175,11 @@ The scope and the default of each key come from `packages/core/src/config/schema
 
 The server of the release in the table "Release facts" ignores `linkPreviews.enabled` in the project file. `ok config validate` reports the key there, and names the local file as the correct place.
 
-The schema marks the five keys as `reload: 'live'`. Observed with the earlier image in "Release facts": the span file stops growing after the edit, without a restart.
+The schema marks the five keys as `reload: 'live'`. The server reads `telemetry.localSink.enabled` and `lossCapture.enabled` at its start only, so the entrypoint sets the keys before the server starts.
 
 Not verified: the effect of each of the other four keys on a running server.
 
-This step changes only the two files in the data volume. It contacts no host.
+This step changes only `/data/.ok/local/config.yml`. It contacts no host.
 
 </details>
 
@@ -1252,13 +1259,13 @@ Then set the MCP entry of your editor. This entry connects the launcher to the p
     "open-knowledge": {
       "command": "ok",
       "args": ["mcp", "--port", "8080"],
-      "env": {"DO_NOT_TRACK": "1"}
+      "env": {"DO_NOT_TRACK": "1", "DISABLE_TELEMETRY": "1", "OK_DISABLE_LOCAL_SINK": "1", "OTEL_SDK_DISABLED": "true"}
     }
   }
 }
 ```
 
-Keep the server name `open-knowledge`, so that the tool names match. Adapt the outer configuration structure to your editor.
+Keep the server name `open-knowledge`, so that the tool names match. Adapt the outer configuration structure to your editor. The `env` values are the four telemetry switches of the kit. They keep the launcher process on your machine from a local record, a report and a trace push.
 
 In the permission settings of the MCP client, deny these three tools: `mcp__open-knowledge__import`, `mcp__open-knowledge__install` and `mcp__open-knowledge__skills`.
 

@@ -1,0 +1,268 @@
+switch	DO_NOT_TRACK	1
+switch	DISABLE_TELEMETRY	1
+switch	OK_DISABLE_LOCAL_SINK	1
+switch	OTEL_SDK_DISABLED	true
+force	telemetry.localSink.enabled
+force	lossCapture.enabled
+force	telemetry.skillInstallReports.enabled
+unset	VITE_OTEL_ENABLED
+built	packages/app/src/components/AuthModal.tsx	1
+built	packages/app/src/editor/clipboard/lone-url.ts	1
+built	packages/cli/src/auth/device-flow.ts	1
+built	packages/cli/src/auth/resolve-auth.ts	1
+built	packages/cli/src/commands/auth/login.ts	1
+built	packages/cli/src/commands/auth/pat.ts	1
+built	packages/cli/src/commands/auth/repos.ts	1
+built	packages/cli/src/commands/auth/status.ts	1
+built	packages/cli/src/commands/clone.ts	1
+built	packages/cli/src/commands/share/name-check.ts	1
+built	packages/cli/src/commands/share/owners.ts	1
+built	packages/cli/src/commands/share/publish.ts	1
+built	packages/cli/src/commands/single-file-open.ts	1
+built	packages/cli/src/commands/start.ts	2
+built	packages/cli/src/commands/sync.ts	1
+built	packages/cli/src/github/folder-validator.ts	1
+built	packages/cli/src/mcp/shim.ts	1
+built	packages/core/src/sharing/receive-flow.ts	1
+built	packages/core/src/sharing/share-url.ts	1
+built	packages/core/src/skills-catalog/acquire/skills-sh.ts	2
+built	packages/core/src/skills-catalog/source-fields.ts	1
+built	packages/core/src/utils/embed-url-rewrite.ts	1
+built	packages/core/src/utils/youtube-embed.ts	1
+built	packages/server/src/boot.ts	1
+built	packages/server/src/github-permissions.ts	1
+built	packages/server/src/github-reference/fetch-reference.ts	2
+built	packages/server/src/handoff-api.ts	1
+built	packages/server/src/http/agent-write-routes.ts	2
+built	packages/server/src/http/asset-routes.ts	2
+built	packages/server/src/http/document-routes.ts	2
+built	packages/server/src/http/history-routes.ts	2
+built	packages/server/src/http/sync-routes.ts	1
+built	packages/server/src/http/test-routes.ts	1
+built	packages/server/src/process-lock.ts	1
+built	packages/server/src/share/construct-url.ts	2
+built	packages/server/src/share/git-context.ts	1
+built	packages/server/src/skills-sh-handlers.ts	1
+default	agents.autoApproveOkTools	true
+default	agents.browserTools	false
+default	appearance.preview.autoOpen	true
+default	appearance.sidebar.pinnedGlobalSkills	[]
+default	appearance.sidebar.pinnedProjectSkills	[]
+default	appearance.sidebar.showHiddenFiles	false
+default	appearance.sidebar.showOkFolders	false
+default	appearance.sidebar.showOnlyMarkdownFiles	false
+default	appearance.sidebar.showSkillGroups	true
+default	appearance.sidebar.showSkillsSection	true
+default	autoSync.default	null
+default	autoSync.enabled	null
+default	autoSync.mode	null
+default	autolinks	[]
+default	bridge.backgroundThrottle.enabled	true
+default	bridge.deferGuard.enabled	true
+default	bridge.fixedPoint.enabled	true
+default	bridge.flushOnHide.enabled	true
+default	bridge.lossDetector.enabled	true
+default	bridge.preDrain.enabled	true
+default	content.attachmentFolderPath	DEFAULT_ATTACHMENT_FOLDER_PATH
+default	content.dir	'.'
+default	contentRules.frontmatter.enabled	false
+default	contentRules.frontmatter.schemas	[]
+default	contentRules.markdownlint.enabled	false
+default	contentRules.okf.enabled	false
+default	contentRules.okf.generate.index	false
+default	editor.previewTabs	true
+default	editor.wordWrap	true
+default	git.hosts	{}
+default	linkPreviews.enabled	true
+default	lossCapture.enabled	true
+default	lossCapture.maxBytes	DEFAULT_LOSS_CAPTURE_MAX_BYTES
+default	search.semantic.baseUrl	DEFAULT_EMBEDDINGS_BASE_URL
+default	search.semantic.docTimeoutMs	DEFAULT_EMBEDDINGS_DOC_TIMEOUT_MS
+default	search.semantic.enabled	false
+default	search.semantic.maxBatchChars	DEFAULT_EMBEDDINGS_MAX_BATCH_CHARS
+default	search.semantic.maxBatchSize	DEFAULT_EMBEDDINGS_MAX_BATCH_SIZE
+default	search.semantic.model	DEFAULT_EMBEDDINGS_MODEL
+default	server.allowExternal	false
+default	server.bind	[...DEFAULT_SERVER_BIND]
+default	slides.enabled	false
+default	telemetry.localSink.attributeDenylist	[...DEFAULT_TELEMETRY_ATTRIBUTE_DENYLIST]
+default	telemetry.localSink.enabled	true
+default	telemetry.localSink.logs.maxBytes	DEFAULT_LOGS_MAX_BYTES
+default	telemetry.localSink.spans.maxBytes	DEFAULT_SPANS_MAX_BYTES
+default	telemetry.skillInstallReports.enabled	false
+default	terminal.enabled	null
+default	validation.fileTreeIndicators	true
+default	validation.links	DEFAULT_LINKS_VALIDATION
+default	validation.suppressLogLinkAdvisories	DEFAULT_SUPPRESS_LOG_LINK_ADVISORIES
+env	APPDATA
+env	CI
+env	CODEX_HOME
+env	COPILOT_HOME
+env	DEBUG
+env	DEV
+env	DISABLE_TELEMETRY
+env	DISPLAY
+env	DO_NOT_TRACK
+env	ELECTRON_RUN_AS_NODE
+env	FORCE_COLOR
+env	GIT_AUTHOR_EMAIL
+env	GIT_AUTHOR_NAME
+env	GIT_COMMITTER_EMAIL
+env	GIT_COMMITTER_NAME
+env	GIT_INDEX_FILE
+env	GIT_TERMINAL_PROMPT
+env	HOME
+env	HOST
+env	LOCALAPPDATA
+env	LOG_LEVEL
+env	MCP_DEBUG
+env	MODE
+env	NODE_ENV
+env	NO_COLOR
+env	OK_BOOT_RENAME_GC_RETRY_INTERVAL_MS
+env	OK_BRIDGE_THROW_ON_VIOLATION
+env	OK_BRIDGE_TOLERANCE_TELEMETRY
+env	OK_BRIDGE_VIOLATION_DEBOUNCE_S
+env	OK_BUNDLE_PROXY
+env	OK_CONSOLE_LEVEL
+env	OK_DEBUG_NATIVE
+env	OK_DEBUG_POSITION_SLICE
+env	OK_DESKTOP_CHANNEL
+env	OK_DESKTOP_PACKAGED
+env	OK_DESKTOP_VERSION
+env	OK_DESTROY_STEP_TIMEOUT_MS
+env	OK_DISABLE_LOCAL_SINK
+env	OK_EMBEDDINGS_BASE_URL
+env	OK_EMBEDDINGS_DIMENSIONS
+env	OK_EMBEDDINGS_MODEL
+env	OK_FEEDBACK_INTAKE_ORIGIN
+env	OK_FILE_LEVEL
+env	OK_FILE_WATCHER_BACKEND
+env	OK_FORCE_BROWSER
+env	OK_FORCE_DESKTOP
+env	OK_GH_TOKEN
+env	OK_GH_TOKEN_HOST
+env	OK_GH_TOKEN_LOGIN
+env	OK_GIT_TIMEOUT_MS
+env	OK_LOCK_KIND
+env	OK_LOG_FILE
+env	OK_LOG_LEVEL
+env	OK_MCP_AUTOSTART
+env	OK_MCP_SPAWN_TIMEOUT_MS
+env	OK_PERF_SERVER_MEMORY_ENABLED
+env	OK_RECLAIM_DISABLE
+env	OK_RETHROW_BRIDGE_LOSS
+env	OK_SEARCH_MAX_ENTRIES
+env	OK_SHADOW_MAINTENANCE_CONSOLIDATION_SPACING_MS
+env	OK_SHADOW_MAINTENANCE_DEAD_CHAIN_THRESHOLD
+env	OK_SHADOW_MAINTENANCE_DISABLED
+env	OK_SHADOW_MAINTENANCE_GC_TIMEOUT_MS
+env	OK_SHADOW_STAGE_TIMEOUT_MS
+env	OK_SHOWALL_MAX_ENTRIES
+env	OK_SINGLE_FILE_NO_OPEN
+env	OK_STARTUP_TRACEPARENT
+env	OK_TELEMETRY_VERBOSE
+env	OK_TEST_CONTENT_DIR
+env	OK_TEST_GIT_ENABLED
+env	OK_TEST_PROJECT_DIR
+env	OK_TEST_RENAME_FAULT
+env	OK_TEST_SINGLE_DOC_REL_PATH
+env	OK_TEST_STORE_DIVERGENCE
+env	OK_TEST_STORE_FAULT
+env	OPEN_KNOWLEDGE_GITHUB_CLIENT_ID
+env	OTEL_EXPORTER_OTLP_ENDPOINT
+env	OTEL_SDK_DISABLED
+env	OTEL_SERVICE_NAME
+env	OTEL_SERVICE_VERSION
+env	PATH
+env	PATHEXT
+env	PI_CODING_AGENT_DIR
+env	PROD
+env	SHELL
+env	SSH_CONNECTION
+env	SSH_TTY
+env	URL
+env	UV_CACHE_DIR
+env	VITE_APP_VERSION
+env	VITE_OK_PERF_INSTRUMENT
+env	VITE_OTEL_COLLECTOR_URL
+env	VITE_OTEL_ENABLED
+env	WAYLAND_DISPLAY
+env	XDG_CACHE_HOME
+env	XDG_CONFIG_HOME
+host	add-skill.vercel.sh	1
+host	antigravity.google	2
+host	api.github.com	9
+host	api.openai.com	45
+host	bun.sh	1
+host	cdn.agentclientprotocol.com	1
+host	claude.com	2
+host	contoh.com	2
+host	cursor.com	2
+host	developers.openai.com	2
+host	discord.gg	1
+host	docs.astral.sh	3
+host	docs.claude.com	1
+host	docs.github.com	2
+host	docs.openclaw.ai	1
+host	ejemplo.com	2
+host	example.com	36
+host	exemplo.com	2
+host	git-scm.com	3
+host	gitforwindows.org	2
+host	github.com	227
+host	gnu.org	1
+host	hermes-agent.nousresearch.com	2
+host	json-schema.org	11
+host	kb.example.com	1
+host	linear.app	1
+host	nodejs.org	4
+host	notes.example.com	83
+host	openclaw.ai	1
+host	opencode.ai	2
+host	openknowledge.ai	17
+host	pi.dev	2
+host	placeholder.invalid	2
+host	placeholder.local	1
+host	player.vimeo.com	1
+host	skills.sh	4
+host	sli.dev	1
+host	ui.shadcn.com	1
+host	unpkg.com	2
+host	www.loom.com	3
+host	www.monokai.nl	1
+host	www.skills.sh	10
+host	www.w3.org	33
+host	x.com	1
+module	@opentelemetry/api
+module	@opentelemetry/context-async-hooks
+module	@opentelemetry/core
+module	@opentelemetry/exporter-metrics-otlp-http
+module	@opentelemetry/exporter-trace-otlp-http
+module	@opentelemetry/instrumentation
+module	@opentelemetry/instrumentation-document-load
+module	@opentelemetry/instrumentation-fetch
+module	@opentelemetry/instrumentation-user-interaction
+module	@opentelemetry/otlp-transformer
+module	@opentelemetry/resources
+module	@opentelemetry/sdk-metrics
+module	@opentelemetry/sdk-trace-base
+module	@opentelemetry/sdk-trace-web
+module	@opentelemetry/semantic-conventions
+module	@opentelemetry/semantic-conventions/incubating
+read	packages/app/src/telemetry-impl.ts	return env?.VITE_OTEL_COLLECTOR_URL ?? 'localhost:14318';
+read	packages/app/src/telemetry.ts	if (env?.VITE_OTEL_ENABLED !== 'true') return;
+read	packages/cli/src/diagnose/bundle.ts	return process.env.OTEL_SDK_DISABLED === 'false';
+read	packages/core/src/utils/uninstall-feedback-submit.ts	: presentText(process.env?.OK_FEEDBACK_INTAKE_ORIGIN);
+read	packages/server/src/bridge-watchdog.ts	const verbose = process.env.OK_TELEMETRY_VERBOSE === '1';
+read	packages/server/src/external-change.ts	const verbose = process.env.OK_TELEMETRY_VERBOSE === '1';
+read	packages/server/src/local-sink-resolver.ts	if (process.env.OK_DISABLE_LOCAL_SINK === '1' || process.env.OK_DISABLE_LOCAL_SINK === 'true') {
+read	packages/server/src/persistence.ts	const verbose = process.env.OK_TELEMETRY_VERBOSE === '1';
+read	packages/server/src/server-observers.ts	const verbose = process.env.OK_TELEMETRY_VERBOSE === '1';
+read	packages/server/src/skills-sh-install-report.ts	return Boolean(env.DISABLE_TELEMETRY || env.DO_NOT_TRACK);
+read	packages/server/src/telemetry.ts	? process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'localhost:4318'
+read	packages/server/src/telemetry.ts	[ATTR_SERVICE_NAME]: process.env.OTEL_SERVICE_NAME || 'open-knowledge-server',
+read	packages/server/src/telemetry.ts	[ATTR_SERVICE_VERSION]: process.env.OTEL_SERVICE_VERSION || '0.2.0',
+read	packages/server/src/telemetry.ts	const pushEnabled = process.env.OTEL_SDK_DISABLED === 'false';
+read	packages/server/src/tolerance-telemetry-writer.ts	return env.OK_BRIDGE_TOLERANCE_TELEMETRY === '1';
+setting	.env.example	# VITE_OTEL_ENABLED=true

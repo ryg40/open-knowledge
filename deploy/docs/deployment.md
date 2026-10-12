@@ -11,9 +11,12 @@ This guide builds and runs OpenKnowledge in a container from this repository. Th
 | `deploy/Dockerfile` | Builds the image from source. It pins the base image by digest and checks the sha512 of the npm tarball. |
 | `deploy/compose.yaml` | Runs one service with a named volume at `/data`. |
 | `deploy/.env.example` | Lists the variables of `deploy/compose.yaml` with placeholder values. |
-| `deploy/entrypoint.sh` | Initializes `/data` on the first start, then starts the server. |
+| `deploy/entrypoint.sh` | Initializes `/data` on the first start, turns each telemetry key off, then starts the server. |
+| `deploy/no-telemetry.mjs` | Sets the telemetry keys to `false` in the configuration files of the container. With `--check`, it reports a switch, a key or a recorded file that shows a telemetry path is on. |
 | `scripts/tenant/build.sh` | Builds the image from a Git revision. |
 | `scripts/tenant/pins.sh` | Lists the pins and their sources, and checks the docs for drift. |
+| `scripts/tenant/no-telemetry.test.sh` | Tests `deploy/no-telemetry.mjs` in containers of an image: the bytes of each edit, the rule for symbolic links, and a full disk. |
+| `scripts/tenant/telemetry.sh` | Checks that the kit files keep each telemetry switch and do not turn the browser trace exporter on, and compares the configuration defaults, environment variables, outbound hosts and telemetry modules of the source with `scripts/tenant/telemetry.baseline`. |
 | `scripts/tenant/setup-remotes.sh` | Makes `upstream` a fetch-only remote. Creates the release remote `github` when `SHARED_URL` is set. |
 | `scripts/tenant/scan.sh` | Scans the repository for secrets. It also applies your host rules when you give them. |
 | `scripts/tenant/public-check.sh` | Checks fork files for private content and checks publication identities. |
@@ -332,7 +335,7 @@ The build needs BuildKit: use `docker buildx`, or a Docker version where BuildKi
 
 The first line of `deploy/Dockerfile` pins the frontend image by digest. The digest fixes its content even if the tag changes. BuildKit can still contact the registry for metadata or missing layers.
 
-Run `scripts/tenant/pins.sh` to list the upstream version, tarball sha512, base image, scanner image, frontend and pnpm version with their sources. The command checks `EXPLAINER.md` and `deploy/docs/*.md`, without Docker or Node.js. Pin values occur only in their single rows in the "Release facts" table of `EXPLAINER.md`. Exit 0 means agreement, 1 means a doc mismatch or repeated literal, and 2 means the check cannot run.
+Run `scripts/tenant/pins.sh` to list the upstream version, tarball sha512, base image, scanner image, frontend and pnpm version with their sources. The command checks `EXPLAINER.md` and `deploy/docs/*.md`, without Docker or Node.js. Pin values occur only in their single rows in the "Release facts" table of `EXPLAINER.md`. The command also checks that the row "Portable release tag" and the two `RELEASE_TAG=` lines hold one tag, and with `--version X.Y.Z` that the tag is `portable-vX.Y.Z`. Exit 0 means agreement, 1 means a doc mismatch or repeated literal, and 2 means the check cannot run.
 
 The variables in the table are environment variables of `build.sh`. The script passes each variable that is set as a build argument. The script exports the Git revision with `git archive`, so uncommitted changes outside `deploy/` do not enter the image. It sets the `OK_REVISION` label to the commit ID.
 
@@ -429,7 +432,7 @@ An override file can add a bind mount, an external network, or labels. Mount a d
 ## Hardening in the generic files
 
 The kit pins the base image, checks the tarball hash and runs the server without root privileges.
-Its Compose defaults remove extra privileges, stop skill-install reports, reduce CLI file logs and prevent launcher autostart.
+Its Compose defaults remove extra privileges, turn each telemetry path off, reduce CLI file logs and prevent launcher autostart.
 The [file-state table](hardening.md#state-of-the-files-in-deploy) separates supplied protections from operator actions.
 
 ## Limit egress
@@ -440,22 +443,18 @@ The [network host tables](hardening.md#network-hosts) separate build, container,
 
 ## Configure the knowledge base
 
-The data volume holds the configuration of the knowledge base in two files. `/data/.ok/config.yml` exists after the first start. `/data/.ok/local/config.yml` does not exist after the first start. The image has no text editor, so add the lines with `tee -a` in the container. Run each command one time.
+The data volume holds the configuration of the knowledge base in two files. `/data/.ok/config.yml` exists after the first start. `/data/.ok/local/config.yml` does not exist after the first start. The image has no text editor, so add the lines with `tee -a` in the container. Run the command one time.
 
 Warning: a second run adds duplicate keys and makes the file invalid. The server can drop that layer and restore defaults.
 
-Add these values to `/data/.ok/config.yml`:
+The kit records no telemetry and sends no report by default. You add no telemetry setting:
 
-```sh
-docker compose -p ok-portable -f deploy/compose.yaml --env-file .local/host/ok.env \
-  exec -T openknowledge tee -a /data/.ok/config.yml > /dev/null <<'EOF'
-telemetry:
-  localSink:
-    enabled: false
-lossCapture:
-  enabled: false
-EOF
-```
+- The image and `deploy/compose.yaml` set `DO_NOT_TRACK=1`, `DISABLE_TELEMETRY=1`, `OK_DISABLE_LOCAL_SINK=1` and `OTEL_SDK_DISABLED=true`.
+- The entrypoint sets `telemetry.localSink.enabled` and `lossCapture.enabled` to `false` in `/data/.ok/config.yml`, and `telemetry.skillInstallReports.enabled` to `false` in the user file of the container, at each start. A data volume from an earlier release gets the keys at its next start, and its old files under `/data/.ok/local/telemetry/` and `/data/.ok/local/logs/` stay. The entrypoint adds the lines of an absent key at the end of the file and changes no other byte; [What the entrypoint changes in a configuration file](hardening.md#what-the-entrypoint-changes-in-a-configuration-file) lists each other case.
+- `scripts/tenant/smoke.sh` fails when a started container has a switch with another value, a key that is not `false`, a recorded file in the data volume, or the file `skill-install-events.jsonl` in the home directory.
+- `scripts/tenant/telemetry.sh` fails when a kit file loses a switch, or when the source has a configuration default, an environment variable, an outbound host or a telemetry module that `scripts/tenant/telemetry.baseline` does not list. After a review of such a change, keep each path off and run `scripts/tenant/telemetry.sh update`.
+
+Do not append `telemetry` or `lossCapture` to `/data/.ok/config.yml`. The entrypoint wrote these keys, and a duplicate key makes the file invalid.
 
 Add these values to `/data/.ok/local/config.yml`:
 
@@ -514,13 +513,13 @@ For an MCP client on the same machine as the container, set the MCP entry of the
     "open-knowledge": {
       "command": "ok",
       "args": ["mcp", "--port", "8080"],
-      "env": {"DO_NOT_TRACK": "1"}
+      "env": {"DO_NOT_TRACK": "1", "DISABLE_TELEMETRY": "1", "OK_DISABLE_LOCAL_SINK": "1", "OTEL_SDK_DISABLED": "true"}
     }
   }
 }
 ```
 
-Keep the server name `open-knowledge`, so that the tool names match. Adapt the outer configuration structure to your editor.
+Keep the server name `open-knowledge`, so that the tool names match. Adapt the outer configuration structure to your editor. The `env` values are the four telemetry switches of the kit. They keep the launcher process on your machine from a local record, a report and a trace push.
 
 With `--port`, `ok mcp` forwards MCP messages to `http://127.0.0.1:<port>/mcp`, the server in the container. It also holds a keepalive WebSocket to `ws://127.0.0.1:<port>` and retries when the server is down.
 
@@ -588,7 +587,7 @@ docker run --rm --entrypoint ok <image> --version
 
 The output must equal `ARG OK_VERSION` of the Dockerfile used for the build. The portable version is in the image tag only.
 
-For a readiness check, run `scripts/tenant/smoke.sh <image>`. Docker selects a free loopback port by default. Set `SMOKE_PORT=<free port>` to use a port you checked first. The script captures container output before startup and prints the last 20 lines if the container stops or readiness times out. It measures the readiness interval with `date +%s`, with a 90-second limit.
+For a readiness check and a telemetry check, run `scripts/tenant/smoke.sh <image>`. After `/readyz` answers, the script runs `no-telemetry.mjs --check` in the container and fails when a telemetry path is on. Docker selects a free loopback port by default. Set `SMOKE_PORT=<free port>` to use a port you checked first. The script captures container output before startup and prints the last 20 lines if the container stops or readiness times out. It measures the readiness interval with `date +%s`, with a 90-second limit.
 The timeout message gives elapsed seconds. Docker operations and cleanup can add time.
 It removes its containers, anonymous volume and temporary log directory on exit.
 
@@ -750,7 +749,7 @@ Fix a finding on the development branch, then promote again. No option bypasses 
 | 8 | `X.Y.Z` is greater than every other local `portable-v*` tag, of every chain. While `public` does not exist, `X.Y.Z` must be `0.2.0` or greater: the public line starts at `portable-v0.2.0`. The script also reads the `portable-v*` tags from the push URL with `git ls-remote --tags`, and `X.Y.Z` must be greater than the last tag there. When the remote does not answer, the script prints `not verified: remote tags` and continues. | Exit 1 before any change. A release never takes the name of an earlier tag. `--push` stops with exit 1 when the remote tags are not verified. |
 | 9 | Checks out the snapshot commit in a temporary detached worktree. Gitleaks validates the merged configuration there. Scanner self-test: the script runs the gitleaks image with `--version` and no network. `GITLEAKS_IMAGE` selects the image, as for `scan.sh`. Then `scan.sh` checks the snapshot tree, and `scan.sh --history` checks the snapshot commit. Both scans apply the host rules. Each scan must print a gitleaks summary. No finding bypass exists. | Scanner errors exit with 2; findings exit with 1. Invalid scan input also stops promotion with exit 2. |
 | 10 | Each host rule checks the snapshot tree. A rule with a `path` applies only to matching file paths. | Exit 1. Findings print file, line number, commit and rule ID only. Matched text is never printed. A failed command or filter exits with 2. |
-| 11 | Runs `public-check.sh --development-only`, `--tree` and `--identities` on the snapshot commit. Then prints the identities of the commit and the tagger. | Exit 1 for findings, exit 2 when a check cannot run. |
+| 11 | Runs `public-check.sh --development-only`, `--tree` and `--identities` on the snapshot commit. Runs `pins.sh --version X.Y.Z` in the snapshot worktree, so a release tag in `EXPLAINER.md` that is not `portable-vX.Y.Z` stops the run. Then prints the identities of the commit and the tagger. | Exit 1 for findings, exit 2 when a check cannot run. |
 | 12 | Prints the plan: mode, source commit, snapshot commit and tree, parents, new version, remote name and URL without credentials, the two refspecs, the refs on the remote, and the commits that leave. On a first push it prints `first push:` with the upstream release commit and the number of release commits. It prints a `warning:` line for each foreign ref on the remote, and for each file in an allowlist of `.gitleaks.toml` that changed since the earlier release. | A warning does not stop the run. Examine it before the push. The dry run stops here with exit 0. |
 | 13 | Moves `public` to the snapshot commit with `git update-ref`, guarded by the earlier value. Writes the annotated tag `portable-vX.Y.Z` with the message `portable X.Y.Z`. Checks the tagger, the tag target and the identities again. | Exit 1. When the tag fails, the script prints the command that moves `public` back. |
 | 14 | `git push --dry-run <remote>` with the two refspecs, then the push of those two refs. Both use `push.followTags=false`. | Exit 1. The local branch `public` and the tag stay. |

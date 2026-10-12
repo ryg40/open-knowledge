@@ -92,6 +92,7 @@ async function pullRequest() {
   const body = [
     notes.breaking ? '**BREAKING CHANGE: read the first sections before the merge.**' : 'No breaking change is marked in the release notes.',
     `Upstream version ${notes.from} to ${notes.to}. Upstream commit \`${qualified.upstream_commit}\`. The qualification passed on \`${base}\` at \`${qualified.local_dev}\`.`,
+    ...(notes.drift?.telemetry?.changed ? ['**TELEMETRY CHANGE: the release changes a configuration default, an environment variable, an outbound host or a telemetry module.** Read `telemetry` under "Changed kit inputs", keep each path off, then run `scripts/tenant/telemetry.sh update`.'] : []),
     '## Release notes', text.length > 50000 ? `${text.slice(0, 50000)}\n\n(The notes are cut at 50000 characters.)` : text,
     '## Changed kit inputs', `\`\`\`json\n${drift}\n\`\`\``,
   ].join('\n\n');
