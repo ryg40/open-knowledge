@@ -1,0 +1,1163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>OpenKnowledge architecture: Public</title>
+<style>
+:root{--root:#0b0b0c;--panel:#141414;--card:#1c1b1a;--elevated:#242321;--text:#f3eee8;--muted:#bcb0a0;--accent:#e0b07e;--ink:#1a1208;--warn:#f2a07b;--line:rgba(224,176,126,0.16);--edge-line:rgba(224,176,126,0.3);}
+* { box-sizing: border-box; }
+.tooltip[hidden] { display: none; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--root); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; overflow: hidden; }
+.banner { height: 54px; display: flex; align-items: center; gap: 14px; padding: 0 18px; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, #171615, #0f0f0f); }
+.brand { display: flex; align-items: center; gap: 10px; }
+.mark { width: 12px; height: 12px; border-radius: 3px; background: var(--accent); box-shadow: 0 0 14px rgba(224, 176, 126, 0.55); }
+.banner h1 { margin: 0; font: 400 21px/1 Georgia, "Times New Roman", serif; letter-spacing: 0.2px; }
+.badge { font-size: 12px; font-weight: 700; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); }
+body.local .badge { background: var(--warn); border-color: var(--warn); color: var(--ink); }
+body.local .banner { box-shadow: inset 0 -2px 0 var(--warn); }
+.stats { margin-left: auto; color: var(--muted); font-size: 12px; }
+.layout { display: grid; grid-template-columns: 292px minmax(0, 1fr) 340px; height: calc(100% - 54px); }
+.sidebar, .detail { background: var(--panel); overflow-y: auto; padding: 16px 16px 28px; }
+.sidebar { border-right: 1px solid var(--line); }
+.detail { border-left: 1px solid var(--line); }
+section { margin-bottom: 20px; }
+h2 { margin: 0 0 8px; font-size: 11px; font-weight: 700; letter-spacing: 1.3px; text-transform: uppercase; color: var(--accent); }
+.detail h3 { margin: 2px 0 12px; font: 400 23px/1.2 Georgia, "Times New Roman", serif; }
+.detail p { margin: 0 0 14px; }
+input[type="search"], select { width: 100%; padding: 7px 9px; color: var(--text); background: var(--card); border: 1px solid var(--edge-line); border-radius: 8px; font: inherit; }
+.field { display: block; margin: 6px 0; color: var(--muted); font-size: 12px; }
+.field select { margin-top: 3px; }
+button { padding: 6px 10px; color: var(--text); background: var(--elevated); border: 1px solid var(--edge-line); border-radius: 8px; font: inherit; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.45; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.row { display: flex; gap: 8px; margin-top: 8px; }
+.quiet { background: transparent; }
+.view-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.view-list button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--ink); font-weight: 700; }
+.group-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+.group-row .count { margin-left: auto; color: var(--muted); font-size: 12px; }
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; flex: none; }
+.legend-row { display: flex; align-items: center; gap: 9px; margin: 5px 0; color: var(--muted); font-size: 12px; }
+.legend-row svg { flex: none; }
+.results, .links { list-style: none; padding: 0; margin: 8px 0 0; }
+.results button, .links button, .hop { display: block; width: 100%; margin: 3px 0; text-align: left; background: var(--card); }
+.target { display: block; color: var(--text); }
+.via { display: block; color: var(--muted); font-size: 12px; }
+.note { color: var(--muted); font-size: 12px; }
+.path-result { margin: 8px 0 0; padding-left: 22px; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; background: var(--card); border: 1px solid var(--edge-line); font-size: 12px; }
+.chip.planned { border-style: dotted; border-color: var(--accent); }
+.chip.option { border-style: dashed; }
+.stage { position: relative; overflow: hidden; background: radial-gradient(circle at 50% 35%, #131211 0%, var(--root) 72%); }
+#canvas { display: block; width: 100%; height: 100%; touch-action: none; user-select: none; }
+.frame { animation: appear 0.4s ease both; }
+.frame rect { fill: rgba(255, 255, 255, 0.022); stroke: rgba(224, 176, 126, 0.22); stroke-width: 1; }
+.frame text { fill: var(--accent); font-size: 12px; font-weight: 700; letter-spacing: 0.6px; }
+@keyframes appear { from { opacity: 0; } to { opacity: 1; } }
+.node { transition: opacity 0.2s ease; }
+.node .card { fill: var(--card); stroke: var(--group); stroke-width: 1.6; }
+.node.kind-option .card { stroke-dasharray: 7 4; }
+.node.status-planned .card { stroke-dasharray: 1.5 4.5; stroke-linecap: round; stroke-width: 2.2; }
+.node .label { fill: var(--text); font-size: 13px; font-weight: 600; }
+.node .meta { fill: var(--muted); font-size: 11px; }
+.node.dim { opacity: 0.17; }
+.node.match .card { stroke: var(--accent); stroke-width: 2.4; }
+.node.tour .card, .node.path .card { stroke: var(--accent); stroke-width: 2.8; }
+.node.selected .card { stroke: var(--accent); stroke-width: 3.2; filter: drop-shadow(0 0 9px rgba(224, 176, 126, 0.6)); }
+.node.hidden, .edge.hidden { display: none; }
+.edge { fill: none; stroke-width: 1.4; opacity: 0.5; transition: opacity 0.2s ease; }
+.edge.dim { opacity: 0.06; }
+.edge.lit { opacity: 1; stroke-width: 2.4; }
+.edge-label { display: none; fill: var(--text); font-size: 10.5px; text-anchor: middle; paint-order: stroke; stroke: var(--root); stroke-width: 4px; stroke-linejoin: round; }
+.edge-label.show { display: inline; }
+.zoom { position: absolute; top: 14px; right: 14px; display: flex; flex-direction: column; gap: 6px; }
+.zoom button { min-width: 42px; background: rgba(28, 27, 26, 0.92); }
+.tooltip { position: absolute; z-index: 5; max-width: 300px; padding: 6px 10px; pointer-events: none; background: rgba(20, 20, 20, 0.97); border: 1px solid var(--edge-line); border-radius: 8px; font-size: 12px; }
+.tooltip strong { display: block; color: var(--text); }
+.tooltip span { color: var(--muted); }
+.tourbar { position: absolute; left: 16px; right: 16px; bottom: 14px; display: grid; grid-template-columns: minmax(180px, 260px) auto auto auto minmax(0, 1fr); gap: 10px; align-items: center; padding: 10px 12px; background: rgba(20, 20, 20, 0.95); border: 1px solid var(--edge-line); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5); }
+.tour-count { min-width: 52px; color: var(--muted); font-size: 12px; text-align: center; }
+.tour-text { margin: 0; color: var(--text); }
+
+</style>
+</head>
+<body class="public">
+<header class="banner">
+<div class="brand"><span class="mark"></span><h1>OpenKnowledge architecture</h1></div>
+<span class="badge" id="version-badge">Public</span>
+<span class="stats" id="stats"></span>
+</header>
+<div class="layout">
+<aside class="sidebar" aria-label="Search, views and filters">
+<section>
+<h2>Search</h2>
+<input id="search" type="search" placeholder="Label or summary" aria-label="Search the nodes" autocomplete="off">
+<ul id="search-results" class="results"></ul>
+</section>
+<section>
+<h2>View</h2>
+<div id="view-list" class="view-list"></div>
+</section>
+<section>
+<h2>Groups</h2>
+<div id="group-list"></div>
+</section>
+<section>
+<h2>Path finder</h2>
+<label class="field">From<select id="path-from"></select></label>
+<label class="field">To<select id="path-to"></select></label>
+<div class="row"><button id="path-find" type="button">Find path</button><button id="path-clear" class="quiet" type="button">Clear</button></div>
+<p id="path-note" class="note"></p>
+<ol id="path-result" class="path-result"></ol>
+</section>
+<section>
+<h2>Legend</h2>
+<div id="legend"></div>
+</section>
+</aside>
+<main class="stage">
+<svg id="canvas" aria-label="Architecture graph"><defs id="defs"></defs><g id="viewport"><g id="frame-layer"></g><g id="edge-layer"></g><g id="node-layer"></g><g id="label-layer"></g></g></svg>
+<div class="zoom"><button id="zoom-in" type="button" aria-label="Zoom in">+</button><button id="zoom-out" type="button" aria-label="Zoom out">&minus;</button><button id="zoom-fit" type="button">Fit</button></div>
+<div id="tooltip" class="tooltip" hidden></div>
+<div class="tourbar">
+<select id="tour-select" aria-label="Tour"></select>
+<button id="tour-prev" type="button" aria-label="Previous tour stop">&larr;</button>
+<span id="tour-count" class="tour-count"></span>
+<button id="tour-next" type="button" aria-label="Next tour stop">&rarr;</button>
+<p id="tour-text" class="tour-text"></p>
+</div>
+</main>
+<aside class="detail" id="detail" aria-label="Details"></aside>
+</div>
+<script id="graph-data" type="application/json">
+{
+"title":"OpenKnowledge architecture",
+"version":"Public",
+"size":{"w":210,"h":58},
+"colors":{"root":"#0b0b0c","panel":"#141414","card":"#1c1b1a","elevated":"#242321","text":"#f3eee8","muted":"#bcb0a0","accent":"#e0b07e","ink":"#1a1208","warn":"#f2a07b"},
+"groups":[
+{"id":"package","label":"Package","color":"#86b9e3"},
+{"id":"process","label":"Process","color":"#e8a86c"},
+{"id":"data","label":"Data","color":"#7fcca2"},
+{"id":"network","label":"Network","color":"#c3a1f0"},
+{"id":"identity","label":"Identity","color":"#f094ad"},
+{"id":"repository","label":"Repository","color":"#dcc46e"},
+{"id":"check","label":"Check","color":"#6fd3cf"},
+{"id":"client","label":"Client","color":"#b6d873"},
+{"id":"external","label":"External","color":"#b0a9a3"}
+],
+"edgeKinds":[
+{"id":"request","label":"Request","color":"#8fb8de","dash":""},
+{"id":"dependency","label":"Dependency","color":"#a89e93","dash":"6 4"},
+{"id":"data","label":"Data","color":"#7fcca2","dash":""},
+{"id":"git","label":"Git","color":"#dcc46e","dash":""},
+{"id":"step","label":"Install order","color":"#e8a86c","dash":"2 5"},
+{"id":"check","label":"Check","color":"#6fd3cf","dash":"4 3"}
+],
+"views":[
+{"id":"all","label":"All views","summary":"This view shows every node, grouped by the kind of part. Choose another view to see one part of the system in its own frames."},
+{"id":"runtime","label":"Runtime","summary":"The container at run time. It shows the clients, the edge server, the server process, the data volume, the kit files and the packages in the image."},
+{"id":"repository","label":"Repository","summary":"The remotes, branches, hooks and kit scripts of a clone. It shows how one snapshot release leaves the development branch."},
+{"id":"ci","label":"CI","summary":"The workflows of the development repository and of the release repository. Each workflow calls the kit scripts, and no workflow makes a release."},
+{"id":"identity","label":"Identity","summary":"The login path from the browser to the server. A dotted node is planned and not built."},
+{"id":"install","label":"Install","summary":"The thirteen parts of the install explainer as one flow. Each tour stop names the parts that a command touches."},
+{"id":"telemetry","label":"Telemetry off","summary":"Each telemetry path of the server and the switch or key that turns it off. The checks prove that each path stays off."}
+],
+"nodes":[
+{"id":"browser","label":"Browser","group":"client","kind":"core","status":"built","summary":"A user opens the web app in a browser. Each request goes through the edge server, which does TLS and the login. Some browser requests go to the internet and do not pass the container.","views":["runtime","identity"]},
+{"id":"mcp-client","label":"MCP client","group":"client","kind":"core","status":"built","summary":"An editor or another program that speaks MCP. It starts the launcher and calls the tools of the server. Deny the tools import, install and skills in its permission settings.","views":["runtime","identity","install"]},
+{"id":"launcher","label":"Launcher: ok mcp","group":"process","kind":"core","status":"built","summary":"The command `ok mcp --port 8080` on the machine of the MCP client. It reads MCP messages on standard input and sends them to `/mcp` on the published port. It also holds a keepalive WebSocket. Install the pinned version, not `@latest`.","views":["runtime","identity","install"]},
+{"id":"desktop-app","label":"Desktop app","group":"client","kind":"option","status":"built","summary":"The desktop app on a user machine. It opens a local folder of Markdown files and runs its own server. On macOS, `ok mcp` without `--port` can send MCP calls to the app.","views":["runtime"]},
+{"id":"edge-server","label":"Edge server","group":"network","kind":"core","status":"built","summary":"A reverse proxy in front of the published port. It does TLS and authentication, because the server has none. The kit does not supply it. Prefer single sign-on through your identity provider.","views":["runtime","identity","install"]},
+{"id":"published-port","label":"Published port 127.0.0.1:8080","group":"network","kind":"core","status":"built","summary":"Compose publishes container port 8080 on `OK_PUBLISH_ADDRESS:OK_PUBLISH_PORT`. The default is `127.0.0.1:8080`, so only the Docker host can connect. Any process that reaches this port can read and change all documents.","views":["runtime"]},
+{"id":"compose-network","label":"Docker network","group":"network","kind":"option","status":"built","summary":"Compose makes a bridge network for the project. Use a dedicated network that holds only the edge server and this container. Then you can remove the port mapping.","views":["runtime"]},
+{"id":"container","label":"Container","group":"process","kind":"core","status":"built","summary":"Compose runs one service, `openknowledge`, as user 10001. It drops all Linux capabilities and sets `no-new-privileges`. A healthcheck calls `/readyz` every 30 seconds.","views":["runtime","install"]},
+{"id":"entrypoint","label":"entrypoint.sh","group":"process","kind":"core","status":"built","summary":"The first program of the container. On the first start it runs `ok init --no-mcp --no-skills`. Then it runs the telemetry program and starts the server with `exec ok start`.","views":["runtime","telemetry"]},
+{"id":"server-process","label":"Server process: ok start","group":"process","kind":"core","status":"built","summary":"One Node.js process serves everything on port 8080. It also answers the health paths `/healthz` and `/readyz`. It reads its settings from the environment and from `/data/.ok`. It has no authentication of its own.","views":["runtime","identity"]},
+{"id":"switches","label":"Four telemetry switches","group":"data","kind":"core","status":"built","summary":"The kit sets `DO_NOT_TRACK=1`, `DISABLE_TELEMETRY=1`, `OK_DISABLE_LOCAL_SINK=1` and `OTEL_SDK_DISABLED=true`. The image and the Compose file both set them. They work before the server reads a file.","views":["runtime","telemetry"]},
+{"id":"ep-web","label":"Web UI and API","group":"network","kind":"core","status":"built","summary":"The server sends the web app and answers its HTTP API calls. Without consent for external access, the server refuses a proxied request. Compose gives that consent with `OK_ALLOW_EXTERNAL=1` and `OK_EXTERNAL_URL`.","views":["runtime"]},
+{"id":"ep-mcp","label":"MCP endpoint /mcp","group":"network","kind":"core","status":"built","summary":"The MCP endpoint of the server. The launcher and remote MCP clients call it over HTTP. A write through MCP carries the name of the MCP client.","views":["runtime","identity"]},
+{"id":"ep-collab","label":"Collaboration WebSocket","group":"network","kind":"core","status":"built","summary":"The browser editor keeps a WebSocket to `/collab`. Several users edit one document at the same time through it. The server stores each save in the data volume.","views":["runtime"]},
+{"id":"acp","label":"ACP programs","group":"process","kind":"option","status":"built","summary":"ACP is a protocol that starts outside AI coding programs from the editor. The server downloads a catalog, runtimes and packages for it from the internet. The hardening guide says to avoid ACP in the container.","views":["runtime"]},
+{"id":"data-volume","label":"Data volume /data","group":"data","kind":"core","status":"built","summary":"A named volume at `/data`, `ok-portable_data` in the examples. It holds the documents, a Git repository and the `.ok/` settings. A persistent volume is not a backup.","views":["runtime","install"]},
+{"id":"config-project","label":"Project file .ok/config.yml","group":"data","kind":"core","status":"built","summary":"The committed configuration in `/data/.ok/config.yml`. It travels with the repository of the knowledge base. The entrypoint sets `telemetry.localSink.enabled` and `lossCapture.enabled` to `false` in it at each start.","views":["runtime","telemetry"]},
+{"id":"config-local","label":"Local file .ok/local/config.yml","group":"data","kind":"core","status":"built","summary":"The machine-local configuration in `/data/.ok/local/config.yml`. It does not travel with the repository. Turn link previews, semantic search and scheduled sync off in it.","views":["runtime","install"]},
+{"id":"config-user","label":"User file .ok/global.yml","group":"data","kind":"core","status":"built","summary":"The user file in the home directory of the container user. The entrypoint sets `telemetry.skillInstallReports.enabled` to `false` in it. Each new container starts with a new home directory.","views":["runtime","telemetry"]},
+{"id":"shadow-repo","label":"Shadow repository","group":"data","kind":"option","status":"built","summary":"The server records each save in a shadow Git repository at `/data/.git/ok`. A deleted document can still have copies there. Include it in your deletion policy.","views":["runtime"]},
+{"id":"compose-file","label":"deploy/compose.yaml","group":"data","kind":"core","status":"built","summary":"The generic Compose file of the kit. It defines one service, one named volume, the loopback port, the telemetry switches and the hardening settings. Host values go in a second override file.","views":["runtime"]},
+{"id":"env-file","label":"Env file","group":"data","kind":"core","status":"built","summary":"A file with `NAME=value` lines outside the repository or under `.local/`. It gives `OK_IMAGE` and `OK_EXTERNAL_URL` to Compose. Give it with `--env-file` on each Compose command.","views":["runtime","install"]},
+{"id":"dockerfile","label":"deploy/Dockerfile","group":"data","kind":"core","status":"built","summary":"The image build with the stages `native`, `build`, `artifacts` and `runtime`. It pins the base image and the frontend by digest. It takes the native addons from the npm tarball of the pinned version and checks its sha512.","views":["runtime"]},
+{"id":"image","label":"Container image","group":"data","kind":"core","status":"built","summary":"`build.sh` makes the image from one Git commit. The tag joins the upstream version and the portable version: `open-knowledge:X.Y.Z-pA.B.C`. Only the `runtime` stage becomes the image.","views":["runtime","install","ci"]},
+{"id":"pkg-cli","label":"packages/cli","group":"package","kind":"core","status":"built","summary":"The npm package `@inkeep/open-knowledge` with the commands `ok` and `open-knowledge`. The image holds a production copy of it in `/opt/open-knowledge`. On your machine, the same package is the MCP launcher.","views":["runtime"]},
+{"id":"pkg-server","label":"packages/server","group":"package","kind":"core","status":"built","summary":"The code of the local collaboration server. It serves the HTTP API, MCP and the collaboration WebSocket. It also holds the ingress policy and the writer identity.","views":["runtime"]},
+{"id":"pkg-app","label":"packages/app","group":"package","kind":"core","status":"built","summary":"The web app and the editor UI. The build puts it into the CLI package. The browser loads it from the server.","views":["runtime"]},
+{"id":"pkg-core","label":"packages/core","group":"package","kind":"core","status":"built","summary":"Shared domain logic for the other packages. It holds the configuration schema and its defaults. The telemetry check reads this schema.","views":["runtime"]},
+{"id":"pkg-plugin","label":"packages/plugin","group":"package","kind":"option","status":"built","summary":"The integration package for MCP hosts. Its MCP entry runs `npx -y @inkeep/open-knowledge@latest mcp`. That entry downloads the newest release at each start, so the kit pins the launcher instead.","views":["runtime"]},
+{"id":"pkg-desktop","label":"packages/desktop","group":"package","kind":"option","status":"built","summary":"The Electron desktop app for macOS, Windows and Linux. The kit does not build it. The container does not use it.","views":["runtime"]},
+{"id":"tp-skill-report","label":"Skill install report","group":"external","kind":"core","status":"built","summary":"After a public skill install, the server can send skill names and sources to `add-skill.vercel.sh`. `DO_NOT_TRACK=1` and `DISABLE_TELEMETRY=1` turn it off. The key `telemetry.skillInstallReports.enabled: false` turns it off too.","views":["runtime","telemetry"]},
+{"id":"tp-otel-push","label":"Trace and metric push","group":"external","kind":"core","status":"built","summary":"The server pushes traces and metrics to an OTLP endpoint only when `OTEL_SDK_DISABLED` is `false`. The kit sets it to `true`. Block the host of `OTEL_EXPORTER_OTLP_ENDPOINT` as well.","views":["runtime","telemetry"]},
+{"id":"ext-acp","label":"ACP catalog and downloads","group":"external","kind":"option","status":"built","summary":"`cdn.agentclientprotocol.com` gives the ACP catalog. `nodejs.org`, `registry.npmjs.org` and `github.com` give runtimes and packages. Block these hosts for the running container.","views":["runtime"]},
+{"id":"remote-upstream","label":"Remote upstream","group":"repository","kind":"core","status":"built","summary":"The public OpenKnowledge repository `https://github.com/inkeep/open-knowledge`. The push URL is `DISABLED`, and the pre-push hook refuses a push. Upstream tags never go to the release remote.","views":["repository"]},
+{"id":"remote-origin","label":"Remote origin","group":"repository","kind":"core","status":"built","summary":"Your development repository on a Git server, for example Gitea. It is optional. It receives each ref that you push by name, and the pre-push hook does not limit these refs.","views":["repository","ci"]},
+{"id":"remote-github","label":"Remote github","group":"repository","kind":"core","status":"built","summary":"The release repository `https://github.com/<organization>/<repository>`. It receives only `public` as `portable` and the `portable-v*` tags. `setup-remotes.sh` creates it when `SHARED_URL` is set.","views":["repository","ci"]},
+{"id":"branch-main","label":"Upstream release commit","group":"repository","kind":"core","status":"built","summary":"The commit `main reset: post-stable vX.Y.Z` on the upstream branch `main`. It holds the version of `ARG OK_VERSION`. Each snapshot release has it as its last parent.","views":["repository"]},
+{"id":"branch-local-dev","label":"Branch local-dev","group":"repository","kind":"core","status":"built","summary":"The development branch of the fork. It holds the upstream source, the kit and the development documents. Work arrives through topic branches and merges.","views":["repository","ci"]},
+{"id":"sync-branch","label":"Branch sync/vX.Y.Z","group":"repository","kind":"core","status":"built","summary":"The daily upstream update pushes this branch to the development repository. It holds the merge that the update tested. A pull request brings it into `local-dev`.","views":["repository","ci"]},
+{"id":"branch-public","label":"Branch public","group":"repository","kind":"core","status":"built","summary":"The local branch of the public line. Only promotion writes it, and nobody checks it out. Each commit is one snapshot release.","views":["repository"]},
+{"id":"release-tag","label":"Tag portable-vX.Y.Z","group":"repository","kind":"core","status":"built","summary":"An annotated tag on a snapshot commit. Promotion writes it with the release identity. The tag starts the release pipeline.","views":["repository","ci"]},
+{"id":"branch-portable","label":"Branch portable","group":"repository","kind":"core","status":"built","summary":"The name of the public line on the release repository. A reader clones it at a release tag. It holds the upstream history and the snapshot commits, not the development history.","views":["repository"]},
+{"id":"bundle","label":"Git bundle","group":"repository","kind":"option","status":"built","summary":"One file that holds `portable` and its release tags. It moves the release to a machine without a network path. A clone from it needs `upstream`, `github` and the hooks.","views":["repository"]},
+{"id":"worktrees","label":"Worktrees","group":"repository","kind":"option","status":"built","summary":"Extra checkouts of the same clone. They share the hooks of the common Git directory. Promotion refuses to run while a worktree holds `public`.","views":["repository"]},
+{"id":"git-config-keys","label":"ok.hostRules and ok.historyBase","group":"data","kind":"core","status":"built","summary":"Two local Git config keys. `ok.hostRules` names the host rules file or holds `none`. `ok.historyBase` sets where the history scans start.","views":["repository"]},
+{"id":"hook-pre-commit","label":"pre-commit hook","group":"check","kind":"core","status":"built","summary":"It runs the staged public-content check, then the staged secret scan. A finding stops the commit. `install-hooks.sh` writes it.","views":["repository"]},
+{"id":"hook-pre-push","label":"pre-push hook","group":"check","kind":"core","status":"built","summary":"It refuses each push to `upstream`. For a remote other than `origin`, it admits only `public` as `portable` and the `portable-v*` tags. It scans the commits of each pushed ref.","views":["repository"]},
+{"id":"release-identity","label":"Release identity","group":"identity","kind":"core","status":"built","summary":"`OpenKnowledge Release <noreply@example.com>` is the author, committer and tagger of each release. `promote.sh` sets it itself. Your own Git identity does not reach the public line.","views":["repository"]},
+{"id":"setup-remotes","label":"setup-remotes.sh","group":"repository","kind":"core","status":"built","summary":"It makes `upstream` a fetch-only remote. With `SHARED_URL`, it also creates the release remote `github`. Its `--check` mode tests the remotes and the hooks.","views":["repository","install"]},
+{"id":"install-hooks","label":"install-hooks.sh","group":"repository","kind":"core","status":"built","summary":"It writes the two hooks into the hooks directory of the common Git directory. With `--check`, it reports a missing or old hook. It refuses to install when `core.hooksPath` is set.","views":["repository","install"]},
+{"id":"promote","label":"promote.sh","group":"repository","kind":"core","status":"built","summary":"The one command that makes a release. It builds a snapshot commit of `local-dev` without the development-only paths, runs each check and writes `public` and the tag. Without `--push` it is a dry run.","views":["repository"]},
+{"id":"update","label":"update.sh","group":"process","kind":"core","status":"built","summary":"It has three actions for an upstream update. `detect` compares the pins with the registries. `qualify` tests a release in a scratch clone, and `notes` reads its release notes.","views":["repository","ci"]},
+{"id":"pins","label":"pins.sh","group":"check","kind":"core","status":"built","summary":"It lists the pins and their sources: the upstream version, the tarball sha512, the base image, the scanner, the frontend and pnpm. It checks that `EXPLAINER.md` and the kit documents agree with them. It needs no Docker and no Node.js.","views":["repository","ci"]},
+{"id":"explainer","label":"EXPLAINER.md","group":"data","kind":"core","status":"built","summary":"The install walk-through for a developer. Its table of release facts holds each pin value one time. Each part names the files that a command changes.","views":["repository","install"]},
+{"id":"public-check","label":"public-check.sh","group":"check","kind":"core","status":"built","summary":"It checks complete fork files for private content in four classes: account paths and hosts, numbered references, dates and session words, and product names. It also checks the identities of the public line. A finding prints only the file, the line and the class.","views":["repository","ci","install"]},
+{"id":"pc-rules","label":"public-check.rules","group":"data","kind":"core","status":"built","summary":"The generic patterns of the public-content check. Each line has a class, a rule ID and a PCRE pattern. Host values never go in this file.","views":["repository"]},
+{"id":"pc-allow","label":"public-check.allow","group":"data","kind":"core","status":"built","summary":"Exact-line exceptions of the public-content check. Each row holds a path, a rule ID, the hash of the line and a reason. A changed line needs a new review.","views":["repository"]},
+{"id":"pc-development","label":"public-check.development","group":"data","kind":"core","status":"built","summary":"The list of paths that describe development only. The content check skips them. Promotion removes them from the snapshot and checks that none is left.","views":["repository"]},
+{"id":"scan","label":"scan.sh","group":"check","kind":"core","status":"built","summary":"It runs gitleaks from an image pinned by digest, with no network. It scans the tree, the staged changes or a range of commits. It adds the host rules when `ok.hostRules` names a file.","views":["repository","ci","install"]},
+{"id":"gitleaks-config","label":".gitleaks.toml","group":"data","kind":"core","status":"built","summary":"The configuration of the secret scan. It uses the default rules and adds rules for `.env` and `.credentials` files. It lists the upstream test fixtures that the default rules report.","views":["repository"]},
+{"id":"host-rules","label":"Host rules file","group":"data","kind":"core","status":"built","summary":"A gitleaks rule file outside the repository with the patterns of your host values. The scan, the public-content check, the pre-push hook and promotion read it. Promotion refuses a clone without it.","views":["repository"]},
+{"id":"git-server","label":"Gitea server","group":"external","kind":"core","status":"built","summary":"The Git server of the development repository. It reads the workflows from `.gitea/workflows/` only, because that directory exists. Its Actions runner runs the jobs.","views":["ci"]},
+{"id":"runner","label":"Host-mode runner","group":"process","kind":"core","status":"built","summary":"An `act_runner` with a host-mode label and the Docker CLI. The work directory has the same path on the runner and on the Docker daemon, so the kit scripts can mount it. The variable `OK_RUNNER` names the label.","views":["ci"]},
+{"id":"wf-checks","label":"checks.yml","group":"check","kind":"core","status":"built","summary":"The workflow of the development repository for each push and pull request of `local-dev`. The job `source` runs the source checks with their tests. The job `image` builds and tests the image for a change under `deploy/`.","views":["ci","telemetry"]},
+{"id":"wf-upstream-update","label":"upstream-update.yml","group":"process","kind":"core","status":"built","summary":"It runs one time each day and by hand. The jobs `detect`, `qualify`, `notes` and `pull-request` test a new upstream release. It opens at most one pull request for each version.","views":["ci"]},
+{"id":"wf-public-checks","label":"public-checks.yml","group":"check","kind":"core","status":"built","summary":"The workflow of the release repository for each push and pull request. It runs the secret scan and the public-content check on the hosted runner. It needs no secret and no variable.","views":["ci"]},
+{"id":"wf-portable-release","label":"portable-release.yml","group":"process","kind":"core","status":"built","summary":"The release pipeline. A tag `portable-vX.Y.Z` starts it. It scans, checks, builds, smoke-tests and pushes the image, then it records the digest.","views":["ci"]},
+{"id":"wf-upstream-files","label":"Upstream workflow files","group":"external","kind":"option","status":"built","summary":"The other files under `.github/workflows/` come from upstream. They have no repository guard, so disable them on the release repository. `workflows.sh upstream` lists them.","views":["ci"]},
+{"id":"hosted-runner","label":"Hosted runner ubuntu-latest","group":"external","kind":"core","status":"built","summary":"The public workflow always runs on the hosted runner `ubuntu-latest`. A pull request from a fork can run it. A self-hosted runner on a public repository can run code of a stranger.","views":["ci"]},
+{"id":"registry","label":"Image registry","group":"external","kind":"option","status":"built","summary":"The variable `OK_REGISTRY` names the registry and the namespace. The release pipeline pushes the image there. Without the variable, the job does not run.","views":["ci"]},
+{"id":"release-record","label":"Release record","group":"data","kind":"core","status":"built","summary":"The pipeline writes the tag, the commit, the image, the digest and the upstream version. They go to the job summary and to the artifact `release-record`. A deployment uses the digest, not the tag.","views":["ci"]},
+{"id":"workflows-check","label":"workflows.sh check","group":"check","kind":"core","status":"built","summary":"It checks the four workflow files of the fork. Each action is pinned by commit ID, and each run line starts with a tracked script or a known command. No run line pushes, tags or promotes.","views":["ci"]},
+{"id":"ci-sh","label":"ci.sh","group":"check","kind":"core","status":"built","summary":"Small CI actions: `lint`, `deploy-changed`, `upstream-remote`, `upstream-ref` and `image`. The `lint` action runs shellcheck on the kit scripts. The `image` action builds and tests the image and its telemetry program, then it removes the image.","views":["ci","telemetry"]},
+{"id":"kit-tests","label":"Tests of the checks","group":"check","kind":"core","status":"built","summary":"`public-check.test.sh` and `pins.test.sh` test two checks in temporary copies. They need Git and no network. Each test runs right before its check.","views":["ci"]},
+{"id":"arch-check","label":"Architecture page check","group":"check","kind":"core","status":"built","summary":"`build-architecture-html.test.sh` runs the self-test of the builder of this page. Then it builds each version in memory and compares it with the file. A difference gives exit 1.","views":["ci"]},
+{"id":"telemetry-sh","label":"telemetry.sh","group":"check","kind":"core","status":"built","summary":"The source guard. It checks that the kit files keep each switch. It also compares the configuration defaults, environment variables, outbound hosts and telemetry modules of the source with the baseline.","views":["ci","telemetry"]},
+{"id":"telemetry-test","label":"telemetry.test.sh","group":"check","kind":"core","status":"built","summary":"It tests `telemetry.sh` in a temporary repository. Each changed default, new variable, new host or removed switch must give exit 1. It needs Git and Node.js and no network.","views":["ci","telemetry"]},
+{"id":"build-sh","label":"build.sh","group":"process","kind":"core","status":"built","summary":"It exports one Git commit with `git archive` and builds the image with `deploy/Dockerfile`. Uncommitted changes outside `deploy/` do not enter the image. `OK_CONTAINER_CLI` selects Docker or Podman.","views":["ci","install"]},
+{"id":"smoke","label":"smoke.sh","group":"check","kind":"core","status":"built","summary":"It starts a container of the image with a read-only root and waits for `/readyz`. Then it runs the telemetry check in the container. The last line is `smoke: ok` and the upstream version.","views":["ci","install","telemetry"]},
+{"id":"no-telemetry-test","label":"no-telemetry.test.sh","group":"check","kind":"core","status":"built","summary":"It tests the telemetry program in two containers of the image without a network. It compares the bytes of each edit, the rule for links and the case of a full disk. The image job runs it.","views":["ci","telemetry"]},
+{"id":"build-hosts","label":"Build hosts","group":"external","kind":"core","status":"built","summary":"The build needs `registry.npmjs.org`, `deb.debian.org` and Docker Hub. The running container needs none of them.","views":["ci","install"]},
+{"id":"idp","label":"Identity provider","group":"identity","kind":"option","status":"built","summary":"Your single sign-on service, `<idp>`. The edge server sends the user to it for the login. The server of the kit does not talk to it.","views":["identity"]},
+{"id":"ingress-policy","label":"Ingress policy","group":"identity","kind":"core","status":"built","summary":"The server checks the Host and the Origin of each request against its allow lists. Without consent for external access, it refuses a request with a forwarding header. The health paths stay open.","views":["identity"]},
+{"id":"consent","label":"External access consent","group":"data","kind":"core","status":"built","summary":"The keys are `server.allowExternal` and `server.externalUrl`, or `OK_ALLOW_EXTERNAL=1` and `OK_EXTERNAL_URL`. Compose sets both from the env file. Give this consent only behind an edge server that authenticates.","views":["identity"]},
+{"id":"principal","label":"Project principal","group":"identity","kind":"core","status":"built","summary":"The server loads one principal for each project from `.ok/local/principal.json`. Its name comes from the Git config of the project, else it is `Local User`. Today each browser user writes with this one name.","views":["identity"]},
+{"id":"actor-identity","label":"Writer identity","group":"identity","kind":"core","status":"built","summary":"Each write gets a writer. A write through MCP names the MCP client, a browser write uses the principal, and else the write is anonymous. A field in the request cannot claim another principal.","views":["identity"]},
+{"id":"identity-headers","label":"Identity headers","group":"identity","kind":"core","status":"planned","summary":"Planned: the edge server sends the user ID, the name and the e-mail address in request headers. It removes each copy of these headers that a client sends. The server reads them only from a trusted proxy.","views":["identity"]},
+{"id":"trusted-proxies","label":"Trusted proxies","group":"identity","kind":"core","status":"planned","summary":"Planned: a list of address ranges in the project-local configuration. The server accepts identity headers only from a peer in this list, and only with consent for external access. The list is empty by default.","views":["identity"]},
+{"id":"identity-source","label":"Identity source","group":"identity","kind":"core","status":"planned","summary":"Planned: one place in the server turns the headers of a request into a principal. Without headers, the server uses the project principal. A later version can verify a signed token there.","views":["identity"]},
+{"id":"edge-principal","label":"Principal for each person","group":"identity","kind":"core","status":"planned","summary":"Planned: the server makes a principal for each person from the user header. The browser then shows each writer with their own name. The Git commits of the knowledge base carry that name.","views":["identity"]},
+{"id":"mcp-exempt","label":"MCP exemption","group":"identity","kind":"core","status":"planned","summary":"Planned: `/mcp` needs no identity headers. MCP clients keep the authentication of the edge server. MCP writes keep the name of the MCP client.","views":["identity"]},
+{"id":"inst-requirements","label":"Requirements","group":"check","kind":"core","status":"built","summary":"Check the tools before you start: Git, Docker with BuildKit, Compose and the standard utilities. On a Mac, use Podman. The image is verified on `linux/amd64` only.","views":["install"]},
+{"id":"inst-clone","label":"Clone at the release tag","group":"repository","kind":"core","status":"built","summary":"Clone the release repository, or a bundle, and check out `portable-vX.Y.Z`. The clone holds the upstream source and the kit. Run each command from its root.","views":["install"]},
+{"id":"inst-upgrade","label":"Upgrade","group":"process","kind":"core","status":"built","summary":"Fetch the next release tag and build a new image with a new tag. Back up the volume, then set `OK_IMAGE` and start again. Keep the old tag for a rollback.","views":["install"]},
+{"id":"inst-remove","label":"Remove the install","group":"process","kind":"option","status":"built","summary":"Stop and remove the container, the volume, the image and the clone. Remove the hooks and the launcher too. Make a backup first if you need the documents.","views":["install"]},
+{"id":"dockerignore","label":"Dockerfile.dockerignore","group":"data","kind":"core","status":"built","summary":"The ignore file of the image build. It keeps each `.env` file and each `.credentials` file out of the build context. So no local build setting can turn the browser trace exporter on.","views":["telemetry"]},
+{"id":"no-telemetry","label":"no-telemetry.mjs","group":"process","kind":"core","status":"built","summary":"The telemetry program of the kit. The entrypoint runs it at each start, before the server. It sets the three telemetry keys to `false` and changes as few bytes as possible.","views":["telemetry"]},
+{"id":"tp-local-sink","label":"Local diagnostic sink","group":"data","kind":"core","status":"built","summary":"Local spans and logs under `.ok/local/telemetry/` and `.ok/local/logs/` in the data volume. `OK_DISABLE_LOCAL_SINK=1` and the key `telemetry.localSink.enabled: false` turn it off. The check reports each recorded file.","views":["telemetry"]},
+{"id":"tp-loss-capture","label":"Loss capture records","group":"data","kind":"core","status":"built","summary":"Local records of content-loss events under `.ok/local/loss-capture/`. No environment switch exists for this path. The entrypoint sets `lossCapture.enabled: false` before the server starts.","views":["telemetry"]},
+{"id":"tp-browser-trace","label":"Browser trace exporter","group":"external","kind":"core","status":"built","summary":"The web app holds a trace exporter. It is on only in a build that sets its build switch to `true`. The image build sets no such value, and the source guard fails if a kit file names that switch.","views":["telemetry"]},
+{"id":"tp-skill-events","label":"Skill install event file","group":"data","kind":"core","status":"built","summary":"For each skill install action, the server adds a line to `skill-install-events.jsonl` in the home `.ok` directory. No switch turns this record off. The entrypoint uses `--no-skills`, and the check reports the file.","views":["telemetry"]},
+{"id":"tp-tolerance","label":"Tolerance event files","group":"data","kind":"option","status":"built","summary":"The server writes `tolerance-telemetry*.jsonl` files in `.ok/local/` only when `OK_BRIDGE_TOLERANCE_TELEMETRY=1`. The kit does not set it. The check reports such a file.","views":["telemetry"]},
+{"id":"tp-launcher","label":"Launcher on your machine","group":"client","kind":"option","status":"built","summary":"The launcher runs outside the container, so the kit cannot check it. Its MCP entry sets the four switches. Also set `telemetry.skillInstallReports.enabled: false` in `~/.ok/global.yml` on that machine.","views":["telemetry"]},
+{"id":"no-telemetry-check","label":"no-telemetry.mjs --check","group":"check","kind":"core","status":"built","summary":"The check mode of the telemetry program. It reports a switch with another value, a key that is not `false` and each recorded file. One such finding fails the check.","views":["telemetry"]},
+{"id":"telemetry-baseline","label":"telemetry.baseline","group":"data","kind":"core","status":"built","summary":"The reviewed list of the telemetry facts of the source. After a review of a new fact, `telemetry.sh update` writes the list again. A new fact without a review fails the check.","views":["telemetry"]}
+],
+"edges":[
+{"id":"browser>edge-server","from":"browser","to":"edge-server","kind":"request","label":"HTTPS with a login","views":["all","runtime","identity"]},
+{"id":"mcp-client>launcher","from":"mcp-client","to":"launcher","kind":"request","label":"standard input and output","views":["all","runtime","identity","install"]},
+{"id":"mcp-client>edge-server","from":"mcp-client","to":"edge-server","kind":"request","label":"HTTPS to /mcp from another machine","views":["all","runtime","identity","install"]},
+{"id":"launcher>published-port","from":"launcher","to":"published-port","kind":"request","label":"HTTP to /mcp and a keepalive WebSocket","views":["all","runtime"]},
+{"id":"launcher>desktop-app","from":"launcher","to":"desktop-app","kind":"request","label":"MCP calls to the app on macOS","views":["all","runtime"]},
+{"id":"edge-server>published-port","from":"edge-server","to":"published-port","kind":"request","label":"HTTP and WebSocket","views":["all","runtime"]},
+{"id":"edge-server>compose-network","from":"edge-server","to":"compose-network","kind":"request","label":"or through the Docker network","views":["all","runtime"]},
+{"id":"compose-network>server-process","from":"compose-network","to":"server-process","kind":"request","label":"port 8080","views":["all","runtime"]},
+{"id":"published-port>server-process","from":"published-port","to":"server-process","kind":"request","label":"port 8080 in the container","views":["all","runtime"]},
+{"id":"container>entrypoint","from":"container","to":"entrypoint","kind":"dependency","label":"runs first","views":["all","runtime"]},
+{"id":"entrypoint>server-process","from":"entrypoint","to":"server-process","kind":"dependency","label":"exec ok start","views":["all","runtime"]},
+{"id":"switches>server-process","from":"switches","to":"server-process","kind":"data","label":"environment","views":["all","runtime"]},
+{"id":"server-process>ep-web","from":"server-process","to":"ep-web","kind":"dependency","label":"serves","views":["all","runtime"]},
+{"id":"server-process>ep-mcp","from":"server-process","to":"ep-mcp","kind":"dependency","label":"serves","views":["all","runtime","identity"]},
+{"id":"server-process>ep-collab","from":"server-process","to":"ep-collab","kind":"dependency","label":"serves","views":["all","runtime"]},
+{"id":"server-process>acp","from":"server-process","to":"acp","kind":"request","label":"starts programs","views":["all","runtime"]},
+{"id":"acp>ext-acp","from":"acp","to":"ext-acp","kind":"request","label":"catalog, runtimes and packages","views":["all","runtime"]},
+{"id":"server-process>tp-skill-report","from":"server-process","to":"tp-skill-report","kind":"request","label":"report, off","views":["all","runtime"]},
+{"id":"server-process>tp-otel-push","from":"server-process","to":"tp-otel-push","kind":"request","label":"push, off","views":["all","runtime"]},
+{"id":"server-process>data-volume","from":"server-process","to":"data-volume","kind":"data","label":"reads and writes","views":["all","runtime"]},
+{"id":"container>data-volume","from":"container","to":"data-volume","kind":"data","label":"mounts at /data","views":["all","runtime","install"]},
+{"id":"data-volume>config-project","from":"data-volume","to":"config-project","kind":"data","label":"holds","views":["all","runtime"]},
+{"id":"data-volume>config-local","from":"data-volume","to":"config-local","kind":"data","label":"holds","views":["all","runtime","install"]},
+{"id":"data-volume>shadow-repo","from":"data-volume","to":"shadow-repo","kind":"data","label":"holds","views":["all","runtime"]},
+{"id":"server-process>config-user","from":"server-process","to":"config-user","kind":"data","label":"reads","views":["all","runtime"]},
+{"id":"compose-file>container","from":"compose-file","to":"container","kind":"dependency","label":"defines the service","views":["all","runtime"]},
+{"id":"env-file>compose-file","from":"env-file","to":"compose-file","kind":"data","label":"OK_IMAGE and OK_EXTERNAL_URL","views":["all","runtime"]},
+{"id":"compose-file>switches","from":"compose-file","to":"switches","kind":"data","label":"sets","views":["all","runtime"]},
+{"id":"dockerfile>switches","from":"dockerfile","to":"switches","kind":"data","label":"sets","views":["all","runtime"]},
+{"id":"dockerfile>image","from":"dockerfile","to":"image","kind":"dependency","label":"builds","views":["all","runtime"]},
+{"id":"image>container","from":"image","to":"container","kind":"dependency","label":"runs as","views":["all","runtime","install"]},
+{"id":"image>pkg-cli","from":"image","to":"pkg-cli","kind":"dependency","label":"holds a production copy","views":["all","runtime"]},
+{"id":"pkg-cli>pkg-server","from":"pkg-cli","to":"pkg-server","kind":"dependency","label":"depends on","views":["all","runtime"]},
+{"id":"pkg-cli>pkg-app","from":"pkg-cli","to":"pkg-app","kind":"dependency","label":"depends on","views":["all","runtime"]},
+{"id":"pkg-cli>pkg-core","from":"pkg-cli","to":"pkg-core","kind":"dependency","label":"depends on","views":["all","runtime"]},
+{"id":"pkg-server>pkg-core","from":"pkg-server","to":"pkg-core","kind":"dependency","label":"depends on","views":["all","runtime"]},
+{"id":"pkg-app>pkg-core","from":"pkg-app","to":"pkg-core","kind":"dependency","label":"depends on","views":["all","runtime"]},
+{"id":"pkg-app>pkg-server","from":"pkg-app","to":"pkg-server","kind":"dependency","label":"depends on","views":["all","runtime"]},
+{"id":"pkg-server>server-process","from":"pkg-server","to":"server-process","kind":"dependency","label":"runs as","views":["all","runtime"]},
+{"id":"pkg-app>ep-web","from":"pkg-app","to":"ep-web","kind":"dependency","label":"is the web app","views":["all","runtime"]},
+{"id":"pkg-desktop>pkg-cli","from":"pkg-desktop","to":"pkg-cli","kind":"dependency","label":"depends on","views":["all","runtime"]},
+{"id":"desktop-app>pkg-desktop","from":"desktop-app","to":"pkg-desktop","kind":"dependency","label":"is built from","views":["all","runtime"]},
+{"id":"pkg-plugin>launcher","from":"pkg-plugin","to":"launcher","kind":"dependency","label":"starts it with npx","views":["all","runtime"]},
+{"id":"launcher>pkg-cli","from":"launcher","to":"pkg-cli","kind":"dependency","label":"is the npm package","views":["all","runtime"]},
+{"id":"edge-server>idp","from":"edge-server","to":"idp","kind":"request","label":"single sign-on","views":["all","identity"]},
+{"id":"idp>identity-headers","from":"idp","to":"identity-headers","kind":"data","label":"user facts","views":["all","identity"]},
+{"id":"edge-server>identity-headers","from":"edge-server","to":"identity-headers","kind":"data","label":"sets them, drops client copies","views":["all","identity"]},
+{"id":"identity-headers>trusted-proxies","from":"identity-headers","to":"trusted-proxies","kind":"check","label":"only from a trusted peer","views":["all","identity"]},
+{"id":"trusted-proxies>identity-source","from":"trusted-proxies","to":"identity-source","kind":"data","label":"admitted headers","views":["all","identity"]},
+{"id":"identity-source>edge-principal","from":"identity-source","to":"edge-principal","kind":"data","label":"makes","views":["all","identity"]},
+{"id":"identity-source>principal","from":"identity-source","to":"principal","kind":"data","label":"falls back to","views":["all","identity"]},
+{"id":"edge-principal>actor-identity","from":"edge-principal","to":"actor-identity","kind":"data","label":"names the writer","views":["all","identity"]},
+{"id":"principal>actor-identity","from":"principal","to":"actor-identity","kind":"data","label":"writer today","views":["all","identity"]},
+{"id":"edge-server>ingress-policy","from":"edge-server","to":"ingress-policy","kind":"request","label":"forwarded request","views":["all","identity"]},
+{"id":"ingress-policy>consent","from":"ingress-policy","to":"consent","kind":"check","label":"needs both keys","views":["all","identity"]},
+{"id":"ingress-policy>server-process","from":"ingress-policy","to":"server-process","kind":"request","label":"admits","views":["all","identity"]},
+{"id":"consent>trusted-proxies","from":"consent","to":"trusted-proxies","kind":"check","label":"required too","views":["all","identity"]},
+{"id":"ep-mcp>actor-identity","from":"ep-mcp","to":"actor-identity","kind":"data","label":"MCP client name","views":["all","identity"]},
+{"id":"ep-mcp>mcp-exempt","from":"ep-mcp","to":"mcp-exempt","kind":"check","label":"no identity headers","views":["all","identity"]},
+{"id":"mcp-client>ep-mcp","from":"mcp-client","to":"ep-mcp","kind":"request","label":"MCP over HTTP","views":["all","identity"]},
+{"id":"launcher>ep-mcp","from":"launcher","to":"ep-mcp","kind":"request","label":"local HTTP, no edge server","views":["all","identity"]},
+{"id":"remote-upstream>branch-main","from":"remote-upstream","to":"branch-main","kind":"git","label":"fetch only","views":["all","repository"]},
+{"id":"branch-main>branch-local-dev","from":"branch-main","to":"branch-local-dev","kind":"git","label":"merge of a release","views":["all","repository"]},
+{"id":"sync-branch>branch-local-dev","from":"sync-branch","to":"branch-local-dev","kind":"git","label":"pull request","views":["all","repository","ci"]},
+{"id":"branch-local-dev>promote","from":"branch-local-dev","to":"promote","kind":"git","label":"source of a release","views":["all","repository"]},
+{"id":"promote>branch-public","from":"promote","to":"branch-public","kind":"git","label":"writes a snapshot commit","views":["all","repository"]},
+{"id":"promote>release-tag","from":"promote","to":"release-tag","kind":"git","label":"writes the annotated tag","views":["all","repository"]},
+{"id":"branch-main>branch-public","from":"branch-main","to":"branch-public","kind":"git","label":"last parent","views":["all","repository"]},
+{"id":"branch-public>remote-github","from":"branch-public","to":"remote-github","kind":"git","label":"pushed as portable","views":["all","repository"]},
+{"id":"release-tag>remote-github","from":"release-tag","to":"remote-github","kind":"git","label":"pushed by name","views":["all","repository","ci"]},
+{"id":"remote-github>branch-portable","from":"remote-github","to":"branch-portable","kind":"git","label":"holds","views":["all","repository"]},
+{"id":"branch-public>remote-origin","from":"branch-public","to":"remote-origin","kind":"git","label":"pushed as public","views":["all","repository"]},
+{"id":"branch-local-dev>remote-origin","from":"branch-local-dev","to":"remote-origin","kind":"git","label":"pushed by name","views":["all","repository","ci"]},
+{"id":"branch-portable>bundle","from":"branch-portable","to":"bundle","kind":"git","label":"moves without a network","views":["all","repository"]},
+{"id":"worktrees>branch-local-dev","from":"worktrees","to":"branch-local-dev","kind":"git","label":"checks out","views":["all","repository"]},
+{"id":"worktrees>hook-pre-commit","from":"worktrees","to":"hook-pre-commit","kind":"dependency","label":"share the hooks","views":["all","repository"]},
+{"id":"setup-remotes>remote-upstream","from":"setup-remotes","to":"remote-upstream","kind":"dependency","label":"push URL DISABLED","views":["all","repository"]},
+{"id":"setup-remotes>remote-github","from":"setup-remotes","to":"remote-github","kind":"dependency","label":"creates it with SHARED_URL","views":["all","repository"]},
+{"id":"install-hooks>hook-pre-commit","from":"install-hooks","to":"hook-pre-commit","kind":"dependency","label":"writes","views":["all","repository"]},
+{"id":"install-hooks>hook-pre-push","from":"install-hooks","to":"hook-pre-push","kind":"dependency","label":"writes","views":["all","repository"]},
+{"id":"hook-pre-commit>public-check","from":"hook-pre-commit","to":"public-check","kind":"check","label":"staged check","views":["all","repository"]},
+{"id":"hook-pre-commit>scan","from":"hook-pre-commit","to":"scan","kind":"check","label":"staged scan","views":["all","repository"]},
+{"id":"hook-pre-push>scan","from":"hook-pre-push","to":"scan","kind":"check","label":"history scan","views":["all","repository"]},
+{"id":"hook-pre-push>remote-upstream","from":"hook-pre-push","to":"remote-upstream","kind":"check","label":"refuses each push","views":["all","repository"]},
+{"id":"hook-pre-push>remote-github","from":"hook-pre-push","to":"remote-github","kind":"check","label":"admits two refspecs","views":["all","repository"]},
+{"id":"hook-pre-push>git-config-keys","from":"hook-pre-push","to":"git-config-keys","kind":"data","label":"reads","views":["all","repository"]},
+{"id":"public-check>pc-rules","from":"public-check","to":"pc-rules","kind":"data","label":"reads","views":["all","repository"]},
+{"id":"public-check>pc-allow","from":"public-check","to":"pc-allow","kind":"data","label":"reads","views":["all","repository"]},
+{"id":"public-check>pc-development","from":"public-check","to":"pc-development","kind":"data","label":"reads","views":["all","repository"]},
+{"id":"public-check>host-rules","from":"public-check","to":"host-rules","kind":"data","label":"reads","views":["all","repository"]},
+{"id":"scan>host-rules","from":"scan","to":"host-rules","kind":"data","label":"reads","views":["all","repository"]},
+{"id":"scan>gitleaks-config","from":"scan","to":"gitleaks-config","kind":"data","label":"reads","views":["all","repository"]},
+{"id":"git-config-keys>host-rules","from":"git-config-keys","to":"host-rules","kind":"data","label":"names the file","views":["all","repository"]},
+{"id":"promote>public-check","from":"promote","to":"public-check","kind":"check","label":"runs","views":["all","repository"]},
+{"id":"promote>scan","from":"promote","to":"scan","kind":"check","label":"runs","views":["all","repository"]},
+{"id":"promote>pins","from":"promote","to":"pins","kind":"check","label":"runs","views":["all","repository"]},
+{"id":"promote>pc-development","from":"promote","to":"pc-development","kind":"data","label":"removes these paths","views":["all","repository"]},
+{"id":"promote>release-identity","from":"promote","to":"release-identity","kind":"dependency","label":"commits and tags as","views":["all","repository"]},
+{"id":"pins>explainer","from":"pins","to":"explainer","kind":"check","label":"compares the release facts","views":["all","repository"]},
+{"id":"update>sync-branch","from":"update","to":"sync-branch","kind":"git","label":"tested commits","views":["all","repository","ci"]},
+{"id":"remote-origin>git-server","from":"remote-origin","to":"git-server","kind":"dependency","label":"is hosted on","views":["all","ci"]},
+{"id":"git-server>wf-checks","from":"git-server","to":"wf-checks","kind":"dependency","label":"starts on push and pull request","views":["all","ci"]},
+{"id":"git-server>wf-upstream-update","from":"git-server","to":"wf-upstream-update","kind":"dependency","label":"starts each day","views":["all","ci"]},
+{"id":"wf-checks>runner","from":"wf-checks","to":"runner","kind":"dependency","label":"runs on","views":["all","ci"]},
+{"id":"wf-upstream-update>runner","from":"wf-upstream-update","to":"runner","kind":"dependency","label":"runs on","views":["all","ci"]},
+{"id":"wf-checks>workflows-check","from":"wf-checks","to":"workflows-check","kind":"check","label":"runs","views":["all","ci"]},
+{"id":"wf-checks>ci-sh","from":"wf-checks","to":"ci-sh","kind":"check","label":"lint and image job","views":["all","ci","telemetry"]},
+{"id":"wf-checks>scan","from":"wf-checks","to":"scan","kind":"check","label":"runs","views":["all","ci"]},
+{"id":"wf-checks>public-check","from":"wf-checks","to":"public-check","kind":"check","label":"runs","views":["all","ci"]},
+{"id":"wf-checks>pins","from":"wf-checks","to":"pins","kind":"check","label":"runs","views":["all","ci"]},
+{"id":"wf-checks>kit-tests","from":"wf-checks","to":"kit-tests","kind":"check","label":"runs","views":["all","ci"]},
+{"id":"wf-checks>telemetry-test","from":"wf-checks","to":"telemetry-test","kind":"check","label":"runs","views":["all","ci","telemetry"]},
+{"id":"wf-checks>telemetry-sh","from":"wf-checks","to":"telemetry-sh","kind":"check","label":"runs","views":["all","ci","telemetry"]},
+{"id":"wf-checks>arch-check","from":"wf-checks","to":"arch-check","kind":"check","label":"runs","views":["all","ci"]},
+{"id":"ci-sh>build-sh","from":"ci-sh","to":"build-sh","kind":"check","label":"image job","views":["all","ci"]},
+{"id":"ci-sh>smoke","from":"ci-sh","to":"smoke","kind":"check","label":"image job","views":["all","ci","telemetry"]},
+{"id":"ci-sh>no-telemetry-test","from":"ci-sh","to":"no-telemetry-test","kind":"check","label":"image job","views":["all","ci","telemetry"]},
+{"id":"build-sh>image","from":"build-sh","to":"image","kind":"dependency","label":"builds","views":["all","ci","install"]},
+{"id":"build-sh>build-hosts","from":"build-sh","to":"build-hosts","kind":"request","label":"downloads","views":["all","ci","install"]},
+{"id":"smoke>image","from":"smoke","to":"image","kind":"check","label":"tests","views":["all","ci","install"]},
+{"id":"no-telemetry-test>image","from":"no-telemetry-test","to":"image","kind":"check","label":"tests in containers","views":["all","ci"]},
+{"id":"wf-upstream-update>update","from":"wf-upstream-update","to":"update","kind":"dependency","label":"detect, qualify, notes","views":["all","ci"]},
+{"id":"wf-upstream-update>sync-branch","from":"wf-upstream-update","to":"sync-branch","kind":"git","label":"pushes","views":["all","ci"]},
+{"id":"update>build-sh","from":"update","to":"build-sh","kind":"dependency","label":"qualify builds","views":["all","ci"]},
+{"id":"remote-github>wf-public-checks","from":"remote-github","to":"wf-public-checks","kind":"dependency","label":"runs on push","views":["all","ci"]},
+{"id":"remote-github>wf-upstream-files","from":"remote-github","to":"wf-upstream-files","kind":"dependency","label":"holds them, disabled","views":["all","ci"]},
+{"id":"release-tag>wf-portable-release","from":"release-tag","to":"wf-portable-release","kind":"dependency","label":"starts","views":["all","ci"]},
+{"id":"wf-public-checks>hosted-runner","from":"wf-public-checks","to":"hosted-runner","kind":"dependency","label":"runs on","views":["all","ci"]},
+{"id":"wf-portable-release>hosted-runner","from":"wf-portable-release","to":"hosted-runner","kind":"dependency","label":"default runner","views":["all","ci"]},
+{"id":"wf-public-checks>scan","from":"wf-public-checks","to":"scan","kind":"check","label":"runs","views":["all","ci"]},
+{"id":"wf-public-checks>public-check","from":"wf-public-checks","to":"public-check","kind":"check","label":"runs","views":["all","ci"]},
+{"id":"wf-portable-release>scan","from":"wf-portable-release","to":"scan","kind":"check","label":"runs","views":["all","ci"]},
+{"id":"wf-portable-release>public-check","from":"wf-portable-release","to":"public-check","kind":"check","label":"runs","views":["all","ci"]},
+{"id":"wf-portable-release>build-sh","from":"wf-portable-release","to":"build-sh","kind":"check","label":"builds","views":["all","ci"]},
+{"id":"wf-portable-release>smoke","from":"wf-portable-release","to":"smoke","kind":"check","label":"tests","views":["all","ci"]},
+{"id":"wf-portable-release>registry","from":"wf-portable-release","to":"registry","kind":"data","label":"pushes the image","views":["all","ci"]},
+{"id":"wf-portable-release>release-record","from":"wf-portable-release","to":"release-record","kind":"data","label":"writes the digest","views":["all","ci"]},
+{"id":"switches>tp-skill-report","from":"switches","to":"tp-skill-report","kind":"check","label":"DO_NOT_TRACK and DISABLE_TELEMETRY","views":["all","runtime","telemetry"]},
+{"id":"switches>tp-otel-push","from":"switches","to":"tp-otel-push","kind":"check","label":"OTEL_SDK_DISABLED=true","views":["all","runtime","telemetry"]},
+{"id":"switches>tp-local-sink","from":"switches","to":"tp-local-sink","kind":"check","label":"OK_DISABLE_LOCAL_SINK=1","views":["all","telemetry"]},
+{"id":"switches>tp-launcher","from":"switches","to":"tp-launcher","kind":"check","label":"set them in the MCP entry","views":["all","telemetry"]},
+{"id":"config-user>tp-skill-report","from":"config-user","to":"tp-skill-report","kind":"check","label":"report key false","views":["all","runtime","telemetry"]},
+{"id":"config-project>tp-local-sink","from":"config-project","to":"tp-local-sink","kind":"check","label":"sink key false","views":["all","telemetry"]},
+{"id":"config-project>tp-loss-capture","from":"config-project","to":"tp-loss-capture","kind":"check","label":"loss capture key false","views":["all","telemetry"]},
+{"id":"dockerignore>tp-browser-trace","from":"dockerignore","to":"tp-browser-trace","kind":"check","label":"no .env file in the build","views":["all","telemetry"]},
+{"id":"entrypoint>tp-skill-events","from":"entrypoint","to":"tp-skill-events","kind":"check","label":"ok init --no-skills","views":["all","telemetry"]},
+{"id":"entrypoint>no-telemetry","from":"entrypoint","to":"no-telemetry","kind":"dependency","label":"runs at each start","views":["all","telemetry"]},
+{"id":"no-telemetry>config-project","from":"no-telemetry","to":"config-project","kind":"data","label":"sets two keys","views":["all","telemetry"]},
+{"id":"no-telemetry>config-user","from":"no-telemetry","to":"config-user","kind":"data","label":"sets one key","views":["all","telemetry"]},
+{"id":"no-telemetry-check>switches","from":"no-telemetry-check","to":"switches","kind":"check","label":"reports a changed switch","views":["all","telemetry"]},
+{"id":"no-telemetry-check>tp-local-sink","from":"no-telemetry-check","to":"tp-local-sink","kind":"check","label":"reports a recorded file","views":["all","telemetry"]},
+{"id":"no-telemetry-check>tp-loss-capture","from":"no-telemetry-check","to":"tp-loss-capture","kind":"check","label":"reports a recorded file","views":["all","telemetry"]},
+{"id":"no-telemetry-check>tp-skill-events","from":"no-telemetry-check","to":"tp-skill-events","kind":"check","label":"reports the file","views":["all","telemetry"]},
+{"id":"no-telemetry-check>tp-tolerance","from":"no-telemetry-check","to":"tp-tolerance","kind":"check","label":"reports the file","views":["all","telemetry"]},
+{"id":"smoke>no-telemetry-check","from":"smoke","to":"no-telemetry-check","kind":"check","label":"runs it in the container","views":["all","telemetry"]},
+{"id":"telemetry-sh>telemetry-baseline","from":"telemetry-sh","to":"telemetry-baseline","kind":"check","label":"compares the source","views":["all","telemetry"]},
+{"id":"telemetry-sh>switches","from":"telemetry-sh","to":"switches","kind":"check","label":"the kit keeps each switch","views":["all","telemetry"]},
+{"id":"telemetry-sh>tp-browser-trace","from":"telemetry-sh","to":"tp-browser-trace","kind":"check","label":"no kit file sets the build switch","views":["all","telemetry"]},
+{"id":"telemetry-test>telemetry-sh","from":"telemetry-test","to":"telemetry-sh","kind":"check","label":"tests","views":["all","ci","telemetry"]},
+{"id":"no-telemetry-test>no-telemetry","from":"no-telemetry-test","to":"no-telemetry","kind":"check","label":"tests","views":["all","telemetry"]},
+{"id":"explainer>inst-requirements","from":"explainer","to":"inst-requirements","kind":"data","label":"lists","views":["all","install"]},
+{"id":"inst-requirements>inst-clone","from":"inst-requirements","to":"inst-clone","kind":"step","label":"next","views":["all","install"]},
+{"id":"inst-clone>setup-remotes","from":"inst-clone","to":"setup-remotes","kind":"step","label":"next","views":["all","install"]},
+{"id":"setup-remotes>install-hooks","from":"setup-remotes","to":"install-hooks","kind":"step","label":"next","views":["all","install"]},
+{"id":"install-hooks>scan","from":"install-hooks","to":"scan","kind":"step","label":"next","views":["all","install"]},
+{"id":"scan>public-check","from":"scan","to":"public-check","kind":"step","label":"before a commit","views":["all","install"]},
+{"id":"scan>build-sh","from":"scan","to":"build-sh","kind":"step","label":"next","views":["all","install"]},
+{"id":"build-sh>smoke","from":"build-sh","to":"smoke","kind":"step","label":"next","views":["all","install"]},
+{"id":"smoke>env-file","from":"smoke","to":"env-file","kind":"step","label":"next","views":["all","install"]},
+{"id":"env-file>container","from":"env-file","to":"container","kind":"step","label":"next","views":["all","install"]},
+{"id":"container>config-local","from":"container","to":"config-local","kind":"step","label":"next","views":["all","install"]},
+{"id":"config-local>edge-server","from":"config-local","to":"edge-server","kind":"step","label":"next","views":["all","install"]},
+{"id":"edge-server>launcher","from":"edge-server","to":"launcher","kind":"step","label":"next","views":["all","install"]},
+{"id":"launcher>inst-upgrade","from":"launcher","to":"inst-upgrade","kind":"step","label":"next","views":["all","install"]},
+{"id":"inst-upgrade>inst-remove","from":"inst-upgrade","to":"inst-remove","kind":"step","label":"next","views":["all","install"]},
+{"id":"inst-upgrade>data-volume","from":"inst-upgrade","to":"data-volume","kind":"data","label":"back up first","views":["all","install"]},
+{"id":"inst-remove>data-volume","from":"inst-remove","to":"data-volume","kind":"data","label":"deletes","views":["all","install"]}
+],
+"tours":[
+{"id":"tour-runtime","view":"runtime","label":"Runtime: one request, end to end","steps":[{"nodes":["browser","mcp-client","launcher","desktop-app"],"text":"The clients start each flow. A browser and a remote MCP client go through the edge server. The launcher talks to the published port on its own machine."},{"nodes":["edge-server","published-port","compose-network"],"text":"The edge server does TLS and the login, because the server has none. It reaches the container through the loopback port or a dedicated Docker network."},{"nodes":["container","entrypoint","switches"],"text":"Compose runs one container as user 10001 without extra privileges. The entrypoint prepares /data and turns telemetry off before the server starts."},{"nodes":["server-process","ep-web","ep-mcp","ep-collab"],"text":"One process serves the web app, the API, MCP at /mcp and the collaboration WebSocket at /collab, all on port 8080."},{"nodes":["data-volume","config-project","config-local","config-user","shadow-repo"],"text":"The data volume holds the documents, a Git repository and the settings. The user file is in the home directory of the container user, outside the volume."},{"nodes":["compose-file","env-file","dockerfile","image"],"text":"The kit files build and run the image. The env file gives the host values to the generic Compose file."},{"nodes":["pkg-cli","pkg-server","pkg-app","pkg-core"],"text":"The image holds the CLI package. The CLI package brings the server, the web app and the shared core."},{"nodes":["pkg-plugin","pkg-desktop","desktop-app"],"text":"Two packages stay outside the container: the integration package for MCP hosts and the desktop app."},{"nodes":["acp","ext-acp","tp-skill-report","tp-otel-push"],"text":"Some features reach hosts on the internet. The kit turns the reports off. The hardening guide says to block these hosts."}]},
+{"id":"tour-repository","view":"repository","label":"Repository: from local-dev to portable","steps":[{"nodes":["remote-upstream","remote-origin","remote-github"],"text":"A clone has three remotes. upstream is fetch-only, origin is your development repository, and github is the release repository."},{"nodes":["branch-main","branch-local-dev","sync-branch"],"text":"An upstream release arrives in local-dev through a merge. The daily update proposes each new release on a sync branch."},{"nodes":["worktrees","hook-pre-commit","hook-pre-push","install-hooks"],"text":"All worktrees share two hooks. The pre-commit hook checks staged content. The pre-push hook limits what leaves the clone."},{"nodes":["setup-remotes","git-config-keys","host-rules"],"text":"setup-remotes.sh makes the remotes safe. Two Git config keys name the host rules file and the start of the history scans."},{"nodes":["public-check","pc-rules","pc-allow","pc-development"],"text":"The public-content check reads generic rules, exact-line exceptions and a list of development-only paths."},{"nodes":["scan","gitleaks-config","host-rules"],"text":"The secret scan runs gitleaks from a pinned image without a network. It adds your host rules when the key names a file."},{"nodes":["promote","branch-local-dev","pc-development","release-identity"],"text":"promote.sh builds one snapshot commit from local-dev without the development-only paths. The release identity is the author of the commit and the tag."},{"nodes":["promote","public-check","scan","pins"],"text":"Before it writes a ref, promotion runs the scans, the content check, the identity check and the pin check."},{"nodes":["branch-public","release-tag","branch-main"],"text":"The snapshot commit goes on public. Its last parent is the upstream release commit, so the public line holds upstream history and releases only."},{"nodes":["remote-github","branch-portable","remote-origin","bundle"],"text":"The push sends public as portable and the tag, each by name. A Git bundle can move the same line without a network."}]},
+{"id":"tour-ci","view":"ci","label":"CI: checks, updates and the release pipeline","steps":[{"nodes":["remote-origin","git-server","runner"],"text":"The development repository is on a Gitea server. A host-mode runner runs its jobs with the Docker CLI."},{"nodes":["wf-checks","workflows-check","ci-sh"],"text":"checks.yml runs for each push and pull request of local-dev. First it checks the workflow files and the shell scripts."},{"nodes":["wf-checks","scan","public-check","pins","kit-tests"],"text":"Then it scans for secrets and checks the public content and the pins. Each check runs right after its own test."},{"nodes":["wf-checks","telemetry-test","telemetry-sh","arch-check"],"text":"It also checks the telemetry baseline and this architecture page."},{"nodes":["ci-sh","build-sh","build-hosts","image","smoke","no-telemetry-test"],"text":"For a change under deploy/, the image job builds the image. Then it runs the smoke test and the test of the telemetry program."},{"nodes":["wf-upstream-update","update","sync-branch","branch-local-dev"],"text":"Each day, the upstream update looks for a new release. It tests the release in a scratch clone and opens one pull request."},{"nodes":["remote-github","wf-public-checks","hosted-runner","wf-upstream-files"],"text":"On the release repository, public-checks.yml runs the scan and the content check on the hosted runner. Disable the upstream workflow files there."},{"nodes":["release-tag","wf-portable-release","registry","release-record"],"text":"A release tag starts portable-release.yml. It builds and tests the image, pushes it and records the digest."},{"nodes":["wf-portable-release","build-sh","smoke","scan","public-check"],"text":"No workflow promotes or makes a tag. A person runs promote.sh, and the workflows only check and build."}]},
+{"id":"tour-identity","view":"identity","label":"Identity: the login path today and planned","steps":[{"nodes":["browser","edge-server"],"text":"Each browser request goes through the edge server. The server of the kit has no login of its own."},{"nodes":["edge-server","idp"],"text":"The edge server sends the user to the identity provider for single sign-on. The kit supplies neither of them."},{"nodes":["edge-server","ingress-policy","consent","server-process"],"text":"The server refuses a proxied request until it has consent for external access. Compose gives the consent with two environment variables."},{"nodes":["principal","actor-identity"],"text":"Today the server knows one principal for each project. Each browser user writes with that one name."},{"nodes":["mcp-client","launcher","ep-mcp","actor-identity"],"text":"An MCP write carries the name of the MCP client. The launcher reaches /mcp on the same machine without the edge server."},{"nodes":["identity-headers","trusted-proxies","consent"],"text":"Planned: the edge server sends identity headers. The server reads them only from a trusted proxy and only with consent."},{"nodes":["identity-source","edge-principal","principal"],"text":"Planned: one identity source turns the headers into a principal for each person. Without headers, it uses the project principal."},{"nodes":["mcp-exempt","ep-mcp"],"text":"Planned: /mcp needs no identity headers. It keeps the authentication of the edge server."}]},
+{"id":"tour-install","view":"install","label":"Install: the thirteen parts of the explainer","steps":[{"nodes":["inst-requirements","explainer"],"text":"Check the requirements. You need Git, Docker with BuildKit, Compose and the standard tools."},{"nodes":["inst-clone"],"text":"Get the source. Clone the release repository at the release tag, or clone a bundle."},{"nodes":["setup-remotes","install-hooks"],"text":"Set up the clone. Make upstream fetch-only and install the two Git hooks."},{"nodes":["scan","public-check"],"text":"Scan the source for secrets. Before a commit, also check the public content."},{"nodes":["build-sh","image","build-hosts"],"text":"Build the image with build.sh. The build needs the npm registry, Debian and Docker Hub."},{"nodes":["smoke","image"],"text":"Test the image. smoke.sh waits for /readyz and checks that each telemetry path is off."},{"nodes":["env-file"],"text":"Write the env file outside the repository. It sets OK_IMAGE and OK_EXTERNAL_URL."},{"nodes":["container","data-volume"],"text":"Start the container with Compose and --no-build. The data volume is at /data."},{"nodes":["config-local","data-volume"],"text":"Configure the knowledge base. Turn link previews, semantic search and scheduled sync off in the local file."},{"nodes":["edge-server"],"text":"Put an edge server in front of the port. It does TLS and the login."},{"nodes":["launcher","mcp-client"],"text":"Connect an MCP client. Install the pinned launcher and give it the published port."},{"nodes":["inst-upgrade","data-volume"],"text":"Upgrade to the next portable release. Back up the volume first and keep the old image tag."},{"nodes":["inst-remove","data-volume"],"text":"Remove the install: the container, the volume, the image, the clone and the launcher."}]},
+{"id":"tour-telemetry","view":"telemetry","label":"Telemetry: each path and its proof","steps":[{"nodes":["switches"],"text":"Four environment switches turn the reports, the local sink and the trace push off. The image and the Compose file both set them."},{"nodes":["entrypoint","no-telemetry","config-project","config-user"],"text":"At each start, the entrypoint runs the telemetry program. It sets three keys to false before the server starts."},{"nodes":["tp-skill-report","tp-otel-push"],"text":"Two paths can send data out: skill install reports and the push of traces and metrics. Both are off."},{"nodes":["tp-local-sink","tp-loss-capture"],"text":"Two paths can record data in the volume: the local sink and loss capture. A switch and a key turn the sink off. A key turns loss capture off."},{"nodes":["tp-browser-trace","dockerignore"],"text":"The browser trace exporter is on only in a special build. The ignore file keeps each .env file out of the image build."},{"nodes":["tp-skill-events","tp-tolerance"],"text":"Two local files have no switch, or are off by default. The entrypoint avoids the first, and the check reports both."},{"nodes":["no-telemetry-check","smoke"],"text":"smoke.sh starts the image and runs the check in the container. A changed switch, a key that is not false or a recorded file fails it."},{"nodes":["telemetry-sh","telemetry-baseline","telemetry-test"],"text":"telemetry.sh compares the source with the reviewed baseline. A new default, variable, host or module fails it until a person reviews it."},{"nodes":["wf-checks","ci-sh","no-telemetry-test","tp-launcher"],"text":"The checks workflow runs these tests. The launcher on your machine is outside the container, so you set its switches yourself."}]}
+],
+"layouts":{
+"all":{"frames":[{"id":"group-package","label":"Package","x":0,"y":0,"w":1168,"h":280},{"id":"group-process","label":"Process","x":1212,"y":0,"w":1168,"h":356},{"id":"group-data","label":"Data","x":0,"y":400,"w":1780,"h":508},{"id":"group-network","label":"Network","x":1824,"y":400,"w":556,"h":356},{"id":"group-identity","label":"Identity","x":0,"y":952,"w":1168,"h":432},{"id":"group-repository","label":"Repository","x":1212,"y":952,"w":1168,"h":508},{"id":"group-check","label":"Check","x":0,"y":1504,"w":1474,"h":432},{"id":"group-client","label":"Client","x":1518,"y":1504,"w":250,"h":356},{"id":"group-external","label":"External","x":1812,"y":1504,"w":556,"h":432}],"nodes":{"pkg-cli":[20,202],"pkg-plugin":[20,50],"pkg-desktop":[20,126],"pkg-app":[326,126],"pkg-server":[632,126],"pkg-core":[938,126],"launcher":[1232,126],"container":[1232,50],"wf-upstream-update":[1232,202],"wf-portable-release":[1232,278],"entrypoint":[1538,126],"update":[1538,202],"runner":[1538,278],"inst-upgrade":[1538,50],"server-process":[1844,126],"build-sh":[1844,278],"inst-remove":[1844,50],"no-telemetry":[1844,202],"acp":[2150,164],"data-volume":[20,450],"config-user":[20,526],"env-file":[20,678],"dockerfile":[20,602],"git-config-keys":[20,754],"explainer":[20,830],"pc-rules":[326,754],"pc-allow":[326,830],"pc-development":[326,602],"gitleaks-config":[326,678],"release-record":[326,450],"consent":[326,526],"dockerignore":[632,754],"tp-skill-events":[632,526],"tp-tolerance":[632,602],"telemetry-baseline":[632,678],"config-project":[938,678],"config-local":[938,450],"shadow-repo":[938,602],"compose-file":[938,526],"image":[938,754],"host-rules":[938,830],"switches":[1244,602],"tp-loss-capture":[1244,678],"tp-local-sink":[1550,640],"edge-server":[1844,678],"ep-web":[1844,450],"ep-mcp":[1844,602],"ep-collab":[1844,526],"published-port":[2150,526],"compose-network":[2150,602],"release-identity":[20,1230],"idp":[20,1154],"ingress-policy":[20,1002],"identity-headers":[20,1306],"mcp-exempt":[20,1078],"trusted-proxies":[326,1154],"principal":[632,1154],"identity-source":[632,1078],"edge-principal":[632,1230],"actor-identity":[938,1154],"remote-upstream":[1232,1306],"sync-branch":[1232,1002],"worktrees":[1232,1078],"setup-remotes":[1232,1230],"install-hooks":[1232,1382],"inst-clone":[1232,1154],"branch-main":[1538,1154],"branch-local-dev":[1538,1230],"remote-origin":[1844,1268],"remote-github":[1844,1344],"branch-public":[1844,1192],"release-tag":[1844,1116],"promote":[1844,1040],"branch-portable":[2150,1154],"bundle":[2150,1230],"hook-pre-commit":[20,1706],"hook-pre-push":[20,1630],"wf-checks":[20,1782],"wf-public-checks":[20,1858],"inst-requirements":[20,1554],"pins":[326,1668],"scan":[326,1592],"workflows-check":[326,1820],"ci-sh":[326,1744],"kit-tests":[632,1630],"arch-check":[632,1706],"telemetry-test":[632,1782],"public-check":[938,1744],"telemetry-sh":[938,1820],"smoke":[938,1668],"no-telemetry-test":[938,1592],"no-telemetry-check":[1244,1706],"browser":[1538,1782],"mcp-client":[1538,1630],"desktop-app":[1538,1554],"tp-launcher":[1538,1706],"tp-skill-report":[1832,1706],"tp-otel-push":[1832,1630],"ext-acp":[1832,1554],"git-server":[1832,1782],"wf-upstream-files":[1832,1858],"hosted-runner":[2138,1744],"registry":[2138,1592],"build-hosts":[2138,1668],"tp-browser-trace":[2138,1820]},"size":[2380,1936]},
+"runtime":{"frames":[{"id":"rt-clients","label":"Clients and launcher","x":0,"y":0,"w":862,"h":204},{"id":"rt-edge","label":"Edge and network","x":906,"y":0,"w":556,"h":204},{"id":"rt-container","label":"Container","x":0,"y":248,"w":1168,"h":356},{"id":"rt-data","label":"Data volume and settings","x":0,"y":648,"w":556,"h":280},{"id":"rt-kit","label":"Kit files and image","x":600,"y":648,"w":556,"h":204},{"id":"rt-packages","label":"Packages","x":0,"y":972,"w":1168,"h":280},{"id":"rt-internet","label":"Hosts on the internet: block them","x":1212,"y":972,"w":250,"h":280}],"nodes":{"browser":[20,50],"mcp-client":[20,126],"launcher":[326,88],"desktop-app":[632,88],"edge-server":[926,88],"published-port":[1232,50],"compose-network":[1232,126],"container":[20,374],"switches":[20,450],"entrypoint":[326,412],"server-process":[632,412],"ep-web":[938,450],"ep-mcp":[938,298],"ep-collab":[938,374],"acp":[938,526],"data-volume":[20,736],"config-user":[20,812],"config-project":[326,698],"config-local":[326,774],"shadow-repo":[326,850],"env-file":[620,774],"dockerfile":[620,698],"compose-file":[926,698],"image":[926,774],"pkg-cli":[20,1174],"pkg-plugin":[20,1022],"pkg-desktop":[20,1098],"pkg-app":[326,1098],"pkg-server":[632,1098],"pkg-core":[938,1098],"tp-skill-report":[1232,1174],"tp-otel-push":[1232,1022],"ext-acp":[1232,1098]},"size":[1462,1252]},
+"repository":{"frames":[{"id":"rp-remotes","label":"Remotes","x":0,"y":0,"w":250,"h":280},{"id":"rp-line","label":"Branches and tags","x":294,"y":0,"w":556,"h":356},{"id":"rp-clone","label":"Clone and hooks","x":894,"y":0,"w":556,"h":280},{"id":"rp-scripts","label":"Kit scripts","x":0,"y":400,"w":862,"h":356},{"id":"rp-checks","label":"Content checks","x":906,"y":400,"w":556,"h":432}],"nodes":{"remote-upstream":[20,202],"remote-origin":[20,50],"remote-github":[20,126],"branch-main":[314,126],"sync-branch":[314,202],"release-tag":[314,278],"branch-portable":[314,50],"branch-local-dev":[620,164],"branch-public":[620,240],"bundle":[620,88],"worktrees":[914,50],"hook-pre-push":[914,126],"release-identity":[914,202],"git-config-keys":[1220,88],"hook-pre-commit":[1220,164],"setup-remotes":[20,526],"install-hooks":[20,450],"promote":[20,678],"update":[20,602],"pins":[326,564],"explainer":[632,564],"public-check":[926,640],"scan":[926,564],"pc-rules":[1232,602],"pc-allow":[1232,678],"pc-development":[1232,754],"gitleaks-config":[1232,526],"host-rules":[1232,450]},"size":[1462,832]},
+"ci":{"frames":[{"id":"ci-dev","label":"Development repository","x":0,"y":0,"w":1168,"h":204},{"id":"ci-source","label":"Source checks","x":0,"y":248,"w":862,"h":356},{"id":"ci-image","label":"Image build and tests","x":906,"y":248,"w":862,"h":280},{"id":"ci-release","label":"Release repository","x":0,"y":648,"w":1168,"h":356}],"nodes":{"remote-origin":[20,50],"git-server":[20,126],"wf-checks":[326,126],"wf-upstream-update":[326,50],"sync-branch":[632,126],"runner":[632,50],"branch-local-dev":[938,88],"workflows-check":[20,298],"ci-sh":[20,374],"scan":[20,450],"public-check":[20,526],"pins":[326,298],"kit-tests":[326,374],"telemetry-test":[326,526],"arch-check":[326,450],"telemetry-sh":[632,412],"update":[926,298],"smoke":[926,450],"no-telemetry-test":[926,374],"build-sh":[1232,374],"build-hosts":[1538,336],"image":[1538,412],"release-tag":[20,812],"remote-github":[326,850],"wf-portable-release":[326,774],"wf-public-checks":[632,698],"wf-upstream-files":[632,926],"registry":[632,774],"release-record":[632,850],"hosted-runner":[938,812]},"size":[1768,1004]},
+"identity":{"frames":[{"id":"id-clients","label":"Clients","x":0,"y":0,"w":556,"h":204},{"id":"id-edge","label":"Edge","x":0,"y":248,"w":862,"h":128},{"id":"id-server","label":"Server today","x":0,"y":420,"w":1168,"h":204},{"id":"id-planned","label":"Planned identity contract","x":0,"y":668,"w":862,"h":204}],"nodes":{"browser":[20,50],"mcp-client":[20,126],"launcher":[326,88],"edge-server":[20,298],"idp":[326,298],"identity-headers":[632,298],"ingress-policy":[20,470],"principal":[20,546],"consent":[326,546],"server-process":[326,470],"ep-mcp":[632,508],"actor-identity":[938,508],"trusted-proxies":[20,794],"mcp-exempt":[20,718],"identity-source":[326,756],"edge-principal":[632,756]},"size":[1168,872]},
+"install":{"frames":[{"id":"in-prepare","label":"Prepare the clone","x":0,"y":0,"w":1168,"h":204},{"id":"in-build","label":"Build and test","x":0,"y":248,"w":862,"h":204},{"id":"in-run","label":"Run","x":0,"y":496,"w":1168,"h":128},{"id":"in-connect","label":"Connect","x":0,"y":668,"w":862,"h":128},{"id":"in-maintain","label":"Maintain","x":0,"y":840,"w":556,"h":128}],"nodes":{"explainer":[20,50],"inst-requirements":[20,126],"inst-clone":[326,50],"setup-remotes":[326,126],"install-hooks":[632,50],"scan":[632,126],"public-check":[938,88],"build-sh":[20,336],"build-hosts":[326,298],"smoke":[326,374],"image":[632,336],"env-file":[20,546],"container":[326,546],"data-volume":[632,546],"config-local":[938,546],"mcp-client":[20,718],"edge-server":[326,718],"launcher":[632,718],"inst-upgrade":[20,890],"inst-remove":[326,890]},"size":[1168,968]},
+"telemetry":{"frames":[{"id":"tm-off","label":"Switches and keys","x":0,"y":0,"w":862,"h":280},{"id":"tm-paths","label":"Telemetry paths, all off","x":0,"y":324,"w":556,"h":356},{"id":"tm-checks","label":"Checks","x":0,"y":724,"w":1168,"h":280}],"nodes":{"switches":[20,202],"dockerignore":[20,126],"entrypoint":[20,50],"no-telemetry":[326,126],"config-project":[632,164],"config-user":[632,88],"tp-skill-report":[20,374],"tp-otel-push":[20,450],"tp-local-sink":[20,526],"tp-loss-capture":[20,602],"tp-browser-trace":[326,526],"tp-skill-events":[326,450],"tp-tolerance":[326,602],"tp-launcher":[326,374],"wf-checks":[20,850],"telemetry-test":[326,812],"ci-sh":[326,888],"smoke":[632,926],"telemetry-sh":[632,850],"no-telemetry-test":[632,774],"no-telemetry-check":[938,812],"telemetry-baseline":[938,888]},"size":[1168,1004]}
+}
+}
+</script>
+<script>
+(() => {
+  'use strict';
+  const data = JSON.parse(document.getElementById('graph-data').textContent);
+  const byId = (id) => document.getElementById(id);
+  const svg = byId('canvas');
+  const NS = svg.namespaceURI;
+  const viewport = byId('viewport');
+  const frameLayer = byId('frame-layer');
+  const edgeLayer = byId('edge-layer');
+  const nodeLayer = byId('node-layer');
+  const labelLayer = byId('label-layer');
+  const tooltip = byId('tooltip');
+  const W = data.size.w;
+  const H = data.size.h;
+  const overview = data.views[0].id;
+  const groups = new Map(data.groups.map((g) => [g.id, g]));
+  const kinds = new Map(data.edgeKinds.map((k) => [k.id, k]));
+  const nodes = new Map(data.nodes.map((n) => [n.id, n]));
+  const views = new Map(data.views.map((v) => [v.id, v]));
+  const tours = new Map(data.tours.map((t) => [t.id, t]));
+  const outgoing = new Map(data.nodes.map((n) => [n.id, []]));
+  const incoming = new Map(data.nodes.map((n) => [n.id, []]));
+  for (const e of data.edges) {
+    outgoing.get(e.from).push(e);
+    incoming.get(e.to).push(e);
+  }
+  const state = {
+    view: overview,
+    selected: null,
+    hidden: new Set(),
+    query: '',
+    tour: null,
+    at: 0,
+    path: null,
+    camera: { x: 0, y: 0, k: 1 },
+    positions: new Map(),
+    motion: 0,
+    glide: 0,
+  };
+  const drag = { active: false, moved: false, x: 0, y: 0, camera: null };
+  const nodeEls = new Map();
+  const edgeEls = new Map();
+
+  function svgEl(name, attrs, parent) {
+    const item = document.createElementNS(NS, name);
+    for (const [key, value] of Object.entries(attrs || {})) item.setAttribute(key, String(value));
+    if (parent) parent.appendChild(item);
+    return item;
+  }
+
+  function htmlEl(tag, className, text, parent) {
+    const item = document.createElement(tag);
+    if (className) item.className = className;
+    if (text !== undefined && text !== null) item.textContent = text;
+    if (parent) parent.appendChild(item);
+    return item;
+  }
+
+  const has = (object, key) => Object.hasOwn(object, key);
+  const shorten = (text, max) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+  const layout = (view) => data.layouts[view || state.view];
+  const inLayout = (id, view) => has(layout(view).nodes, id);
+  const visibleNode = (id) => inLayout(id) && !state.hidden.has(nodes.get(id).group);
+  const visibleEdge = (e) => e.views.includes(state.view) && visibleNode(e.from) && visibleNode(e.to);
+  const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
+  const matches = (n, q) => n.label.toLowerCase().includes(q) || n.summary.toLowerCase().includes(q);
+  const metaText = (n) => {
+    const parts = [groups.get(n.group).label];
+    if (n.kind === 'option') parts.push('option');
+    if (n.status === 'planned') parts.push('planned');
+    return parts.join(' · ');
+  };
+
+  for (const k of data.edgeKinds) {
+    const marker = svgEl('marker', { id: `arrow-${k.id}`, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, byId('defs'));
+    svgEl('path', { d: 'M0,0 L10,5 L0,10 z', fill: k.color }, marker);
+  }
+
+  for (const e of data.edges) {
+    const kind = kinds.get(e.kind);
+    const path = svgEl('path', { class: `edge kind-${e.kind}`, stroke: kind.color, 'marker-end': `url(#arrow-${e.kind})` }, edgeLayer);
+    if (kind.dash) path.setAttribute('stroke-dasharray', kind.dash);
+    const label = svgEl('text', { class: 'edge-label' }, labelLayer);
+    label.textContent = e.label;
+    edgeEls.set(e.id, { path, label });
+  }
+
+  for (const n of data.nodes) {
+    const group = groups.get(n.group);
+    const item = svgEl('g', { class: `node kind-${n.kind} status-${n.status}`, 'data-id': n.id }, nodeLayer);
+    svgEl('rect', { class: 'card', width: W, height: H, rx: 9, ry: 9, style: `--group:${group.color}` }, item);
+    svgEl('rect', { class: 'bar', x: 9, y: 9, width: 5, height: H - 18, rx: 2.5, fill: group.color }, item);
+    const title = svgEl('text', { class: 'label', x: 24, y: 25 }, item);
+    title.textContent = shorten(n.label, 25);
+    const meta = svgEl('text', { class: 'meta', x: 24, y: 44 }, item);
+    meta.textContent = metaText(n);
+    item.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (!drag.moved) select(n.id);
+    });
+    item.addEventListener('pointerenter', (event) => showTip(n, event));
+    item.addEventListener('pointermove', placeTip);
+    item.addEventListener('pointerleave', hideTip);
+    nodeEls.set(n.id, item);
+  }
+
+  function route(from, to) {
+    const a = state.positions.get(from);
+    const b = state.positions.get(to);
+    if (!a || !b) return null;
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    let points;
+    if (Math.abs(dx) >= W * 0.75) {
+      const forward = dx > 0;
+      const sx = forward ? a[0] + W : a[0];
+      const tx = forward ? b[0] : b[0] + W;
+      const sy = a[1] + H / 2;
+      const ty = b[1] + H / 2;
+      const bend = Math.max(36, Math.abs(tx - sx) / 2) * (forward ? 1 : -1);
+      points = [sx, sy, sx + bend, sy, tx - bend, ty, tx, ty];
+    } else if (Math.abs(dy) <= H + 44) {
+      const down = dy >= 0;
+      const sx = a[0] + W / 2;
+      const tx = b[0] + W / 2;
+      const sy = down ? a[1] + H : a[1];
+      const ty = down ? b[1] : b[1] + H;
+      const bend = Math.max(14, Math.abs(ty - sy) / 2) * (down ? 1 : -1);
+      points = [sx, sy, sx, sy + bend, tx, ty - bend, tx, ty];
+    } else {
+      const sx = a[0] + W;
+      const tx = b[0] + W;
+      const sy = a[1] + H / 2;
+      const ty = b[1] + H / 2;
+      const bulge = 34 + Math.min(110, Math.abs(dy) / 4);
+      points = [sx, sy, sx + bulge, sy, tx + bulge, ty, tx, ty];
+    }
+    const [x0, y0, x1, y1, x2, y2, x3, y3] = points;
+    return {
+      d: `M${x0.toFixed(1)},${y0.toFixed(1)} C${x1.toFixed(1)},${y1.toFixed(1)} ${x2.toFixed(1)},${y2.toFixed(1)} ${x3.toFixed(1)},${y3.toFixed(1)}`,
+      x: (x0 + 3 * x1 + 3 * x2 + x3) / 8,
+      y: (y0 + 3 * y1 + 3 * y2 + y3) / 8,
+    };
+  }
+
+  function applyPositions() {
+    for (const [id, item] of nodeEls) {
+      const spot = state.positions.get(id);
+      if (spot && inLayout(id)) item.setAttribute('transform', `translate(${spot[0].toFixed(1)},${spot[1].toFixed(1)})`);
+    }
+    for (const e of data.edges) {
+      if (!visibleEdge(e)) continue;
+      const geometry = route(e.from, e.to);
+      if (!geometry) continue;
+      const item = edgeEls.get(e.id);
+      item.path.setAttribute('d', geometry.d);
+      item.label.setAttribute('x', geometry.x.toFixed(1));
+      item.label.setAttribute('y', (geometry.y - 5).toFixed(1));
+    }
+  }
+
+  function moveTo(view, duration) {
+    const target = layout(view).nodes;
+    const start = new Map();
+    for (const id of Object.keys(target)) start.set(id, state.positions.get(id) || target[id]);
+    const token = ++state.motion;
+    const began = performance.now();
+    const tick = (now) => {
+      if (token !== state.motion) return;
+      const t = duration ? Math.min(1, (now - began) / duration) : 1;
+      const e = ease(t);
+      for (const [id, from] of start) {
+        const to = target[id];
+        state.positions.set(id, [from[0] + (to[0] - from[0]) * e, from[1] + (to[1] - from[1]) * e]);
+      }
+      applyPositions();
+      if (t < 1) requestAnimationFrame(tick);
+    };
+    if (duration) requestAnimationFrame(tick);
+    else tick(began);
+  }
+
+  function renderFrames() {
+    frameLayer.replaceChildren();
+    for (const f of layout().frames) {
+      const item = svgEl('g', { class: 'frame' }, frameLayer);
+      svgEl('rect', { x: f.x, y: f.y, width: f.w, height: f.h, rx: 14, ry: 14 }, item);
+      const title = svgEl('text', { x: f.x + 16, y: f.y + 21 }, item);
+      title.textContent = f.label;
+    }
+  }
+
+  function focus() {
+    if (state.path && (!state.selected || state.path.nodes.includes(state.selected))) {
+      return { kind: 'path', nodes: new Set(state.path.nodes), edges: new Set(state.path.edges) };
+    }
+    if (state.selected) {
+      const members = new Set([state.selected]);
+      const lines = new Set();
+      for (const e of outgoing.get(state.selected).concat(incoming.get(state.selected))) {
+        if (!visibleEdge(e)) continue;
+        lines.add(e.id);
+        members.add(e.from);
+        members.add(e.to);
+      }
+      return { kind: 'selection', nodes: members, edges: lines };
+    }
+    if (state.tour) {
+      const members = new Set(state.tour.steps[state.at].nodes);
+      const lines = new Set(data.edges.filter((e) => members.has(e.from) && members.has(e.to) && visibleEdge(e)).map((e) => e.id));
+      return { kind: 'tour', nodes: members, edges: lines };
+    }
+    if (state.query) {
+      return { kind: 'query', nodes: new Set(data.nodes.filter((n) => matches(n, state.query)).map((n) => n.id)), edges: new Set() };
+    }
+    return null;
+  }
+
+  function refresh() {
+    const current = focus();
+    for (const [id, item] of nodeEls) {
+      const lit = Boolean(current) && current.nodes.has(id);
+      item.classList.toggle('hidden', !visibleNode(id));
+      item.classList.toggle('dim', Boolean(current) && !lit);
+      item.classList.toggle('selected', state.selected === id);
+      item.classList.toggle('tour', lit && current.kind === 'tour');
+      item.classList.toggle('path', lit && current.kind === 'path');
+      item.classList.toggle('match', lit && current.kind === 'query');
+    }
+    for (const e of data.edges) {
+      const item = edgeEls.get(e.id);
+      const shown = visibleEdge(e);
+      const lit = Boolean(current) && current.edges.has(e.id);
+      item.path.classList.toggle('hidden', !shown);
+      item.path.classList.toggle('dim', Boolean(current) && !lit);
+      item.path.classList.toggle('lit', lit);
+      item.label.classList.toggle('show', shown && lit);
+    }
+    applyPositions();
+    renderDetail();
+    renderTour();
+    for (const button of byId('view-list').querySelectorAll('button')) {
+      button.setAttribute('aria-pressed', String(button.dataset.view === state.view));
+    }
+  }
+
+  function select(id) {
+    state.selected = id;
+    refresh();
+  }
+
+  function reveal(id) {
+    const n = nodes.get(id);
+    if (state.hidden.has(n.group)) {
+      state.hidden.delete(n.group);
+      syncGroups();
+    }
+    if (!inLayout(id)) switchView(n.views[0], false);
+    state.selected = id;
+    refresh();
+    focusNodes([id], 1);
+  }
+
+  function switchView(id, fit) {
+    if (state.tour && state.tour.view !== id) state.tour = null;
+    const changed = state.view !== id;
+    state.view = id;
+    if (state.selected && !inLayout(state.selected)) state.selected = null;
+    if (state.path && !state.path.nodes.every((member) => inLayout(member))) {
+      state.path = null;
+      renderPath();
+    }
+    if (changed) {
+      renderFrames();
+      moveTo(id, 480);
+    }
+    refresh();
+    if (fit) fitView(true);
+  }
+
+  function setCamera(c) {
+    state.camera = c;
+    viewport.setAttribute('transform', `translate(${c.x.toFixed(2)},${c.y.toFixed(2)}) scale(${c.k.toFixed(4)})`);
+  }
+
+  function frameBox(box, limit) {
+    const r = svg.getBoundingClientRect();
+    const side = 56;
+    const top = 56;
+    const bottom = 132;
+    const k = Math.max(0.12, Math.min(limit, (r.width - 2 * side) / box.w, (r.height - top - bottom) / box.h));
+    return {
+      k,
+      x: r.width / 2 - (box.x + box.w / 2) * k,
+      y: top + (r.height - top - bottom) / 2 - (box.y + box.h / 2) * k,
+    };
+  }
+
+  function glideTo(target, duration) {
+    const from = { ...state.camera };
+    const token = ++state.glide;
+    const began = performance.now();
+    const tick = (now) => {
+      if (token !== state.glide) return;
+      const t = Math.min(1, (now - began) / duration);
+      const e = ease(t);
+      setCamera({ x: from.x + (target.x - from.x) * e, y: from.y + (target.y - from.y) * e, k: from.k + (target.k - from.k) * e });
+      if (t < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+
+  function focusNodes(ids, limit) {
+    const spots = ids.map((id) => layout().nodes[id]).filter(Boolean);
+    if (!spots.length) return;
+    const xs = spots.map((p) => p[0]);
+    const ys = spots.map((p) => p[1]);
+    const x = Math.min(...xs) - 30;
+    const y = Math.min(...ys) - 30;
+    glideTo(frameBox({ x, y, w: Math.max(...xs) + W + 30 - x, h: Math.max(...ys) + H + 30 - y }, limit || 1.2), 520);
+  }
+
+  function fitView(animate) {
+    const size = layout().size;
+    const target = frameBox({ x: -20, y: -20, w: size[0] + 40, h: size[1] + 40 }, 1.1);
+    if (animate) glideTo(target, 520);
+    else setCamera(target);
+  }
+
+  function zoomBy(factor, cx, cy) {
+    const r = svg.getBoundingClientRect();
+    const x = cx === undefined ? r.width / 2 : cx;
+    const y = cy === undefined ? r.height / 2 : cy;
+    const c = state.camera;
+    const k = Math.max(0.12, Math.min(3, c.k * factor));
+    state.glide++;
+    setCamera({ k, x: x - (x - c.x) * (k / c.k), y: y - (y - c.y) * (k / c.k) });
+  }
+
+  function renderDetail() {
+    const box = byId('detail');
+    box.replaceChildren();
+    if (!state.selected) {
+      const v = views.get(state.view);
+      htmlEl('h2', null, 'View', box);
+      htmlEl('h3', null, v.label, box);
+      htmlEl('p', 'summary', v.summary, box);
+      htmlEl('p', 'note', `${Object.keys(layout().nodes).length} nodes are in this view. Select a node to read its summary and its edges.`, box);
+      return;
+    }
+    const n = nodes.get(state.selected);
+    const group = groups.get(n.group);
+    htmlEl('h2', null, 'Node', box);
+    htmlEl('h3', null, n.label, box);
+    const chips = htmlEl('div', 'chips', null, box);
+    const groupChip = htmlEl('span', 'chip', null, chips);
+    htmlEl('span', 'swatch', null, groupChip).style.background = group.color;
+    groupChip.append(`Group: ${group.label}`);
+    htmlEl('span', `chip ${n.kind}`, `Kind: ${n.kind}`, chips);
+    htmlEl('span', `chip ${n.status}`, `Status: ${n.status}`, chips);
+    htmlEl('p', 'summary', n.summary, box);
+    htmlEl('h2', null, 'Views', box);
+    const list = htmlEl('div', 'view-list', null, box);
+    for (const id of n.views) {
+      const button = htmlEl('button', null, views.get(id).label, list);
+      button.type = 'button';
+      button.addEventListener('click', () => {
+        switchView(id, false);
+        state.selected = n.id;
+        refresh();
+        focusNodes([n.id], 1);
+      });
+    }
+    linkList(box, 'Edges out', outgoing.get(n.id), (e) => e.to, '→');
+    linkList(box, 'Edges in', incoming.get(n.id), (e) => e.from, '←');
+  }
+
+  function linkList(box, title, list, other, arrow) {
+    htmlEl('h2', null, `${title} (${list.length})`, box);
+    if (!list.length) {
+      htmlEl('p', 'note', 'None.', box);
+      return;
+    }
+    const items = htmlEl('ul', 'links', null, box);
+    for (const e of list) {
+      const button = htmlEl('button', null, null, htmlEl('li', null, null, items));
+      button.type = 'button';
+      htmlEl('span', 'target', `${arrow} ${nodes.get(other(e)).label}`, button);
+      htmlEl('span', 'via', `${kinds.get(e.kind).label}: ${e.label}`, button);
+      button.addEventListener('click', () => reveal(other(e)));
+    }
+  }
+
+  function startTour(id) {
+    state.tour = id ? tours.get(id) : null;
+    state.at = 0;
+    state.path = null;
+    renderPath();
+    if (!state.tour) {
+      refresh();
+      return;
+    }
+    for (const entry of state.tour.steps) for (const member of entry.nodes) state.hidden.delete(nodes.get(member).group);
+    syncGroups();
+    switchView(state.tour.view, false);
+    showStop(0);
+  }
+
+  function showStop(index) {
+    const t = state.tour;
+    if (!t) return;
+    state.at = Math.max(0, Math.min(t.steps.length - 1, index));
+    state.selected = null;
+    refresh();
+    focusNodes(t.steps[state.at].nodes, 0.8);
+  }
+
+  function renderTour() {
+    const t = state.tour;
+    byId('tour-select').value = t ? t.id : '';
+    byId('tour-count').textContent = t ? `${state.at + 1} / ${t.steps.length}` : '';
+    byId('tour-text').textContent = t ? t.steps[state.at].text : 'Choose a tour. The arrow keys move through it. Escape clears the selection.';
+    byId('tour-prev').disabled = !t || state.at === 0;
+    byId('tour-next').disabled = !t || state.at === t.steps.length - 1;
+  }
+
+  function shortestPath(from, to) {
+    return searchPath(from, to, (e) => e.kind !== 'step') || searchPath(from, to, () => true);
+  }
+
+  function searchPath(from, to, usable) {
+    if (from === to) return { nodes: [from], edges: [], hops: [] };
+    const previous = new Map([[from, null]]);
+    const queue = [from];
+    while (queue.length) {
+      const id = queue.shift();
+      if (id === to) break;
+      for (const e of outgoing.get(id).concat(incoming.get(id))) {
+        if (!usable(e)) continue;
+        const next = e.from === id ? e.to : e.from;
+        if (!previous.has(next)) {
+          previous.set(next, { id, e });
+          queue.push(next);
+        }
+      }
+    }
+    if (!previous.has(to)) return null;
+    const hops = [];
+    let current = to;
+    while (current !== from) {
+      const back = previous.get(current);
+      hops.unshift({ from: back.id, to: current, edge: back.e });
+      current = back.id;
+    }
+    return { nodes: [from].concat(hops.map((hop) => hop.to)), edges: hops.map((hop) => hop.edge.id), hops };
+  }
+
+  function pickView(found) {
+    const order = [state.view].concat(data.views.slice(1).map((v) => v.id), [overview]);
+    return order.find((view) => found.nodes.every((id) => inLayout(id, view)) && found.hops.every((hop) => hop.edge.views.includes(view)));
+  }
+
+  function runPath() {
+    const from = byId('path-from').value;
+    const to = byId('path-to').value;
+    const note = byId('path-note');
+    if (!from || !to) {
+      note.textContent = 'Choose a start node and an end node.';
+      return;
+    }
+    const found = shortestPath(from, to);
+    if (!found) {
+      state.path = null;
+      renderPath();
+      note.textContent = 'No path connects these nodes.';
+      refresh();
+      return;
+    }
+    for (const id of found.nodes) state.hidden.delete(nodes.get(id).group);
+    syncGroups();
+    state.tour = null;
+    state.selected = null;
+    state.path = found;
+    switchView(pickView(found), false);
+    renderPath();
+    note.textContent = found.hops.length === 0 ? 'The start and the end are the same node.' : found.hops.length === 1 ? 'One edge connects the nodes.' : `${found.hops.length} edges connect the nodes.`;
+    refresh();
+    focusNodes(found.nodes, 1.1);
+  }
+
+  function renderPath() {
+    const list = byId('path-result');
+    list.replaceChildren();
+    if (!state.path) return;
+    for (const hop of state.path.hops) {
+      const button = htmlEl('button', 'hop', null, htmlEl('li', null, null, list));
+      button.type = 'button';
+      const arrow = hop.edge.from === hop.from ? '→' : '←';
+      htmlEl('span', 'target', `${nodes.get(hop.from).label} ${arrow} ${nodes.get(hop.to).label}`, button);
+      htmlEl('span', 'via', `${kinds.get(hop.edge.kind).label}: ${hop.edge.label}`, button);
+      button.addEventListener('click', () => select(hop.to));
+    }
+  }
+
+  function runSearch() {
+    const q = byId('search').value.trim().toLowerCase();
+    state.query = q;
+    const list = byId('search-results');
+    list.replaceChildren();
+    if (q) {
+      const hits = data.nodes.filter((n) => matches(n, q));
+      for (const n of hits.slice(0, 12)) {
+        const button = htmlEl('button', null, null, htmlEl('li', null, null, list));
+        button.type = 'button';
+        htmlEl('span', 'target', n.label, button);
+        htmlEl('span', 'via', groups.get(n.group).label, button);
+        button.addEventListener('click', () => reveal(n.id));
+      }
+      if (!hits.length) htmlEl('li', 'note', 'No node matches.', list);
+      if (hits.length > 12) htmlEl('li', 'note', `${hits.length - 12} more nodes match.`, list);
+    }
+    refresh();
+  }
+
+  function syncGroups() {
+    for (const input of byId('group-list').querySelectorAll('input')) input.checked = !state.hidden.has(input.value);
+  }
+
+  function showTip(n, event) {
+    tooltip.replaceChildren();
+    htmlEl('strong', null, n.label, tooltip);
+    htmlEl('span', null, metaText(n), tooltip);
+    tooltip.hidden = false;
+    placeTip(event);
+  }
+
+  function placeTip(event) {
+    const r = svg.getBoundingClientRect();
+    tooltip.style.left = `${event.clientX - r.left + 14}px`;
+    tooltip.style.top = `${event.clientY - r.top + 14}px`;
+  }
+
+  function hideTip() {
+    tooltip.hidden = true;
+  }
+
+  function clearFocus() {
+    if (state.selected) state.selected = null;
+    else if (state.path) {
+      state.path = null;
+      renderPath();
+      byId('path-note').textContent = '';
+    } else if (state.tour) state.tour = null;
+    refresh();
+  }
+
+  function buildControls() {
+    byId('stats').textContent = `${data.nodes.length} nodes · ${data.edges.length} edges · ${data.tours.length} tours · ${data.views.length - 1} views`;
+    for (const v of data.views) {
+      const button = htmlEl('button', null, v.label, byId('view-list'));
+      button.type = 'button';
+      button.dataset.view = v.id;
+      button.title = v.summary;
+      button.addEventListener('click', () => switchView(v.id, true));
+    }
+    for (const g of data.groups) {
+      const count = data.nodes.filter((n) => n.group === g.id).length;
+      if (!count) continue;
+      const row = htmlEl('label', 'group-row', null, byId('group-list'));
+      const input = htmlEl('input', null, null, row);
+      input.type = 'checkbox';
+      input.checked = true;
+      input.value = g.id;
+      input.addEventListener('change', () => {
+        if (input.checked) state.hidden.delete(g.id);
+        else state.hidden.add(g.id);
+        if (state.selected && state.hidden.has(nodes.get(state.selected).group)) state.selected = null;
+        refresh();
+      });
+      htmlEl('span', 'swatch', null, row).style.background = g.color;
+      htmlEl('span', null, g.label, row);
+      htmlEl('span', 'count', String(count), row);
+    }
+    const legend = byId('legend');
+    for (const [text, dash] of [['Solid border: core part', ''], ['Dashed border: option', '7 4'], ['Dotted border: planned, not built', '1.5 4.5']]) {
+      const row = htmlEl('div', 'legend-row', null, legend);
+      const icon = svgEl('svg', { width: 34, height: 18, viewBox: '0 0 34 18', 'aria-hidden': 'true' }, row);
+      const rect = svgEl('rect', { x: 2, y: 2, width: 30, height: 14, rx: 4, fill: 'none', stroke: data.colors.text, 'stroke-width': 1.8, 'stroke-linecap': 'round' }, icon);
+      if (dash) rect.setAttribute('stroke-dasharray', dash);
+      htmlEl('span', null, text, row);
+    }
+    for (const k of data.edgeKinds) {
+      const row = htmlEl('div', 'legend-row', null, legend);
+      const icon = svgEl('svg', { width: 34, height: 18, viewBox: '0 0 34 18', 'aria-hidden': 'true' }, row);
+      const line = svgEl('line', { x1: 2, y1: 9, x2: 32, y2: 9, stroke: k.color, 'stroke-width': 2 }, icon);
+      if (k.dash) line.setAttribute('stroke-dasharray', k.dash);
+      htmlEl('span', null, `Edge: ${k.label}`, row);
+    }
+    const tourSelect = byId('tour-select');
+    htmlEl('option', null, 'Choose a tour', tourSelect).value = '';
+    for (const t of data.tours) htmlEl('option', null, `${t.label} (${t.steps.length})`, tourSelect).value = t.id;
+    tourSelect.addEventListener('change', () => startTour(tourSelect.value));
+    byId('tour-prev').addEventListener('click', () => showStop(state.at - 1));
+    byId('tour-next').addEventListener('click', () => showStop(state.at + 1));
+    const sorted = data.nodes.slice().sort((a, b) => a.label.localeCompare(b.label, 'en') || a.id.localeCompare(b.id, 'en'));
+    for (const [id, text] of [['path-from', 'Start node'], ['path-to', 'End node']]) {
+      const choice = byId(id);
+      htmlEl('option', null, text, choice).value = '';
+      for (const n of sorted) htmlEl('option', null, n.label, choice).value = n.id;
+    }
+    byId('path-find').addEventListener('click', runPath);
+    byId('path-clear').addEventListener('click', () => {
+      state.path = null;
+      renderPath();
+      byId('path-note').textContent = '';
+      refresh();
+    });
+    const search = byId('search');
+    search.addEventListener('input', runSearch);
+    search.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      const first = data.nodes.find((n) => state.query && matches(n, state.query));
+      if (first) reveal(first.id);
+    });
+    byId('zoom-in').addEventListener('click', () => zoomBy(1.25));
+    byId('zoom-out').addEventListener('click', () => zoomBy(0.8));
+    byId('zoom-fit').addEventListener('click', () => fitView(true));
+  }
+
+  svg.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    drag.active = true;
+    drag.moved = false;
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+    drag.camera = { ...state.camera };
+  });
+  window.addEventListener('pointermove', (event) => {
+    if (!drag.active) return;
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+    drag.moved = true;
+    state.glide++;
+    setCamera({ x: drag.camera.x + dx, y: drag.camera.y + dy, k: drag.camera.k });
+  });
+  window.addEventListener('pointerup', () => {
+    drag.active = false;
+  });
+  svg.addEventListener('click', () => {
+    if (drag.moved || !state.selected) return;
+    state.selected = null;
+    refresh();
+  });
+  svg.addEventListener('wheel', (event) => {
+    event.preventDefault();
+    const r = svg.getBoundingClientRect();
+    zoomBy(Math.exp(-event.deltaY * 0.0015), event.clientX - r.left, event.clientY - r.top);
+  }, { passive: false });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      clearFocus();
+      return;
+    }
+    const tag = event.target?.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    const forward = event.key === 'ArrowRight' || event.key === 'ArrowDown';
+    const back = event.key === 'ArrowLeft' || event.key === 'ArrowUp';
+    if (!forward && !back) return;
+    event.preventDefault();
+    if (!state.tour) {
+      const t = data.tours.find((candidate) => candidate.view === state.view);
+      if (t && forward) startTour(t.id);
+      return;
+    }
+    showStop(state.at + (forward ? 1 : -1));
+  });
+
+  buildControls();
+  renderFrames();
+  moveTo(state.view, 0);
+  refresh();
+  fitView(false);
+})();
+</script>
+</body>
+</html>

@@ -117,8 +117,8 @@ Port, user ID and project name examples repeat values from the table. Review the
 
 | Fact | Value | Source |
 |---|---|---|
-| Portable release tag | `portable-v0.3.3` | Target release for this file. Not verified: the tag exists. `git tag --list 'portable-v*'` lists available tags. |
-| Portable version | `0.3.3` | The release tag without `portable-v` |
+| Portable release tag | `portable-v0.3.4` | Target release for this file. Not verified: the tag exists. `git tag --list 'portable-v*'` lists available tags. |
+| Portable version | `0.3.4` | The release tag without `portable-v` |
 | Upstream version | `0.83.2` | `ARG OK_VERSION` in `deploy/Dockerfile` |
 | Image tag | `open-knowledge:<upstream version>-p<portable version>` | The "Release identity" format in `deploy/docs/deployment.md`, with this release's versions |
 | Base image | `node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20` | `ARG NODE_IMAGE` in `deploy/Dockerfile` |
@@ -174,7 +174,7 @@ These commands give you a running container with the fewest steps. They skip ste
 1. Get the source and build the image.
 
    ```sh
-   RELEASE_TAG=portable-v0.3.3
+   RELEASE_TAG=portable-v0.3.4
    git clone --branch "$RELEASE_TAG" https://github.com/<organization>/<repository>.git open-knowledge
    cd open-knowledge
    UPSTREAM_VERSION=$(awk -F= '/^ARG OK_VERSION=/ { print $2; exit }' deploy/Dockerfile)
@@ -205,6 +205,8 @@ These commands give you a running container with the fewest steps. They skip ste
 Warning: the server has no authentication. Do steps 9 and 10 before you put documents into the knowledge base.
 
 ## Components
+
+[deploy/docs/architecture.html](deploy/docs/architecture.html) shows these components and the rest of the fork as an interactive graph with guided tours.
 
 ```text
 Build (steps 2 to 6)
@@ -319,7 +321,7 @@ This step changes nothing on the machine.
 Clone the release repository at the release tag. The tag gives you one fixed commit of the branch `portable`.
 
 ```sh
-RELEASE_TAG=portable-v0.3.3
+RELEASE_TAG=portable-v0.3.4
 git clone --branch "$RELEASE_TAG" https://github.com/<organization>/<repository>.git open-knowledge
 cd open-knowledge
 git describe --tags

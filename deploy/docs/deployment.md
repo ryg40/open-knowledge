@@ -4,6 +4,24 @@ This guide builds and runs OpenKnowledge in a container from this repository. Th
 
 [EXPLAINER.md](../../EXPLAINER.md) is the install walk-through for a developer. It gives each command in order, and it names each thing that a command changes on the machine.
 
+## Architecture page
+
+[architecture.html](architecture.html) shows the parts of this fork as one interactive graph. It has a view and a guided tour for the runtime, the repository, CI, identity, the install and telemetry. Open the file in a browser. It makes no network request.
+
+The source of the page is [diagrams/architecture-graph.json](diagrams/architecture-graph.json). `scripts/tenant/build-architecture-html.py` writes the page from it. The script needs Python 3 and its standard library only. Two builds of the same source give the same bytes.
+
+Edit the source, then build the page and check it:
+
+```sh
+python3 scripts/tenant/build-architecture-html.py
+python3 scripts/tenant/build-architecture-html.py --check
+scripts/tenant/build-architecture-html.test.sh
+```
+
+`--check` builds the page in memory and compares it with the file. It prints `architecture: ok` and exits with 0, or it prints the difference and exits with 1. Invalid input exits with 2. `checks.yml` runs the test script, so a page that differs from its source fails the check. Commit the source and the page together.
+
+`--overlay <file>` adds a development overlay. An overlay renames nodes, replaces placeholders and adds nodes, edges and tour stops. The page of an overlay goes next to the overlay file, and its banner says that it holds real values. Keep an overlay under a path of `scripts/tenant/public-check.development`, so that promotion never publishes it.
+
 ## Files
 
 | File | Purpose |

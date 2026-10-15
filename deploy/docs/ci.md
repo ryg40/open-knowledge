@@ -34,6 +34,7 @@ These items apply to each runner:
 - The runner reaches Docker Hub for the base image, the scanner image and the shell check image, or `NODE_IMAGE`, `GITLEAKS_IMAGE` and `SHELLCHECK_IMAGE` name mirrors.
 - The runner reaches `github.com`. The workflows fetch the pinned actions there, and `scripts/tenant/ci.sh upstream-ref` fetches the upstream branch when the clone does not hold the upstream release commit.
 - The workflow check and the upstream update need Node.js 24 or newer; their entrypoints refuse an older Node. The upstream update also needs npm and `ss`. See [update.md](update.md).
+- The check of the architecture page in `checks.yml` needs Python 3. It uses the standard library only.
 - The checkout directory and `$TMPDIR` have the same path for the job and for the Docker daemon. `scan.sh` mounts them. A job container without the Docker CLI, or with the checkout in a named volume, cannot run the kit scripts. On a Gitea server, use a host-mode label (`<label>:host`) of `act_runner` with Node.js 24, the Docker CLI and GNU `grep`, and a work directory bind-mounted at the same path on the runner and on the Docker daemon. Set `OK_RUNNER` to that label.
 
 If the runner is behind a TLS-inspecting proxy, these items also apply:
@@ -219,6 +220,7 @@ scripts/tenant/pins.test.sh
 scripts/tenant/pins.sh
 scripts/tenant/telemetry.test.sh
 scripts/tenant/telemetry.sh
+scripts/tenant/build-architecture-html.test.sh
 ```
 
 - `workflows.sh check`: see "Check of the workflow files".
@@ -239,6 +241,7 @@ scripts/tenant/telemetry.sh
   - A line outside the application source that names the build setting.
 
   The guard compares names and lines. It cannot see these forms: a variable name in lower case (`process.env.ok_ping_url`); a variable name that the source computes (`process.env[name]`); the environment object under another name (`const e = process.env`, or a parameter with that default) when the name is not `env`; a request to an address that the baseline already counts; a request whose address the source builds from parts or takes from a variable (`fetch(url)`); a request to a path without a host (`navigator.sendBeacon('/api/usage')`); an address with the host `localhost`; a connection that does not use an address text (`net.connect(443, host)`, `dns.resolve(host)`); a module name that the source builds from parts without a telemetry word in one part. It needs Git and Node.js, and no network. `telemetry.sh update` writes the present source facts into the baseline after a review; `telemetry.sh list --ref <revision>` prints the facts of a revision.
+- `build-architecture-html.test.sh` runs the self-test of `scripts/tenant/build-architecture-html.py`. Then it checks that `deploy/docs/architecture.html` is the build of its source, and it checks the page of each development overlay that exists. It needs Python 3 and no network.
 - `telemetry.test.sh` tests `telemetry.sh` in a temporary repository: a changed default, a new key, a changed default of a parent object, a new variable in each access form, an unpacked environment object, a new host, a host in upper case, an IPv4 address, a second place for a listed host, an address with a host from a variable, a `wss` address, a telemetry module, the build setting and a removed switch each give exit code 1. A locale name and an address of the machine itself give exit code 0.
 
 Each test runs immediately before its check. A failed test stops the job, and the step name shows which script is defective.

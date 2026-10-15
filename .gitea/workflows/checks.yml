@@ -70,6 +70,9 @@ jobs:
       - name: Check the telemetry baseline
         run: scripts/tenant/telemetry.sh
 
+      - name: Test and check the architecture page
+        run: scripts/tenant/build-architecture-html.test.sh
+
       - name: Find a change under deploy
         id: changed
         env:
