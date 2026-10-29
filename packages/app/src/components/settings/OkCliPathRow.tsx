@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 import { Trans, useLingui } from '@lingui/react/macro';
 import { Info } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -6,10 +7,12 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { okCliCommandName } from '@/lib/channel-cli-copy';
 import type { OkIntegrationsStatus } from '@/lib/desktop-bridge-types';
 
 export function OkCliPathRow() {
   const { t } = useLingui();
+  const cliCommand = okCliCommandName();
   const bridge = typeof window !== 'undefined' ? (window.okDesktop ?? null) : null;
   const [status, setStatus] = useState<OkIntegrationsStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -53,7 +56,6 @@ export function OkCliPathRow() {
 
   return (
     <div className="flex flex-col gap-1.5" data-testid="ok-cli-path-row">
-      {}
       <div className="flex items-start overflow-hidden rounded-md border border-border bg-card/50 hover:bg-accent">
         <Label
           htmlFor="ok-cli-path"
@@ -70,7 +72,7 @@ export function OkCliPathRow() {
           <span className="flex min-w-0 flex-1 flex-col gap-0.5">
             <span className="font-medium text-foreground text-sm">
               <Trans>
-                Add the <code className="inline-code">ok</code> command to your terminal
+                Add the <code className="inline-code">{cliCommand}</code> command to your terminal
               </Trans>
             </span>
             <span className="text-muted-foreground text-xs" data-testid="ok-cli-path-status">
@@ -96,7 +98,6 @@ export function OkCliPathRow() {
               <Info className="size-3.5" />
             </Button>
           </TooltipTrigger>
-          {}
           <TooltipContent side="left" className="max-w-sm text-left">
             <div className="flex min-w-0 flex-col gap-1">
               <p className="opacity-70">

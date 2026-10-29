@@ -114,6 +114,10 @@ export interface SetupUtilityDeps {
   readInitCounters?: () => UtilityInitCounters;
 }
 
+function afterZodCompile<T>(load: () => Promise<T>): Promise<T> {
+  return import('zod/compile').then(load);
+}
+
 function readOwnInitCounters(): UtilityInitCounters {
   const cpu = process.cpuUsage();
   return {
@@ -155,13 +159,13 @@ export interface UtilityHandle {
 export function setupUtility(deps: SetupUtilityDeps): UtilityHandle {
   let booted: UtilityBootedServer | null = null;
   let parentPollHandle: { unref?: () => void; clear: () => void } | null = null;
-  let shuttingDown = false;
-  let resolveReady!: (msg: UtilityReadyMessage) => void;
-  let rejectReady!: (err: Error) => void;
-  const readyPromise = new Promise<UtilityReadyMessage>((resolve, reject) => {
-    resolveReady = resolve;
-    rejectReady = reject;
-  });
+  let initInFlight: Promise<void> | null = null;
+  let shutdownInFlight: Promise<void> | null = null;
+  const {
+    promise: readyPromise,
+    resolve: resolveReady,
+    reject: rejectReady,
+  } = Promise.withResolvers<UtilityReadyMessage>();
 
   function startParentPoll() {
     const pollMs = deps.parentPollMs ?? 5000;
@@ -188,14 +192,21 @@ export function setupUtility(deps: SetupUtilityDeps): UtilityHandle {
     parentPollHandle = null;
   }
 
-  async function shutdown(reason: UtilityShutdownReason): Promise<void> {
-    if (shuttingDown) return;
-    shuttingDown = true;
+  function shutdown(reason: UtilityShutdownReason): Promise<void> {
+    shutdownInFlight ??= drainAndExit(reason);
+    return shutdownInFlight;
+  }
+
+  async function drainAndExit(reason: UtilityShutdownReason): Promise<void> {
     stopParentPoll();
+    await initInFlight;
     let drainOk = true;
     if (booted) {
       try {
-        await booted.destroy(SERVER_EXIT_REASONS[reason]);
+        await booted.destroy(
+          SERVER_EXIT_REASONS[reason],
+          reason === 'SIGTERM' || reason === 'SIGINT' ? { signal: reason } : undefined,
+        );
       } catch (err) {
         drainOk = false;
         deps.parentPort?.postMessage({
@@ -205,6 +216,11 @@ export function setupUtility(deps: SetupUtilityDeps): UtilityHandle {
         });
       }
     }
+    console.warn('[utility] shutdown finished, exiting', {
+      reason,
+      destroyResolved: booted !== null && drainOk,
+      exitCode: drainOk ? 0 : 1,
+    });
     deps.exit(drainOk ? 0 : 1);
   }
 
@@ -219,10 +235,11 @@ export function setupUtility(deps: SetupUtilityDeps): UtilityHandle {
       markInitPhase('init-received');
       const [server, cli, serverNamespace] = await Promise.all([
         deps.importServer(),
-        import('@inkeep/open-knowledge'),
-        import('@inkeep/open-knowledge-server'),
+        afterZodCompile(() => import('@inkeep/open-knowledge')),
+        afterZodCompile(() => import('@inkeep/open-knowledge-server')),
       ]);
       markInitPhase('imports-resolved');
+      cli.registerWindowsProcessStartReader(serverNamespace.getLogger('process-start'));
       const {
         detectGh,
         detectGhAccounts,
@@ -236,7 +253,7 @@ export function setupUtility(deps: SetupUtilityDeps): UtilityHandle {
       const projectDir = msg.opts.projectDir ?? msg.opts.contentDir;
       const prepare = deps.prepareBootEnvironment ?? defaultPrepareBootEnvironment;
       const prepared = await prepare(msg.opts, markInitPhase);
-      if (shuttingDown) return;
+      if (shutdownInFlight !== null) return;
 
       if (env.OK_DEBUG_DESKTOP_BOOT_TRACE === '1') {
         console.warn(
@@ -288,6 +305,7 @@ export function setupUtility(deps: SetupUtilityDeps): UtilityHandle {
           throw err;
         }
       }
+      if (shutdownInFlight !== null) return;
       const readyMsg: UtilityReadyMessage = {
         type: 'ready',
         port: booted.port,
@@ -332,8 +350,11 @@ export function setupUtility(deps: SetupUtilityDeps): UtilityHandle {
         errMsg.kind = 'authority-registry';
       }
       const isGitPreflightFailure =
-        errName === 'GitNotAvailableError' || errName === 'GitTooOldError';
+        errName === 'GitNotAvailableError' ||
+        errName === 'GitProbeTimeoutError' ||
+        errName === 'GitTooOldError';
       deps.parentPort?.postMessage(errMsg);
+      if (shutdownInFlight !== null) return;
       rejectReady(err as Error);
       deps.exit(isGitPreflightFailure ? 78 : 1);
     }
@@ -356,7 +377,7 @@ export function setupUtility(deps: SetupUtilityDeps): UtilityHandle {
     deps.parentPort?.on('message', (event) => {
       const msg = event.data as UtilityIncomingMessage;
       if (msg?.type === 'init') {
-        void handleInit(msg);
+        initInFlight = handleInit(msg);
       } else if (msg?.type === 'shutdown') {
         void shutdown('shutdown-ipc');
       } else if (msg?.type === 'debug-keyring-smoke') {
@@ -430,9 +451,9 @@ export async function resolveDesktopServerRuntime(projectDir: string): Promise<{
   serverRuntime: ServerRuntimeConfig;
 }> {
   const [{ loadConfig }, { resolveServerRuntimeConfig }, { ConfigSchema }] = await Promise.all([
-    import('@inkeep/open-knowledge'),
-    import('@inkeep/open-knowledge-core'),
-    import('@inkeep/open-knowledge-server'),
+    afterZodCompile(() => import('@inkeep/open-knowledge')),
+    afterZodCompile(() => import('@inkeep/open-knowledge-core')),
+    afterZodCompile(() => import('@inkeep/open-knowledge-server')),
   ]);
   let config: Config;
   let configValid: boolean;
@@ -464,7 +485,9 @@ async function defaultPrepareBootEnvironment(
   onPhase?: (phase: UtilityInitPhase) => void,
 ): Promise<PreparedBootEnvironment> {
   const projectDir = ipcOpts.projectDir ?? ipcOpts.contentDir;
-  const { ensureProjectGit, initContent } = await import('@inkeep/open-knowledge-server');
+  const { ensureProjectGit, initContent } = await afterZodCompile(
+    () => import('@inkeep/open-knowledge-server'),
+  );
 
   const degradedHints: string[] = [];
   if (ipcOpts.didEnsureGit !== true) {
@@ -526,7 +549,7 @@ if ((process as NodeJS.Process & { parentPort?: unknown }).parentPort) {
   setupUtility({
     parentPort: (process as NodeJS.Process & { parentPort: SetupUtilityDeps['parentPort'] })
       .parentPort,
-    importServer: () => import('@inkeep/open-knowledge-server'),
+    importServer: () => afterZodCompile(() => import('@inkeep/open-knowledge-server')),
     exit: (code) => process.exit(code),
     parentPid: process.ppid,
     killProbe: (pid, signal) => {

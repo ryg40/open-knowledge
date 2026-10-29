@@ -8,6 +8,7 @@ import {
   type PersistedLinterConfig,
   toEffectiveBase,
 } from '@inkeep/open-knowledge-core/markdown/lint';
+import { useLingui } from '@lingui/react/macro';
 import { useTheme } from 'next-themes';
 import { useEffect, useRef, useState } from 'react';
 import { yCollab, yUndoManagerKeymap } from 'y-codemirror.next';
@@ -29,6 +30,10 @@ import { emitDiagnosticBreadcrumb } from '@/lib/diagnostic-breadcrumb';
 import { editorToolbarOverlapPx } from '@/lib/editor-toolbar-overlap';
 import { claimNoteWindowInitialFocus } from '@/lib/note-window-focus';
 import { createSourceClipboardExtension } from './clipboard/index.ts';
+import {
+  codeMirrorContentAttributes,
+  relabelCodeMirrorContent,
+} from './code-mirror-content-attributes';
 import { type CmCacheEntry, mountCmEditor, parkCmEditor } from './editor-cache';
 import { registerFullPageCmView, unregisterFullPageCmView } from './full-page-cm-views';
 import { useDocLintConfig } from './lint-config-client';
@@ -84,7 +89,11 @@ function cleanupSourceEditorEntry(docName: string, entry: CmCacheEntry): void {
   }
 }
 
-function applyOutlineNavigation(view: EditorView, detail: OutlineNavDetail, docName: string): void {
+function applyOutlineNavigation(
+  view: EditorView,
+  detail: OutlineNavDetail,
+  docName: string,
+): boolean {
   const lines = sourceHeadingLines(view.state.doc);
   const heading = lines[detail.index];
   const trace = {
@@ -95,7 +104,7 @@ function applyOutlineNavigation(view: EditorView, detail: OutlineNavDetail, docN
   };
   if (!heading) {
     emitDiagnosticBreadcrumb(OUTLINE_NAV_BREADCRUMB, { ...trace, outcome: 'no-target' });
-    return;
+    return false;
   }
 
   const claimed = runScrollNavigation(docName, 'outline', () => {
@@ -110,6 +119,7 @@ function applyOutlineNavigation(view: EditorView, detail: OutlineNavDetail, docN
     outcome: claimed ? 'scrolled' : 'declined',
     targetLine: view.state.doc.lineAt(heading.from).number,
   });
+  return claimed;
 }
 
 export function applyRawMdxNavigation(
@@ -158,6 +168,8 @@ export function SourceEditor({
   const [mountError, setMountError] = useState<Error | null>(null);
   if (mountError) throw mountError;
   const { resolvedTheme } = useTheme();
+  const { t } = useLingui();
+  const contentLabel = t`Markdown source`;
   const { merged } = useConfigContext();
   const sourceModeActiveRef = useRef(isSourceModeActive);
   const wordWrap = merged?.editor?.wordWrap ?? true;
@@ -170,7 +182,7 @@ export function SourceEditor({
   const linterConfigKey = JSON.stringify(linterConfig);
 
   const cmEntryRef = useRef<CmCacheEntry | null>(null);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: ytext and provider are the remount keys; docName is fixed for the lifetime of a mounted SourceEditor, and theme, wrap, placeholder and lint config reconfigure the live view through compartments
+  // biome-ignore lint/correctness/useExhaustiveDependencies: ytext and provider are the remount keys; docName is fixed for the lifetime of a mounted SourceEditor, and theme, wrap, placeholder, content label and lint config reconfigure the live view through compartments
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -203,6 +215,7 @@ export function SourceEditor({
             const state = EditorState.create({
               doc: ytext.toString(),
               extensions: [
+                codeMirrorContentAttributes(contentLabel),
                 sourceModeSetup,
                 sourceLineDirection,
                 search({
@@ -371,6 +384,12 @@ export function SourceEditor({
     });
   }, [placeholder]);
 
+  useEffect(() => {
+    const entry = cmEntryRef.current;
+    if (!entry) return;
+    relabelCodeMirrorContent(entry.view, contentLabel);
+  }, [contentLabel]);
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: linterConfig is keyed by linterConfigKey
   useEffect(() => {
     const entry = cmEntryRef.current;
@@ -397,7 +416,7 @@ export function SourceEditor({
         });
         return;
       }
-      applyOutlineNavigation(view, detail, docName);
+      if (applyOutlineNavigation(view, detail, docName)) detail.onNavigated?.(view.contentDOM);
       clearPendingSourceNavigation(docName);
     }
     window.addEventListener(OUTLINE_NAV_EVENT, onNav);
@@ -410,7 +429,10 @@ export function SourceEditor({
       if (!detail || detail.docName !== docName || !isSourceModeActive) return;
       const view = viewRef.current;
       if (!view) return;
-      if (applyLintNavigation(view, detail, docName)) clearPendingSourceNavigation(docName);
+      if (applyLintNavigation(view, detail, docName)) {
+        clearPendingSourceNavigation(docName);
+        detail.onNavigated?.(view.contentDOM);
+      }
     }
     window.addEventListener(LINT_NAV_EVENT, onLintNav);
     return () => window.removeEventListener(LINT_NAV_EVENT, onLintNav);
@@ -427,9 +449,13 @@ export function SourceEditor({
     if (pendingNavigation.kind !== 'selection-offset') {
       consumePendingSourceNavigation(docName);
       if (pendingNavigation.kind === 'outline') {
-        applyOutlineNavigation(view, pendingNavigation.detail, docName);
+        if (applyOutlineNavigation(view, pendingNavigation.detail, docName)) {
+          pendingNavigation.detail.onNavigated?.(view.contentDOM);
+        }
       } else if (pendingNavigation.kind === 'lint') {
-        applyLintNavigation(view, pendingNavigation.detail, docName);
+        if (applyLintNavigation(view, pendingNavigation.detail, docName)) {
+          pendingNavigation.detail.onNavigated?.(view.contentDOM);
+        }
       } else if (pendingNavigation.kind === 'raw-mdx') {
         applyRawMdxNavigation(
           view,

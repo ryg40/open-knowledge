@@ -48,6 +48,8 @@ describe('persistence publish ordering — a store must not publish bytes older 
 
   function createPersistence(): ReturnType<typeof createPersistenceExtension> {
     return createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,

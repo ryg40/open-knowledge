@@ -1,5 +1,5 @@
 import { sharedExtensions as coreExtensions } from '@inkeep/open-knowledge-core/extensions/shared';
-import { Extension } from '@tiptap/core';
+import { type AnyExtension, Extension } from '@tiptap/core';
 import FileHandler from '@tiptap/extension-file-handler';
 import { KeyboardNav } from '../block-ux/keyboard-nav';
 import { TiptapFindReplace } from '../find-replace/tiptap-find-replace-extension';
@@ -32,6 +32,7 @@ import { RawMdxFallback } from './raw-mdx-fallback';
 import { SelectionStatePlugin } from './selection-state-plugin';
 import { SlashCommand } from './slash-command';
 import { SourceDirtyObserver } from './source-dirty-observer';
+import { SuggestionCompositionEnd } from './suggestion-ime';
 import { TabFocusTrap } from './tab-focus-trap';
 import { TableInsertControls } from './table-insert-controls';
 import { TableRowEnter } from './table-row-enter';
@@ -78,6 +79,7 @@ export const sharedExtensions = [
       embed: 'Embeds',
     },
   }),
+  SuggestionCompositionEnd,
   FormattingShortcuts,
   TabFocusTrap,
   FileHandler.configure({
@@ -118,3 +120,20 @@ export const sharedExtensions = [
     },
   }),
 ];
+
+const DOCUMENT_SCOPED_EXTENSION_NAMES: ReadonlySet<string> = new Set([
+  'link',
+  'wikiLink',
+  'jsxComponent',
+  'jsxInline',
+  'imageReference',
+]);
+
+export function scopeExtensionsToDocument(
+  extensions: readonly AnyExtension[],
+  docName: string,
+): AnyExtension[] {
+  return extensions.map((ext) =>
+    DOCUMENT_SCOPED_EXTENSION_NAMES.has(ext.name) ? ext.configure({ docName }) : ext,
+  );
+}

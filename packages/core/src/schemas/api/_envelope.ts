@@ -21,6 +21,8 @@ export const ServerInfoSuccessSchema = z
     currentDiskAckSVs: z.record(z.string().min(1), z.string().min(1)).optional(),
     boot: ServerInfoBootSchema.optional(),
     collabClients: z.number().int().nonnegative().optional(),
+    runtimeVersion: z.string().min(1).optional(),
+    protocolVersion: z.number().int().positive().optional(),
   })
   .loose() satisfies StandardSchemaV1;
 export type ServerInfoSuccess = z.infer<typeof ServerInfoSuccessSchema>;
@@ -82,7 +84,14 @@ export const ProblemTypeSchema = z.enum([
   'urn:ok:error:disk-divergence',
   'urn:ok:error:stale-external-write',
   'urn:ok:error:store-refused',
+  'urn:ok:error:save-held',
   'urn:ok:error:doc-removed',
+  'urn:ok:error:branch-switched',
+  'urn:ok:error:doc-moved',
+  'urn:ok:error:server-stopped',
+  'urn:ok:error:both-kept',
+  'urn:ok:error:write-replaced',
+  'urn:ok:error:write-dropped',
   'urn:ok:error:doc-not-found',
   'urn:ok:error:doc-already-exists',
   'urn:ok:error:doc-not-open',
@@ -171,6 +180,14 @@ export const UploadAssetSuccessSchema = z
   })
   .loose() satisfies StandardSchemaV1;
 export type UploadAssetSuccess = z.infer<typeof UploadAssetSuccessSchema>;
+
+export const AttachmentFolderUploadIssueSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('unknown-variable'), variables: z.array(z.string()) }),
+  z.object({ kind: z.literal('unclosed-braces') }),
+  z.object({ kind: z.literal('repeated-variable') }),
+  z.object({ kind: z.literal('invalid-config') }),
+]);
+export type AttachmentFolderUploadIssue = z.infer<typeof AttachmentFolderUploadIssueSchema>;
 
 export const LocalOpCloneRequestSchema = z
   .object({

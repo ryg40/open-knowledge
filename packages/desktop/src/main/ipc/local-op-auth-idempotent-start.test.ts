@@ -1,3 +1,4 @@
+import { OkCliCommand } from '@inkeep/open-knowledge-core';
 import type { AuthEvent, CloneEvent } from '@inkeep/open-knowledge-server';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
@@ -19,10 +20,7 @@ vi.doMock('@inkeep/open-knowledge-server', () => ({
   runAuthStatusSubprocess: () => Promise.resolve({ authenticated: false, host: 'github.com' }),
   runAuthReposSubprocess: () => Promise.resolve({ ok: false, error: 'unused' }),
   runDeviceFlowSubprocess: ({ onEvent }: { onEvent: (event: AuthEvent) => void }) => {
-    let resolveDone: () => void = () => {};
-    const done = new Promise<void>((resolve) => {
-      resolveDone = resolve;
-    });
+    const { promise: done, resolve: resolveDone } = Promise.withResolvers<void>();
     const entry: DeviceFlowEntry = { resolve: resolveDone, cancelCalled: false, onEvent };
     deviceFlowControllers.push(entry);
     return {
@@ -33,10 +31,7 @@ vi.doMock('@inkeep/open-knowledge-server', () => ({
     };
   },
   runCloneSubprocess: ({ onEvent }: { onEvent: (event: CloneEvent) => void }) => {
-    let resolveDone: () => void = () => {};
-    const done = new Promise<void>((resolve) => {
-      resolveDone = resolve;
-    });
+    const { promise: done, resolve: resolveDone } = Promise.withResolvers<void>();
     const entry: CloneEntry = { resolve: resolveDone, cancelCalled: false, onEvent };
     cloneControllers.push(entry);
     return {
@@ -70,7 +65,7 @@ function makeSender() {
 
 function makeDeps() {
   return {
-    resolveCliInvocation: () => ({ cliArgs: ['open-knowledge'] }),
+    resolveOkCli: () => OkCliCommand.resolve({ host: { cliArgs: ['open-knowledge'] }, env: {} }),
     logFailure: vi.fn(),
     state: createLocalOpState(),
   };

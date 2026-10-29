@@ -4,13 +4,17 @@ import {
   assertGitAvailable,
   type GitDetected,
   GitNotAvailableError,
+  GitProbeTimeoutError,
   GitTooOldError,
 } from '../git-preflight.ts';
-import { emitPreflightFailureSpan } from '../git-preflight-telemetry.ts';
+import {
+  describeGitPreflightFailure,
+  emitPreflightFailureSpan,
+} from '../git-preflight-telemetry.ts';
 import { expandTilde, isAllowedGitUrl, isSafeLocalPath } from '../local-op-security.ts';
 import { getLogger } from '../logger.ts';
 import { redactedStderrDetail, stderrDetailSuffix } from './clone-error-classify.ts';
-import { type LocalOpCliInvocation, runSubprocess } from './subprocess.ts';
+import { type LocalOpCliInvocation, runOkCliSubprocess } from './subprocess.ts';
 
 const log = getLogger('clone-flow');
 
@@ -97,16 +101,21 @@ export function runCloneSubprocess(opts: RunCloneOptions): RunCloneController {
   try {
     detected = assertGitAvailable();
   } catch (err) {
-    if (err instanceof GitNotAvailableError || err instanceof GitTooOldError) {
+    if (
+      err instanceof GitNotAvailableError ||
+      err instanceof GitProbeTimeoutError ||
+      err instanceof GitTooOldError
+    ) {
+      const failure = describeGitPreflightFailure(err);
       emitPreflightFailureSpan(err);
       log.warn(
         {
           event: 'git_preflight_fail',
           platform: err.platform,
-          reason: err instanceof GitTooOldError ? 'too_old' : 'not_available',
-          detectedVersion: err instanceof GitTooOldError ? err.detected : '',
+          reason: failure.reason,
+          detectedVersion: failure.detectedVersion,
         },
-        err instanceof GitTooOldError ? 'git binary too old' : 'git binary not found',
+        failure.logMessage,
       );
     } else {
       log.error(
@@ -130,9 +139,7 @@ export function runCloneSubprocess(opts: RunCloneOptions): RunCloneController {
 
   const branchArgs =
     typeof opts.branch === 'string' && opts.branch.length > 0 ? ['-b', opts.branch] : [];
-  const proc = runSubprocess({
-    cliArgs: opts.cliArgs,
-    cliEnv: opts.cliEnv,
+  const proc = runOkCliSubprocess(opts.cli, {
     trailingArgs: ['clone', '--json', ...branchArgs, opts.url, targetDir],
     extraPathDirs,
     timeoutMs,
@@ -148,6 +155,10 @@ export function runCloneSubprocess(opts: RunCloneOptions): RunCloneController {
   });
 
   const done = proc.done.then((result) => {
+    if ('refused' in result) {
+      opts.onEvent({ type: 'error', message: result.refused });
+      return;
+    }
     if (sawTerminal) return;
     if (result.timedOut) {
       opts.onEvent({ type: 'error', message: 'Clone timed out after 10 minutes' });

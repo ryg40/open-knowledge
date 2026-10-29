@@ -71,7 +71,11 @@ async function renameFolder(
       documents: options.documents ?? new Map(),
       closeConnections() {},
       unloadDocument: async () => {},
-      debouncer: { isDebounced: () => false, executeNow: async () => undefined },
+      debouncer: {
+        isDebounced: () => false,
+        isCurrentlyExecuting: () => false,
+        executeNow: async () => undefined,
+      },
     } as unknown as Parameters<typeof createApiExtension>[0]['hocuspocus'],
     sessionManager: {
       closeSession: async () => {},
@@ -286,7 +290,7 @@ describe('managed rename corpus discovery', () => {
             size: 18,
             modified: new Date(0).toISOString(),
             canonicalPath: join(contentDir, 'late.md'),
-            inode: 0,
+            inode: '',
             aliases: [],
             kind: 'markdown',
           },

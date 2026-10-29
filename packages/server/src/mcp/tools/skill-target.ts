@@ -5,6 +5,7 @@ import {
   type EditorId,
   HUB_READER_EDITORS,
   interpretSkillMoveFailure,
+  isMarkdownSkillFilePath,
   normalizeApiWarnings,
   SKILL_AUTHORING_WARNING_CODES,
   type SkillMoveFailureOutcome,
@@ -16,7 +17,7 @@ import {
   agentIdentityFields,
   alignWarningCodes,
   errorTextWithDetail,
-  HOCUSPOCUS_NOT_RUNNING_ERROR,
+  hocuspocusNotRunningError,
   httpDelete,
   httpGet,
   httpPost,
@@ -24,7 +25,22 @@ import {
   textPlusStructured,
   textResult,
 } from './shared.ts';
-import { resolveSkillName } from './verb-schemas.ts';
+import {
+  resolveSkillName,
+  SKILL_EDIT_CONTROL_ADVICE,
+  SKILL_FILE_EDIT_CONTROL_ADVICE,
+  SKILL_METADATA_CONTROL_ADVICE,
+} from './verb-schemas.ts';
+import {
+  failedWriteResult,
+  leadFor,
+  needsAttention,
+  refusedDespiteSuccess,
+  refusedWriteResult,
+  writeOutcomeFields,
+  writeOutcomeLine,
+  writeOutcomeOf,
+} from './write-outcome.ts';
 
 export type { SkillScope };
 
@@ -48,12 +64,13 @@ export async function writeSkill(
     name: string;
     description: string;
     body?: string;
+    resubmitted?: 'body-edit' | 'metadata-edit';
     lockDir?: string;
   } & SkillIdentity,
 ) {
   const resolved = resolveSkillName(input.name);
   if (!resolved.ok) return textResult(`Error: ${resolved.error}`, true);
-  if (!url) return textResult(HOCUSPOCUS_NOT_RUNNING_ERROR, true);
+  if (!url) return textResult(hocuspocusNotRunningError(), true);
   const result = await httpPut(url, '/api/skill', {
     ...(input.scope !== undefined ? { scope: input.scope } : {}),
     name: input.name,
@@ -62,7 +79,22 @@ export async function writeSkill(
     ...(input.summary !== undefined ? { summary: input.summary } : {}),
     ...agentIdentityFields(input.identity),
   });
-  if (!result.ok) return textResult(`Error: ${result.error}`, true);
+  const outcome = writeOutcomeOf(result);
+  if (!result.ok)
+    return failedWriteResult(
+      errorTextWithDetail(
+        result,
+        input.resubmitted
+          ? input.resubmitted === 'metadata-edit'
+            ? SKILL_METADATA_CONTROL_ADVICE
+            : SKILL_EDIT_CONTROL_ADVICE
+          : 'Any body offset refers to the full submitted skill body.',
+      ),
+      outcome,
+    );
+  if (refusedDespiteSuccess(outcome)) {
+    return refusedWriteResult(`The write of skill "${input.name}"`, outcome);
+  }
   const created = result.created === true;
   const path = typeof result.path === 'string' ? result.path : undefined;
   const aligned = alignWarningCodes(
@@ -70,17 +102,28 @@ export async function writeSkill(
     result.warningCodes,
     KNOWN_AUTHORING_WARNING_CODES,
   );
+  const outcomeLine = outcome?.outcome === 'applied' ? null : writeOutcomeLine(outcome);
   const lines = [
-    `${created ? 'Created' : 'Updated'} skill "${input.name}"${path ? ` (${path})` : ''} — live for that folder's agent. Use \`install\` with \`add\` to put it in your other editors.`,
+    leadFor(
+      outcome,
+      `${created ? 'Created' : 'Updated'} skill "${input.name}"`,
+      `${created ? 'Created' : 'Updated'} skill "${input.name}"${path ? ` (${path})` : ''} — live for that folder's agent. Use \`install\` with \`add\` to put it in your other editors.`,
+    ),
     ...aligned.warnings,
+    ...(outcomeLine ? [outcomeLine] : []),
   ];
   const preview = input.lockDir
     ? resolveSkillPreviewUrl(input.scope ?? 'project', input.name, { lockDir: input.lockDir })
     : null;
-  return textPlusStructured(lines.join('\n'), {
-    skill: { ok: true, path, created, ...aligned },
-    ...(preview ? { previewUrl: preview.url, previewUrlSource: preview.source } : {}),
-  });
+  return textPlusStructured(
+    lines.join('\n'),
+    {
+      skill: { ok: true, path, created, ...aligned },
+      ...(preview ? { previewUrl: preview.url, previewUrlSource: preview.source } : {}),
+      ...writeOutcomeFields(outcome),
+    },
+    needsAttention(outcome),
+  );
 }
 
 export async function fetchSkill(
@@ -118,11 +161,17 @@ export async function fetchSkill(
 
 export async function writeSkillFile(
   url: string | undefined,
-  input: { scope?: SkillScope; name: string; path: string; content: string } & SkillIdentity,
+  input: {
+    scope?: SkillScope;
+    name: string;
+    path: string;
+    content: string;
+    resubmitted?: true;
+  } & SkillIdentity,
 ) {
   const resolved = resolveSkillName(input.name);
   if (!resolved.ok) return textResult(`Error: ${resolved.error}`, true);
-  if (!url) return textResult(HOCUSPOCUS_NOT_RUNNING_ERROR, true);
+  if (!url) return textResult(hocuspocusNotRunningError(), true);
   const result = await httpPut(url, '/api/skill-file', {
     ...(input.scope !== undefined ? { scope: input.scope } : {}),
     name: input.name,
@@ -131,13 +180,37 @@ export async function writeSkillFile(
     ...(input.summary !== undefined ? { summary: input.summary } : {}),
     ...agentIdentityFields(input.identity),
   });
-  if (!result.ok) return textResult(`Error: ${result.error}`, true);
+  const outcome = writeOutcomeOf(result);
+  if (!result.ok)
+    return failedWriteResult(
+      errorTextWithDetail(
+        result,
+        isMarkdownSkillFilePath(input.path)
+          ? input.resubmitted
+            ? SKILL_FILE_EDIT_CONTROL_ADVICE
+            : 'Any content offset refers to the whole submitted file content, including frontmatter.'
+          : undefined,
+      ),
+      outcome,
+    );
+  if (refusedDespiteSuccess(outcome)) {
+    return refusedWriteResult(`The write of "${input.path}" in skill "${input.name}"`, outcome);
+  }
   const created = result.created === true;
   const path = typeof result.path === 'string' ? result.path : input.path;
   const kind = result.kind === 'script' ? 'script' : 'reference';
+  const outcomeLine = outcome?.outcome === 'applied' ? null : writeOutcomeLine(outcome);
   return textPlusStructured(
-    `${created ? 'Created' : 'Updated'} skill ${kind} "${input.path}" in "${input.name}".`,
-    { skill: { ok: true, file: { path, kind, created } } },
+    [
+      leadFor(
+        outcome,
+        `${created ? 'Created' : 'Updated'} skill ${kind} "${input.path}" in "${input.name}"`,
+        `${created ? 'Created' : 'Updated'} skill ${kind} "${input.path}" in "${input.name}".`,
+      ),
+      ...(outcomeLine ? [outcomeLine] : []),
+    ].join('\n'),
+    { skill: { ok: true, file: { path, kind, created } }, ...writeOutcomeFields(outcome) },
+    needsAttention(outcome),
   );
 }
 
@@ -172,7 +245,7 @@ export async function deleteSkillFile(
 ) {
   const resolved = resolveSkillName(input.name);
   if (!resolved.ok) return textResult(`Error: ${resolved.error}`, true);
-  if (!url) return textResult(HOCUSPOCUS_NOT_RUNNING_ERROR, true);
+  if (!url) return textResult(hocuspocusNotRunningError(), true);
   const params = new URLSearchParams({
     name: input.name,
     scope: input.scope ?? 'project',
@@ -197,7 +270,7 @@ export async function deleteSkill(
 ) {
   const resolved = resolveSkillName(input.name);
   if (!resolved.ok) return textResult(`Error: ${resolved.error}`, true);
-  if (!url) return textResult(HOCUSPOCUS_NOT_RUNNING_ERROR, true);
+  if (!url) return textResult(hocuspocusNotRunningError(), true);
   const params = new URLSearchParams({ name: input.name, scope: input.scope ?? 'project' });
   if (input.summary !== undefined) params.set('summary', input.summary);
   appendIdentityParams(params, input.identity);
@@ -224,7 +297,7 @@ export async function moveSkill(
   if (!rf.ok) return textResult(`Error: ${rf.error}`, true);
   const rt = resolveSkillName(input.toName);
   if (!rt.ok) return textResult(`Error: ${rt.error}`, true);
-  if (!url) return textResult(HOCUSPOCUS_NOT_RUNNING_ERROR, true);
+  if (!url) return textResult(hocuspocusNotRunningError(), true);
   const result = await httpPost(url, '/api/skill', {
     ...(input.scope !== undefined ? { scope: input.scope } : {}),
     fromName: input.fromName,
@@ -353,7 +426,7 @@ export async function moveSkillCrossScope(
   if (!rf.ok) return refuse(`Error: ${rf.error}`);
   const rt = resolveSkillName(input.toName);
   if (!rt.ok) return refuse(`Error: ${rt.error}`);
-  if (!url) return refuse(HOCUSPOCUS_NOT_RUNNING_ERROR);
+  if (!url) return refuse(hocuspocusNotRunningError());
 
   const moved = await httpPost(url, '/api/skill/move-scope', {
     name: input.fromName,

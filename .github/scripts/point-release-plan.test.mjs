@@ -7,26 +7,34 @@ import { Project, ts } from 'ts-morph';
 import { afterEach, describe, expect, test } from 'vitest';
 import { gitAt, withBumpVerdicts } from '../../scripts/compute-stable-version.mjs';
 import { gitCleanEnv } from '../../scripts/git-clean-env.mjs';
+import { NOTES_SOURCE_MARKER, withNoteLevels } from '../../scripts/render-stable-notes.mjs';
+import { configureTestGitRepository } from '../../test-support/configure-git-fixture.test-helper.ts';
+import { expectNoAutomaticGitMaintenance } from './git-fixture-maintenance.test-helper.mjs';
 import {
   APP_CREDENTIAL_HELPER,
   deriveEntryLevelResolution,
   formatReleaseNotes,
-  guardAnchor,
+  guardBasePublished,
   guardDeltaMatchesFix,
-  guardMainResetDeltaIds,
   guardNativeConfigProvenance,
   guardPatchOnly,
   guardRefsOnMain,
+  guardReleaseHold,
   guardResolvePathsAllowlisted,
+  guardShipsPublishedFixes,
   guardTagFree,
   parseFixRefs,
   parseResolvePaths,
   pushTagArgs,
   RESOLVABLE_PATHS,
   readFixBumps,
+  readFixNoteLevels,
+  realIo,
   runPointRelease,
   verifyWorkspaceMatchesLockfile,
 } from './point-release-plan.mjs';
+import { RELEASE_HOLD_SENTINEL } from './release-hold.mjs';
+import { appliedOrigins } from './shipped-fix-containment.mjs';
 
 function inspectGitEscapes(source) {
   const project = new Project({ useInMemoryFileSystem: true, skipLoadingLibFiles: true });
@@ -68,23 +76,43 @@ const membership = (...members) => {
   };
 };
 
-describe('guardAnchor', () => {
-  test('refuses while a stable tag is ahead of the changeset anchor', () => {
-    const r = guardAnchor({ anchorVersion: '0.32.0', latestStableTag: 'v0.32.1' });
-    expect(r.ok).toBe(false);
-    expect(r.code).toBe('anchor-drift');
-  });
+const containedVerdict = (candidateSha = 'synthetic-sha') => ({
+  ok: true,
+  candidate: candidateSha,
+  candidateSha: candidateSha.padEnd(40, '0'),
+  published: 3,
+  checked: ['v0.31.4'],
+  records: 1,
+  plusRecords: 1,
+  plusCommits: 1,
+  coveredByProvenance: 1,
+  coveredByPrNumber: 0,
+  commits: [],
+  uncovered: [],
+});
 
-  test('passes when the anchor is level with the newest stable', () => {
-    const r = guardAnchor({ anchorVersion: '0.32.1', latestStableTag: 'v0.32.1' });
-    expect(r).toMatchObject({ ok: true, code: null });
-  });
+const unheldVerdict = (sha) => ({
+  kind: 'tree',
+  candidate: sha,
+  sha,
+  path: RELEASE_HOLD_SENTINEL,
+  held: false,
+});
 
-  test('propagates a malformed anchor instead of reporting it as drift', () => {
-    expect(() =>
-      guardAnchor({ anchorVersion: 'not-a-version', latestStableTag: 'v0.32.1' }),
-    ).toThrow();
-  });
+const droppedFixVerdict = () => ({
+  ...containedVerdict(),
+  ok: false,
+  coveredByProvenance: 0,
+  uncovered: [
+    {
+      sha: 'a66f9e77679cb6fad68eb0b8bdd8ff5b54edca49',
+      subject: 'fix(ok): keep the update-ready notice reachable (#5610)',
+      pr: '5610',
+      origin: null,
+      coverage: null,
+      stables: ['v0.31.4'],
+    },
+  ],
 });
 
 describe('parseFixRefs', () => {
@@ -238,28 +266,6 @@ describe('guardNativeConfigProvenance', () => {
 
   test('treats a missing selection as "nothing qualified", not as a pass', () => {
     expect(guardNativeConfigProvenance({}).ok).toBe(false);
-  });
-});
-
-describe('guardMainResetDeltaIds', () => {
-  test('passes on a non-empty delta', () => {
-    expect(guardMainResetDeltaIds({ deltaIds: ['brave-pandas-sing'] })).toMatchObject({
-      ok: true,
-      code: null,
-    });
-  });
-
-  test('refuses an empty array, which main-reset reads as consolidate-everything', () => {
-    const r = guardMainResetDeltaIds({ deltaIds: [] });
-    expect(r.ok).toBe(false);
-    expect(r.code).toBe('empty-delta-ids');
-  });
-
-  test('refuses an absent delta for the same reason', () => {
-    expect(guardMainResetDeltaIds({ deltaIds: null })).toMatchObject({
-      ok: false,
-      code: 'empty-delta-ids',
-    });
   });
 });
 
@@ -549,14 +555,14 @@ describe('verifyWorkspaceMatchesLockfile', () => {
 describe('guard codes', () => {
   test('every guard refuses with its own distinct code', () => {
     const refusals = [
-      guardAnchor({ anchorVersion: '0.32.0', latestStableTag: 'v0.32.1' }),
       guardRefsOnMain({ fixRefs: ['stray'], isOnMain: membership() }),
       guardResolvePathsAllowlisted({ resolvePaths: ['packages/app/src/main.tsx'] }),
       guardTagFree({ tag: 'v0.32.1', tagExists: membership('v0.32.1') }),
       guardDeltaMatchesFix({ mode: 'revert', addedIds: ['x'], fixChangesetIds: [] }),
       guardPatchOnly({ bump: 'major' }),
       guardNativeConfigProvenance({ selection: { headSha: '', reason: 'nothing qualified' } }),
-      guardMainResetDeltaIds({ deltaIds: [] }),
+      guardBasePublished({ latestStableTag: 'v0.32.1', publishedTags: ['v0.32.0'] }),
+      guardShipsPublishedFixes({ verdict: droppedFixVerdict(), latestStableTag: 'v0.32.0' }),
     ];
     expect(refusals.every((r) => r.ok === false)).toBe(true);
     const codes = refusals.map((r) => r.code);
@@ -568,11 +574,11 @@ describe('guard codes', () => {
 function makeIo(overrides = {}) {
   const {
     stableTag = 'v0.32.0',
-    anchorVersion = '0.32.0',
     onMain = ['bad1', 'fix1'],
     existingTags = ['v0.32.0'],
     changesets = { 'stable-sha': ['keep-a'], 'synthetic-sha': ['keep-a'] },
     bumpTypes = {},
+    noteLevels = {},
     changesetContents = {},
     nativeConfigSelection = { headSha: 'prebuild-sha', reason: '' },
     ancestries = [['prebuild-sha', 'synthetic-sha']],
@@ -581,9 +587,14 @@ function makeIo(overrides = {}) {
     conflicts = [],
     files = {},
     worktree = {},
+    publishedTags = [stableTag],
+    containmentVerdict = containedVerdict,
+    holdVerdict = unheldVerdict,
   } = overrides;
 
   const calls = { tag: 0, pushTag: 0, createRelease: 0, dispatch: 0 };
+  const evaluated = [];
+  const holdEvaluated = [];
   const dispatches = [];
   const releases = [];
   const applied = [];
@@ -604,6 +615,22 @@ function makeIo(overrides = {}) {
     written,
     reads,
     worktree,
+    evaluated,
+    holdEvaluated,
+    hold: {
+      evaluate: (sha) => {
+        holdEvaluated.push(sha);
+        return holdVerdict(sha);
+      },
+    },
+    containment: {
+      publishedStableTags: () =>
+        typeof publishedTags === 'function' ? publishedTags() : [...publishedTags],
+      evaluate: (sha) => {
+        evaluated.push(sha);
+        return containmentVerdict(sha);
+      },
+    },
     fs: {
       readWorktreeFile: (path) => {
         if (!(path in worktree)) throw new Error(`no worktree file ${path}`);
@@ -613,16 +640,23 @@ function makeIo(overrides = {}) {
         written[path] = content;
       },
     },
-    readAnchorVersion: () => anchorVersion,
     git: {
       newestStableTag: () => stableTag,
       revParse: (ref) => (ref === stableTag ? 'stable-sha' : `${ref}-sha`),
       isOnMain: (ref) => onMain.includes(ref),
       tagExists: (t) => existingTags.includes(t),
       isAncestor: (a, b) => ancestries.some(([x, y]) => x === a && y === b),
-      changesetIds: (sha) => changesets[sha] ?? [],
+      changesetIds: (sha) =>
+        changesets[sha] ?? changesets[sha === stableTag ? 'stable-sha' : sha] ?? [],
+      stableTags: () => existingTags.filter((t) => /^v\d+\.\d+\.\d+$/.test(t)),
       bumpTypeOf: (_sha, id) => bumpTypes[id] ?? 'patch',
+      noteLevelOf: (_sha, id) => (id in noteLevels ? noteLevels[id] : 'patch'),
       changesetContent: (_sha, id) => {
+        const content = changesetContents[id];
+        if (content === undefined) throw new Error(`no changeset content for ${id}`);
+        return content;
+      },
+      changesetText: (_sha, id) => {
         const content = changesetContents[id];
         if (content === undefined) throw new Error(`no changeset content for ${id}`);
         return content;
@@ -784,15 +818,6 @@ describe('runPointRelease cascade', () => {
         eventType: 'desktop-release',
         clientPayload: { release_tag: 'v0.32.1', ref: 'v0.32.1', dispatched_by: 'https://run/1' },
       },
-      {
-        repo: 'inkeep/agents-private',
-        eventType: 'main-reset',
-        clientPayload: {
-          stable_version: '0.32.1',
-          delta_ids: ['shiny-fix'],
-          dispatched_by: 'https://run/1',
-        },
-      },
     ]);
   });
 
@@ -873,51 +898,128 @@ describe('runPointRelease cascade', () => {
     expect(io.calls).toEqual({ tag: 0, pushTag: 0, createRelease: 0, dispatch: 0 });
   });
 
-  test('revert with no named delta skips main-reset and names both follow-ups', () => {
+  const shinyFix = (overrides = {}) =>
+    makeIo({
+      changesets: {
+        'stable-sha': ['keep-a'],
+        'synthetic-sha': ['keep-a', 'shiny-fix'],
+        fix1: ['keep-a', 'shiny-fix'],
+        'fix1^': ['keep-a'],
+      },
+      changesetContents: {
+        'shiny-fix':
+          '---\n"@inkeep/open-knowledge": patch\n---\n\nChips no longer balloon into ovals.\n',
+      },
+      ...overrides,
+    });
+
+  test('a cherry-pick body is the stable notes renderer output, marker and all, with the provenance after it', () => {
+    const io = shinyFix();
+    runPointRelease({ mode: 'cherry-pick', fixRefs: ['fix1'], dryRun: false }, io);
+    const notes = io.releases[0].notes;
+    const [rendered, provenance] = notes.split(`${NOTES_SOURCE_MARKER}\n`);
+    expect(rendered).toBe('### Patch Changes\n\n- Chips no longer balloon into ovals.\n\n');
+    expect(provenance).toMatch(
+      /^\nPoint release over v0\.32\.0: the current stable plus 1 applied commit\(s\)/,
+    );
+    expect(provenance).toContain('\nApplied: fix1 (fix1-sha)\n');
+  });
+
+  test('a changeset some older published stable already shipped is not listed again', () => {
+    const io = shinyFix({
+      existingTags: ['v0.31.0', 'v0.32.0'],
+      publishedTags: ['v0.31.0', 'v0.32.0'],
+      changesets: {
+        'v0.31.0': ['keep-a', 'shiny-fix'],
+        'stable-sha': ['keep-a'],
+        'synthetic-sha': ['keep-a', 'shiny-fix'],
+        fix1: ['keep-a', 'shiny-fix'],
+        'fix1^': ['keep-a'],
+      },
+    });
+    const plan = runPointRelease({ mode: 'cherry-pick', fixRefs: ['fix1'], dryRun: true }, io);
+    expect(plan.releaseNotes).toMatch(/^No changelog entries\.\n\nPoint release over v0\.32\.0/);
+    expect(plan.releaseNotes).not.toContain(NOTES_SOURCE_MARKER);
+  });
+
+  test('a changeset only an unpublished stable tag carries is still listed', () => {
+    const io = shinyFix({
+      existingTags: ['v0.31.0', 'v0.32.0'],
+      publishedTags: ['v0.32.0'],
+      changesets: {
+        'v0.31.0': ['keep-a', 'shiny-fix'],
+        'stable-sha': ['keep-a'],
+        'synthetic-sha': ['keep-a', 'shiny-fix'],
+        fix1: ['keep-a', 'shiny-fix'],
+        'fix1^': ['keep-a'],
+      },
+    });
+    const plan = runPointRelease({ mode: 'cherry-pick', fixRefs: ['fix1'], dryRun: true }, io);
+    expect(plan.releaseNotes).toMatch(/^### Patch Changes\n\n- Chips no longer balloon into ovals\./);
+    expect(plan.releaseNotes).toContain(NOTES_SOURCE_MARKER);
+  });
+
+  test('a revert body carries no notes-source marker', () => {
+    const io = makeIo();
+    runPointRelease({ mode: 'revert', fixRefs: ['bad1'], dryRun: false }, io);
+    expect(io.releases[0].notes).not.toContain('ok-notes-source');
+  });
+
+  test('notes that cannot render fall back to the unmarked quoted form with a warning, never a refusal', () => {
+    const io = shinyFix();
+    io.git = withNoteLevels(
+      {
+        ...io.git,
+        changesetBlobs: (sha) =>
+          new Map((io.git.changesetIds(sha) ?? []).map((id) => [id, `blob-${id}`])),
+      },
+      new Map(),
+    );
+    const plan = runPointRelease({ mode: 'cherry-pick', fixRefs: ['fix1'], dryRun: false }, io);
+    expect(io.calls.createRelease).toBe(1);
+    expect(io.releases[0].notes).not.toContain('ok-notes-source');
+    expect(io.releases[0].notes).toContain('- Chips no longer balloon into ovals.');
+    expect(plan.warnings.some((w) => /no note level for \.changeset\/shiny-fix\.md/.test(w))).toBe(
+      true,
+    );
+  });
+
+  test('a revert dispatches only desktop-release and writes nothing to agents-private', () => {
     const io = makeIo();
     const plan = runPointRelease({ mode: 'revert', fixRefs: ['bad1'], dryRun: false }, io);
-    expect(plan.mainReset).toMatchObject({ dispatch: false, skipReason: 'no-delta-to-forward' });
-    expect(io.dispatches.map((d) => d.eventType)).toEqual(['desktop-release']);
-    expect(io.dispatches.every((d) => d.clientPayload.delta_ids === undefined)).toBe(true);
+    expect(io.dispatches.map((d) => [d.repo, d.eventType])).toEqual([['', 'desktop-release']]);
+    expect(plan).not.toHaveProperty('mainReset');
+  });
+
+  test('revert mode warns that main must carry the same patch before the next promotion', () => {
+    const plan = runPointRelease({ mode: 'revert', fixRefs: ['bad1'], dryRun: true }, makeIo());
+    expect(plan.removedIds).toEqual([]);
+    expect(plan.warnings.join(' ')).toContain(
+      'the shipped-fix check will refuse every later promotion until main holds a commit with exactly the patch this release ships',
+    );
+  });
+
+  test('revert mode warns that an ordinary main follow-up cannot match a consumed changeset deletion', () => {
+    const io = makeIo({
+      changesets: { 'stable-sha': ['keep-a', 'bad-change'], 'synthetic-sha': ['keep-a'] },
+    });
+    const plan = runPointRelease({ mode: 'revert', fixRefs: ['bad1'], dryRun: true }, io);
+    expect(plan.removedIds).toEqual(['bad-change']);
     const warning = plan.warnings.join(' ');
-    expect(warning).toMatch(/on main/i);
-    expect(warning).toMatch(/anchor advances/i);
+    expect(warning).toContain('This revert deletes .changeset/bad-change.md');
+    expect(warning).toContain('If the daily changeset cleanup has already deleted these files from main');
+    expect(warning).toContain('an ordinary code-only revert there cannot reproduce the shipped patch');
+    expect(warning).toContain('putting its changeset in a separate PR does not resolve this mismatch');
+    expect(warning).toContain('ship it in cherry-pick mode instead');
+    expect(warning).not.toContain('exactly the patch this release ships');
   });
 
-  test('revert forwards the changeset the operator landed to represent it', () => {
-    const io = makeIo();
-    runPointRelease(
-      { mode: 'revert', fixRefs: ['bad1'], anchorDeltaIds: '["undo-bad"]', dryRun: false },
-      io,
-    );
-    const mainReset = io.dispatches.find((d) => d.eventType === 'main-reset');
-    expect(mainReset.clientPayload.delta_ids).toEqual(['undo-bad']);
-  });
-
-  test('refuses when the operator names a delta that parses to nothing', () => {
-    const io = makeIo();
-    let refusal;
-    try {
-      runPointRelease(
-        { mode: 'revert', fixRefs: ['bad1'], anchorDeltaIds: '[]', dryRun: false },
-        io,
-      );
-    } catch (err) {
-      refusal = err;
-    }
-    expect(refusal?.code).toBe('empty-delta-ids');
-    expect(io.calls).toEqual({ tag: 0, pushTag: 0, createRelease: 0, dispatch: 0 });
-  });
-
-  test('skips main-reset when the cross-repo bridge App is absent, without failing the run', () => {
-    const io = cherryPickIo();
+  test('cherry-pick mode gives no revert warning', () => {
     const plan = runPointRelease(
-      { mode: 'cherry-pick', fixRefs: ['fix1'], dryRun: false, bridgeConfigured: false },
-      io,
+      { mode: 'cherry-pick', fixRefs: ['fix1'], dryRun: true },
+      cherryPickIo(),
     );
-    expect(plan.mainReset).toMatchObject({ dispatch: false, skipReason: 'bridge-not-configured' });
-    expect(io.dispatches.map((d) => d.eventType)).toEqual(['desktop-release']);
-    expect(plan.warnings.join(' ')).toContain('shiny-fix');
+    expect(plan.warnings.join(' ')).not.toContain('shipped-fix check will refuse');
   });
 
   test('a cascade failure after the tag is pushed marks the error with the pushed tag', () => {
@@ -942,7 +1044,6 @@ describe('runPointRelease cascade', () => {
 
 describe('runPointRelease refusals', () => {
   const cases = [
-    ['anchor-drift', { anchorVersion: '0.31.0' }, { mode: 'revert', fixRefs: ['bad1'] }],
     ['ref-not-on-main', { onMain: [] }, { mode: 'revert', fixRefs: ['bad1'] }],
     ['tag-exists', { existingTags: ['v0.32.0', 'v0.32.1'] }, { mode: 'revert', fixRefs: ['bad1'] }],
     [
@@ -968,6 +1069,12 @@ describe('runPointRelease refusals', () => {
       { nativeConfigSelection: { headSha: '', reason: 'newest green run 42 @ abc123 does not' } },
       { mode: 'revert', fixRefs: ['bad1'] },
     ],
+    ['base-unpublished', { publishedTags: ['v0.31.9'] }, { mode: 'revert', fixRefs: ['bad1'] }],
+    [
+      'drops-shipped-fix',
+      { containmentVerdict: droppedFixVerdict },
+      { mode: 'revert', fixRefs: ['bad1'] },
+    ],
   ];
 
   test.each(cases)(
@@ -986,8 +1093,8 @@ describe('runPointRelease refusals', () => {
     },
   );
 
-  test('a failing anchor guard stops before the synthetic commit is even built', () => {
-    const io = makeIo({ anchorVersion: '0.31.0' });
+  test('a failing base-published guard stops before the synthetic commit is even built', () => {
+    const io = makeIo({ publishedTags: ['v0.31.9'] });
     expect(() =>
       runPointRelease({ mode: 'revert', fixRefs: ['bad1'], dryRun: false }, io),
     ).toThrow();
@@ -1109,6 +1216,128 @@ describe('runPointRelease refusals', () => {
       /not one of/,
     );
     expect(io.applied).toEqual([]);
+  });
+});
+
+describe('runPointRelease keeps every fix a published stable shipped', () => {
+  test('builds only over the newest stable tag when its Release is published', () => {
+    const io = makeIo({ stableTag: 'v0.32.1', publishedTags: ['v0.31.9', 'v0.32.0'] });
+    let refusal;
+    try {
+      runPointRelease({ mode: 'revert', fixRefs: ['bad1'], dryRun: true }, io);
+    } catch (err) {
+      refusal = err;
+    }
+    expect(refusal?.code).toBe('base-unpublished');
+    expect(refusal?.message).toContain('The newest stable tag v0.32.1 has no published Release');
+    expect(refusal?.message).toContain('the newest published stable is v0.32.0');
+    expect(io.checkedOut).toEqual([]);
+    expect(io.applied).toEqual([]);
+    expect(io.evaluated).toEqual([]);
+  });
+
+  test('checks the synthetic commit, not the base, and records the verdict in the guard trail', () => {
+    const io = makeIo();
+    const plan = runPointRelease({ mode: 'revert', fixRefs: ['bad1'], dryRun: true }, io);
+    expect(io.evaluated).toEqual(['synthetic-sha']);
+    expect(plan.guards.map((g) => g.message)).toEqual(
+      expect.arrayContaining([
+        'The newest stable tag v0.32.0 is published, so the point release builds on it.',
+        expect.stringContaining('v0.32.0 plus the applied fixes'),
+      ]),
+    );
+  });
+
+  test('refuses a synthetic commit that lacks a shipped fix, naming it, in a dry run too', () => {
+    const io = makeIo({ containmentVerdict: droppedFixVerdict });
+    let refusal;
+    try {
+      runPointRelease({ mode: 'revert', fixRefs: ['bad1'], dryRun: true }, io);
+    } catch (err) {
+      refusal = err;
+    }
+    expect(refusal?.code).toBe('drops-shipped-fix');
+    expect(refusal?.message.split('\n')[0]).toBe(
+      'v0.32.0 plus the applied fixes lacks 1 fix that a published stable already shipped: #5610 ' +
+        '(v0.31.4). Add those fixes to fix_refs, or ship through a promotion whose beta contains them.',
+    );
+    expect(refusal?.message).toContain('a66f9e77679c fix(ok): keep the update-ready notice reachable (#5610)');
+    expect(io.calls).toEqual({ tag: 0, pushTag: 0, createRelease: 0, dispatch: 0 });
+  });
+
+  test('an unreadable release listing is an infra failure, never a pass', () => {
+    const io = makeIo({
+      publishedTags: () => {
+        throw new Error('listing the releases of inkeep/open-knowledge failed: HTTP 502');
+      },
+    });
+    let thrown;
+    try {
+      runPointRelease({ mode: 'revert', fixRefs: ['bad1'], dryRun: false }, io);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown?.message).toMatch(/HTTP 502/);
+    expect(thrown?.code).toBeUndefined();
+    expect(io.calls).toEqual({ tag: 0, pushTag: 0, createRelease: 0, dispatch: 0 });
+  });
+
+  test('the production io answers both questions from the published Releases', () => {
+    const { containment } = realIo();
+    expect(typeof containment.publishedStableTags).toBe('function');
+    expect(typeof containment.evaluate).toBe('function');
+  });
+});
+
+describe('runPointRelease refuses a synthetic commit that carries the release hold', () => {
+  const heldVerdict = (sha) => ({ ...unheldVerdict(sha), held: true });
+
+  test('reads the synthetic commit, not the base, and records in the guard trail that the hold does not apply', () => {
+    const io = makeIo();
+    const plan = runPointRelease({ mode: 'revert', fixRefs: ['bad1'], dryRun: true }, io);
+    expect(io.holdEvaluated).toEqual(['synthetic-sha']);
+    expect(plan.guards.map((g) => g.message)).toContain(
+      `v0.32.0 plus the applied fixes (synthetic-sh) does not carry ${RELEASE_HOLD_SENTINEL}, so the release hold does not apply.`,
+    );
+  });
+
+  test('refuses with release-hold and touches nothing remote, even in a real run', () => {
+    const io = makeIo({ holdVerdict: heldVerdict });
+    let refusal;
+    try {
+      runPointRelease({ mode: 'revert', fixRefs: ['bad1'], dryRun: false }, io);
+    } catch (err) {
+      refusal = err;
+    }
+    expect(refusal?.code).toBe('release-hold');
+    expect(refusal?.message).toContain(`v0.32.0 plus the applied fixes (synthetic-sh) carries ${RELEASE_HOLD_SENTINEL}`);
+    expect(refusal?.message).toContain('leave that ref out of fix_refs');
+    expect(io.calls).toEqual({ tag: 0, pushTag: 0, createRelease: 0, dispatch: 0 });
+  });
+
+  test('a hold it cannot read fails the run before anything is tagged', () => {
+    const io = makeIo({
+      holdVerdict: () => {
+        throw new Error('git ls-tree failed (exit 128): fatal: not a tree object');
+      },
+    });
+    let thrown;
+    try {
+      runPointRelease({ mode: 'revert', fixRefs: ['bad1'], dryRun: false }, io);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown?.message).toMatch(/not a tree object/);
+    expect(thrown?.code).toBeUndefined();
+    expect(io.calls).toEqual({ tag: 0, pushTag: 0, createRelease: 0, dispatch: 0 });
+  });
+
+  test('guardReleaseHold passes an unheld verdict and refuses a held one', () => {
+    expect(guardReleaseHold({ verdict: unheldVerdict('abc'), latestStableTag: 'v1.0.0' }).ok).toBe(true);
+    expect(guardReleaseHold({ verdict: { ...unheldVerdict('abc'), held: true }, latestStableTag: 'v1.0.0' })).toMatchObject({
+      ok: false,
+      code: 'release-hold',
+    });
   });
 });
 
@@ -1468,6 +1697,22 @@ describe('formatReleaseNotes "Applied" line', () => {
       ]),
     ).toBe(`Applied: ${SHA}, hotfix-tag (${other})`);
   });
+
+  test('the shipped-fix check reads back every origin these notes record', () => {
+    const other = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
+    const notes = formatReleaseNotes({
+      latestStableTag: 'v0.48.2',
+      mode: 'cherry-pick',
+      fixRefs: [
+        { ref: SHA, sha: SHA },
+        { ref: 'deadbeef', sha: other },
+      ],
+      changesetEntries: [],
+      addedIds: [],
+      removedIds: [],
+    });
+    expect(appliedOrigins(notes)).toEqual([SHA, other]);
+  });
 });
 
 describe('git escape rule self-test', () => {
@@ -1562,6 +1807,32 @@ describe('readFixBumps, run by the job that holds no release credential', () => 
     const git = blobGit({ blobs: { 'bad1-sha': { culprit: 'blob-culprit' } } });
     expect(readFixBumps({ mode: 'revert', fixRefs: ['bad1'] }, git).size).toBe(0);
     expect(git.reads).toEqual([]);
+  });
+});
+
+describe('readFixNoteLevels, run beside readFixBumps in the reader job', () => {
+  test('records the note level of each changeset blob a fix ref writes, and nothing for a revert', () => {
+    const reads = [];
+    const git = {
+      revParse: (ref) => `${ref}-sha`,
+      changesetBlobs: (sha) =>
+        new Map(
+          Object.entries(
+            { 'fix1-sha^': { 'keep-a': 'b0' }, 'fix1-sha': { 'keep-a': 'b0', 'shiny-fix': 'b1' } }[
+              sha
+            ] ?? {},
+          ),
+        ),
+      noteLevelOf: (sha, id) => {
+        reads.push(`${sha}:${id}`);
+        return 'patch';
+      },
+    };
+    expect(readFixNoteLevels({ mode: 'cherry-pick', fixRefs: ['fix1'] }, git)).toEqual(
+      new Map([['b1', 'patch']]),
+    );
+    expect(reads).toEqual(['fix1-sha:shiny-fix']);
+    expect(readFixNoteLevels({ mode: 'revert', fixRefs: ['fix1'] }, git).size).toBe(0);
   });
 });
 
@@ -1662,7 +1933,11 @@ describe('a bump read in one job is found by blob in the other', () => {
   const git = (cwd, ...args) => {
     const res = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], {
       cwd,
-      env: gitCleanEnv(),
+      env: {
+        ...gitCleanEnv(),
+        GIT_TRACE2_EVENT:
+          args[0] === 'init' ? undefined : join(cwd, '.git', 'fixture-maintenance.jsonl'),
+      },
       encoding: 'utf8',
     });
     if (res.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${res.stderr}`);
@@ -1677,6 +1952,7 @@ describe('a bump read in one job is found by blob in the other', () => {
     const root = mkdtempSync(join(tmpdir(), 'point-release-bumps-'));
     roots.push(root);
     git(root, 'init', '-q', '-b', 'main');
+    configureTestGitRepository(root, (args) => git(root, ...args));
     changeset(root, 'keep-a', 'patch');
     git(root, 'add', '-A');
     git(root, 'commit', '-q', '-m', 'stable');
@@ -1707,6 +1983,7 @@ describe('a bump read in one job is found by blob in the other', () => {
       verdicts,
     );
     expect(releaseJob.bumpTypeOf(synthetic, 'shiny-fix')).toBe('minor');
+    expectNoAutomaticGitMaintenance(root);
   });
 });
 
@@ -1725,20 +2002,31 @@ describe('the production entry points the release workflows run', () => {
   const git = (cwd, ...args) => {
     const res = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], {
       cwd,
-      env: gitCleanEnv(),
+      env: {
+        ...gitCleanEnv(),
+        GIT_TRACE2_EVENT:
+          args[0] === 'init' ? undefined : join(cwd, '.git', 'fixture-maintenance.jsonl'),
+      },
       encoding: 'utf8',
     });
     if (res.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${res.stderr}`);
     return res.stdout.trim();
   };
-  const fixRepo = (fixBump) => {
+  const fixRepo = (fixBump, { config = true } = {}) => {
     const root = scratch('point-release-read-bumps-');
     const changeset = (id, type) => {
       mkdirSync(join(root, '.changeset'), { recursive: true });
       writeFileSync(join(root, '.changeset', `${id}.md`), `---\n"@inkeep/open-knowledge": ${type}\n---\n\nA change.\n`);
     };
     git(root, 'init', '-q', '-b', 'main');
+    configureTestGitRepository(root, (args) => git(root, ...args));
     changeset('keep-a', 'patch');
+    if (config) {
+      writeFileSync(
+        join(root, '.changeset', 'config.json'),
+        JSON.stringify({ fixed: [['@inkeep/open-knowledge']] }),
+      );
+    }
     git(root, 'add', '-A');
     git(root, 'commit', '-q', '-m', 'stable');
     changeset('shiny-fix', fixBump);
@@ -1784,22 +2072,67 @@ describe('the production entry points the release workflows run', () => {
     ]);
   });
 
-  test('--read-bumps writes the bump of each changeset a fix ref writes, keyed by blob id', () => {
+  test('fixture Git operations do not launch automatic maintenance', () => {
+    const { root } = fixRepo('minor');
+    expect(() => expectNoAutomaticGitMaintenance(root)).not.toThrow();
+  });
+
+  test('--read-bumps writes the bump and note level of each changeset a fix ref writes, keyed by blob id', () => {
     const { root, fix, blob } = fixRepo('minor');
     const res = runScript(root, ['--read-bumps'], { MODE: 'cherry-pick', FIX_REFS: fix });
     expect(res.status, res.stderr).toBe(0);
-    expect(res.output).toBe(`bump_verdicts={"${blob}":"minor"}\n`);
+    expect(res.output).toBe(`bump_verdicts={"${blob}":"minor"}\nnote_levels={"${blob}":"minor"}\n`);
   });
 
   test('--read-bumps writes {} in revert mode without reading frontmatter it could not parse', () => {
     const { root, fix } = fixRepo('Major');
     const revert = runScript(root, ['--read-bumps'], { MODE: 'revert', FIX_REFS: fix });
     expect(revert.status, revert.stderr).toBe(0);
-    expect(revert.output).toBe('bump_verdicts={}\n');
+    expect(revert.output).toBe('bump_verdicts={}\nnote_levels={}\n');
 
     const cherryPick = runScript(root, ['--read-bumps'], { MODE: 'cherry-pick', FIX_REFS: fix });
     expect(cherryPick.status).toBe(1);
     expect(cherryPick.output).toBe('');
+  });
+
+  test('--read-bumps still writes the bumps when a note level cannot be read, with no levels and a warning', () => {
+    const { root, fix, blob } = fixRepo('minor', { config: false });
+    const res = runScript(root, ['--read-bumps'], { MODE: 'cherry-pick', FIX_REFS: fix });
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.output).toBe(`bump_verdicts={"${blob}":"minor"}\nnote_levels={}\n`);
+    expect(res.stdout).toMatch(/::warning::.*without the notes-source marker/);
+  });
+
+  test.each([
+    ['a post-flip fix', 'post-flip-fix.txt', false],
+    ['the flip itself', RELEASE_HOLD_SENTINEL, true],
+  ])('realIo reads the synthetic tree of a pick of %s in a repository laid out like the mirror', (_what, path, held) => {
+    const root = scratch('point-release-hold-');
+    git(root, 'init', '-q', '-b', 'main');
+    configureTestGitRepository(root, (args) => git(root, ...args));
+    writeFileSync(join(root, 'README.md'), 'stable\n');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'stable');
+    git(root, 'tag', 'v1.0.0');
+    mkdirSync(join(root, '.github', 'release-holds'), { recursive: true });
+    writeFileSync(join(root, path), 'changed\n');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'the pick');
+    const pick = git(root, 'rev-parse', 'HEAD');
+    git(root, 'switch', '-q', '--detach', 'v1.0.0');
+    git(root, 'cherry-pick', pick);
+    const res = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `const { realIo } = await import(${JSON.stringify(pathToFileURL(SCRIPT).href)}); console.log(JSON.stringify(realIo().hold.evaluate('HEAD')));`,
+      ],
+      { cwd: root, encoding: 'utf8', env: cleanEnv },
+    );
+    expect(res.status, res.stderr).toBe(0);
+    expect(JSON.parse(res.stdout)).toMatchObject({ sha: git(root, 'rev-parse', 'HEAD'), held });
+    expectNoAutomaticGitMaintenance(root);
   });
 
   test('an empty BUMP_VERDICTS stops the release run with an error naming the read-bumps output', () => {

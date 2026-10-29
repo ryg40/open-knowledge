@@ -5,7 +5,7 @@ import { isTestOnlySourceFile } from '../../../../test-support/test-only-source-
  */
 
 import { type Dirent, readdirSync, readFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   type CallExpression,
@@ -17,26 +17,28 @@ import {
 } from 'ts-morph';
 import { describe, expect, test } from 'vitest';
 import { DEV_GATED_WINDOW_WRITERS } from './dev-gate-allowlist';
+import {
+  APP_SOURCE_EXCLUDED_SUFFIXES,
+  APP_SOURCE_EXTENSIONS,
+  APP_SOURCE_ROOT,
+  APP_STYLESHEET,
+  E2E_SCAN_ROOTS,
+} from './e2e-stop-rules.reads';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..', '..', '..', '..');
-const E2E_DIRS = [
-  join(__dirname, '..', 'stress'),
-  join(__dirname, '..', 'visual'),
-  join(__dirname, '..', 'a11y'),
-];
-const APP_SRC_DIR = join(__dirname, '..', '..', 'src');
+const E2E_DIRS = E2E_SCAN_ROOTS.map((root) => join(REPO_ROOT, root));
+const APP_SRC_DIR = join(REPO_ROOT, APP_SOURCE_ROOT);
 
 interface FileLines {
   path: string;
-  absPath: string;
   source: string;
   lines: string[];
 }
 
 const unreadableScanDirs: string[] = [];
 
-function listE2eTsFiles(): FileLines[] {
+function listE2eTsFiles(relativePath: typeof relative = relative): FileLines[] {
   const out: FileLines[] = [];
   function walk(dir: string) {
     let entries: Dirent[];
@@ -57,8 +59,7 @@ function listE2eTsFiles(): FileLines[] {
       if (!entry.name.endsWith('.ts')) continue;
       const source = readFileSync(abs, 'utf-8');
       out.push({
-        path: relative(REPO_ROOT, abs),
-        absPath: abs,
+        path: relativePath(REPO_ROOT, abs).replaceAll('\\', '/'),
         source,
         lines: source.split('\n'),
       });
@@ -68,7 +69,7 @@ function listE2eTsFiles(): FileLines[] {
   return out;
 }
 
-function listAppSrcTsFiles(): FileLines[] {
+function listAppSrcTsFiles(relativePath: typeof relative = relative): FileLines[] {
   const out: FileLines[] = [];
   function walk(dir: string) {
     for (const name of readdirSync(dir, { withFileTypes: true })) {
@@ -78,13 +79,11 @@ function listAppSrcTsFiles(): FileLines[] {
         continue;
       }
       if (!name.isFile()) continue;
-      if (!name.name.endsWith('.ts') && !name.name.endsWith('.tsx')) continue;
-      if (isTestOnlySourceFile(name.name)) continue;
-      if (name.name.endsWith('.spec.ts') || name.name.endsWith('.spec.tsx')) continue;
+      if (!APP_SOURCE_EXTENSIONS.some((extension) => name.name.endsWith(extension))) continue;
+      if (APP_SOURCE_EXCLUDED_SUFFIXES.some((suffix) => name.name.endsWith(suffix))) continue;
       const source = readFileSync(abs, 'utf-8');
       out.push({
-        path: relative(REPO_ROOT, abs),
-        absPath: abs,
+        path: relativePath(REPO_ROOT, abs).replaceAll('\\', '/'),
         source,
         lines: source.split('\n'),
       });
@@ -103,16 +102,22 @@ const CHILD_PROCESS_CALL_PATTERN =
   /(?<![\w$])(?:spawnSync|spawn|execFileSync|execFile|execSync|fork)\s*\(|(?<![.\w$])exec\s*\(/;
 const MIRROR_EXCLUDED_INFIX = '.private.';
 const DEV_SERVER_SPAWN_SITES = [
-  'packages/app/tests/stress/_helpers/fixtures.ts',
+  'packages/app/tests/stress/_helpers/worker-server-command.ts',
   'packages/app/tests/stress/_helpers/global-warm-cache.ts',
 ] as const;
 const NON_DEV_SERVER_SPAWN_SITES = [
-  'packages/app/tests/stress/_helpers/i18n-catalog-freshness.ts',
+  'packages/app/tests/stress/_helpers/worker-server-lifetime.ts',
+  'packages/app/tests/stress/_helpers/i18n-catalog-compile.ts',
   'packages/app/tests/stress/_helpers/port-ownership/cleanup-order-control.test-helper.ts',
   'packages/app/tests/stress/_helpers/port-ownership/lifetime-global-setup.ts',
+  'packages/app/tests/stress/_helpers/port-ownership/nested-playwright-run.test-helper.ts',
   'packages/app/tests/stress/_helpers/port-ownership/owner-loss.test-helper.ts',
   'packages/app/tests/stress/_helpers/port-ownership/run-case.test-helper.ts',
+  'packages/app/tests/stress/_helpers/prebuilt/prebuilt-dev-build.ts',
+  'packages/app/tests/stress/_helpers/production-shell-server.ts',
+  'packages/app/tests/stress/_helpers/reuse/reuse-run.test-helper.ts',
   'packages/app/tests/stress/okf-generated-index-settings.e2e.ts',
+  'packages/app/tests/stress/prebuilt-dev-serving.e2e.ts',
 ] as const;
 const PINNED_SPAWN_SITES = [...DEV_SERVER_SPAWN_SITES, ...NON_DEV_SERVER_SPAWN_SITES].sort();
 
@@ -461,7 +466,7 @@ function requirePinnedSpawnFile(files: FileLines[], path: string): FileLines {
   const file = files.find((candidate) => candidate.path === path);
   if (file === undefined) {
     throw new Error(
-      `${path} is pinned in DEV_SERVER_SPAWN_SITES but is not under the scanned e2e directories — it moved or was renamed, so its dev-server spawn stopped being checked. Point the path literal in DEV_SERVER_SPAWN_SITES at where the file lives now, and add its new parent to E2E_DIRS if the move left the scanned tree.`,
+      `${path} is pinned in DEV_SERVER_SPAWN_SITES but is not under the scanned e2e directories — it moved or was renamed, so its dev-server spawn stopped being checked. Point the path literal in DEV_SERVER_SPAWN_SITES at where the file lives now, and add its new parent to E2E_SCAN_ROOTS in e2e-stop-rules.reads.ts if the move left the scanned tree.`,
     );
   }
   return file;
@@ -503,9 +508,103 @@ function collectMatches(
   return violations;
 }
 
+type DevGateFinding =
+  | { kind: 'unlisted-write'; path: string; line: number; global: string; excerpt: string }
+  | { kind: 'stale-entry'; path: string; global: string }
+  | { kind: 'empty-entry'; path: string };
+
+interface DevGateScan {
+  scannedFiles: number;
+  writerFiles: number;
+  writes: number;
+  findings: DevGateFinding[];
+}
+
+const ASSIGNED_WINDOW_GLOBAL = /(?<=window\.)__[A-Za-z_][A-Za-z0-9_]*(?=\s*=)/g;
+const COMPARED_WINDOW_GLOBAL = /window\.__[A-Za-z_][A-Za-z0-9_]*\s*===?/;
+const DEFINED_WINDOW_GLOBAL =
+  /(?<=Object\.defineProperty\s*\(\s*window\s*,\s*['"])__[A-Za-z_][A-Za-z0-9_]*(?=['"])/g;
+
+function windowGlobalsWrittenOn(line: string): string[] {
+  const assigned = COMPARED_WINDOW_GLOBAL.test(line)
+    ? []
+    : (line.match(ASSIGNED_WINDOW_GLOBAL) ?? []);
+  return [...assigned, ...(line.match(DEFINED_WINDOW_GLOBAL) ?? [])];
+}
+
+function scanDevGatedWrites(
+  files: ReadonlyArray<Pick<FileLines, 'path' | 'lines'>>,
+  allowlist: Readonly<Record<string, readonly string[]>>,
+): DevGateScan {
+  const listed = new Map(
+    Object.entries(allowlist).map(([path, globals]) => [path, new Set(globals)]),
+  );
+  const written = new Map<string, Set<string>>();
+  const findings: DevGateFinding[] = [];
+  let writes = 0;
+  for (const file of files) {
+    file.lines.forEach((line, index) => {
+      for (const global of windowGlobalsWrittenOn(line)) {
+        writes += 1;
+        const globalsWritten = written.get(file.path) ?? new Set<string>();
+        globalsWritten.add(global);
+        written.set(file.path, globalsWritten);
+        if (listed.get(file.path)?.has(global) === true) continue;
+        findings.push({
+          kind: 'unlisted-write',
+          path: file.path,
+          line: index + 1,
+          global,
+          excerpt: line.trim(),
+        });
+      }
+    });
+  }
+  for (const [path, globals] of listed) {
+    if (globals.size === 0) findings.push({ kind: 'empty-entry', path });
+    for (const global of globals) {
+      if (written.get(path)?.has(global) !== true) {
+        findings.push({ kind: 'stale-entry', path, global });
+      }
+    }
+  }
+  return { scannedFiles: files.length, writerFiles: written.size, writes, findings };
+}
+
+function assertNeverDevGateFinding(finding: never): never {
+  throw new Error(`Unhandled DevGateFinding kind: ${JSON.stringify(finding)}`);
+}
+
+function describeDevGateFinding(finding: DevGateFinding): string {
+  switch (finding.kind) {
+    case 'unlisted-write':
+      return `  ${finding.path}:${finding.line}    ${finding.global} is not listed for this file    ${finding.excerpt}`;
+    case 'stale-entry':
+      return `  ${finding.path}    lists ${finding.global}, which this file does not write`;
+    case 'empty-entry':
+      return `  ${finding.path}    lists no global`;
+    default:
+      return assertNeverDevGateFinding(finding);
+  }
+}
+
 describe('E2E STOP rule — zero allowlist', () => {
   const e2eTsFiles = listE2eTsFiles();
   const e2eFiles = e2eTsFiles.filter((file) => isTestOnlySourceFile(file.path, 'playwright'));
+
+  test('win32 path semantics keep slash-separated pinned keys', () => {
+    const win32E2eFiles = listE2eTsFiles(win32.relative);
+    const win32AppFiles = listAppSrcTsFiles(win32.relative);
+    expect(
+      PINNED_SPAWN_SITES.every((path) => win32E2eFiles.some((file) => file.path === path)),
+    ).toBe(true);
+    expect(
+      win32AppFiles.some((file) => file.path === 'packages/app/src/editor/DocumentContext.tsx'),
+    ).toBe(true);
+    for (const root of E2E_SCAN_ROOTS) {
+      expect(win32E2eFiles.some((file) => file.path.startsWith(`${root}/`))).toBe(true);
+    }
+  });
 
   test('there are E2E files to check (sanity)', () => {
     expect(
@@ -514,21 +613,21 @@ describe('E2E STOP rule — zero allowlist', () => {
     ).toEqual([]);
     expect(e2eTsFiles.length).toBeGreaterThan(0);
     expect(e2eFiles.length).toBeGreaterThan(0);
-    for (const dir of E2E_DIRS) {
-      const tsFromDir = e2eTsFiles.filter((file) => file.absPath.startsWith(`${dir}/`));
+    for (const root of E2E_SCAN_ROOTS) {
+      const tsFromDir = e2eTsFiles.filter((file) => file.path.startsWith(`${root}/`));
       expect(
         tsFromDir.length,
-        `no *.ts under ${relative(REPO_ROOT, dir)} — renamed, moved, or emptied?`,
+        `no *.ts under ${root} — renamed, moved, or emptied?`,
       ).toBeGreaterThan(0);
-      const fromDir = e2eFiles.filter((file) => file.absPath.startsWith(`${dir}/`));
+      const fromDir = e2eFiles.filter((file) => file.path.startsWith(`${root}/`));
       expect(
         fromDir.length,
-        `no *.e2e.ts under ${relative(REPO_ROOT, dir)} — renamed, moved, or emptied?`,
+        `no *.e2e.ts under ${root} — renamed, moved, or emptied?`,
       ).toBeGreaterThan(0);
     }
   });
 
-  test('no page.waitForTimeout( in tests/{stress,visual,a11y}/*.e2e.ts (AC-3)', () => {
+  test('no page.waitForTimeout( in tests/{stress,a11y}/*.e2e.ts (AC-3)', () => {
     const violations = collectMatches(e2eFiles, (line) => line.includes('page.waitForTimeout('));
     expect(
       violations,
@@ -536,7 +635,7 @@ describe('E2E STOP rule — zero allowlist', () => {
     ).toEqual([]);
   });
 
-  test("no waitUntil: 'networkidle' in tests/{stress,visual,a11y}/*.e2e.ts (AC-4)", () => {
+  test("no waitUntil: 'networkidle' in tests/{stress,a11y}/*.e2e.ts (AC-4)", () => {
     const violations = collectMatches(e2eFiles, (line) =>
       /waitUntil:\s*['"]networkidle['"]/.test(line),
     );
@@ -546,7 +645,7 @@ describe('E2E STOP rule — zero allowlist', () => {
     ).toEqual([]);
   });
 
-  test('no new Promise + setTimeout busy-wait in tests/{stress,visual,a11y}/*.e2e.ts (D-Q14)', () => {
+  test('no new Promise + setTimeout busy-wait in tests/{stress,a11y}/*.e2e.ts (D-Q14)', () => {
     const pattern = /new Promise\(\s*(\w+)\s*=>\s*setTimeout\(\s*\1\s*,/;
     const violations = collectMatches(e2eFiles, (line) => pattern.test(line));
     expect(
@@ -555,7 +654,7 @@ describe('E2E STOP rule — zero allowlist', () => {
     ).toEqual([]);
   });
 
-  test('no page.pause( in tests/{stress,visual,a11y}/*.e2e.ts (D-Q14)', () => {
+  test('no page.pause( in tests/{stress,a11y}/*.e2e.ts (D-Q14)', () => {
     const violations = collectMatches(e2eFiles, (line) => line.includes('page.pause('));
     expect(
       violations,
@@ -563,7 +662,7 @@ describe('E2E STOP rule — zero allowlist', () => {
     ).toEqual([]);
   });
 
-  test("no test.skip(browserName === 'webkit') in tests/{stress,visual,a11y}/*.e2e.ts (AC-5 ratchet)", () => {
+  test("no test.skip(browserName === 'webkit') in tests/{stress,a11y}/*.e2e.ts (AC-5 ratchet)", () => {
     const pattern = /test\.skip\(\s*browserName\s*===\s*['"]webkit['"]/;
     const violations = collectMatches(e2eFiles, (line) => pattern.test(line));
     expect(
@@ -590,28 +689,104 @@ describe('E2E STOP rule — zero allowlist', () => {
     ).toEqual([]);
   });
 
-  test('no ungated window.__ writes outside dev-gate allowlist (US-006/US-026)', () => {
-    const srcFiles = listAppSrcTsFiles();
-    const writePattern = /window\.__[A-Za-z_][A-Za-z0-9_]*\s*=/;
-    const equalityPattern = /window\.__[A-Za-z_][A-Za-z0-9_]*\s*===?/;
-    const definePropertyPattern =
-      /Object\.defineProperty\s*\(\s*window\s*,\s*['"]__[A-Za-z_][A-Za-z0-9_]*['"]/;
+  test('every window.__ write in app source is listed for its own file, and every listed global is written', () => {
+    const scan = scanDevGatedWrites(listAppSrcTsFiles(), DEV_GATED_WINDOW_WRITERS);
+    console.info(
+      `dev-gate allowlist: ${scan.writes} window.__ writes in ${scan.writerFiles} files, ${scan.findings.length} findings, ${scan.scannedFiles} source files scanned`,
+    );
 
-    const violations: string[] = [];
-    for (const file of srcFiles) {
-      if (DEV_GATED_WINDOW_WRITERS.includes(file.path)) continue;
-      for (let i = 0; i < file.lines.length; i++) {
-        const line = file.lines[i] ?? '';
-        const isAssignWrite = writePattern.test(line) && !equalityPattern.test(line);
-        const isDefinePropertyWrite = definePropertyPattern.test(line);
-        if (!isAssignWrite && !isDefinePropertyWrite) continue;
-        violations.push(`  ${file.path}:${i + 1}    ${line.trim()}`);
-      }
-    }
+    expect(scan.scannedFiles).toBeGreaterThan(0);
     expect(
-      violations,
-      `Ungated window.__ write outside the dev-gate allowlist — wrap in if (import.meta.env.DEV) and add to dev-gate-allowlist.ts:\n${violations.join('\n')}`,
+      scan.findings,
+      `window.__ writes disagree with dev-gate-allowlist.ts — wrap a new write in if (import.meta.env.DEV) and list its global under its file; delete an entry whose write is gone:\n${scan.findings.map(describeDevGateFinding).join('\n')}`,
     ).toEqual([]);
+  });
+
+  test('dev-gate rule reports a global its file is not listed for, and not the adjacent negatives', () => {
+    const listed = 'packages/app/src/editor/Listed.tsx';
+    const unlisted = 'packages/app/src/components/Unlisted.tsx';
+    const scan = scanDevGatedWrites(
+      [
+        {
+          path: listed,
+          lines: [
+            'if (import.meta.env.DEV) {',
+            '  window.__listedHook = hook;',
+            "  Object.defineProperty(window, '__listedGetter', { get: () => hook });",
+            '  window.__unlistedHook = other;',
+            '  Object.defineProperty(window, "__unlistedGetter", { get: () => other });',
+            '  window.__listedHook = window.__chainedHook = both;',
+            '}',
+          ],
+        },
+        {
+          path: unlisted,
+          lines: [
+            'window.__strayHook = hook;',
+            'if (window.__strayHook === hook) cleanup();',
+            'delete window.__strayHook;',
+            'const read = window.__readHook;',
+            'window.okDesktop = bridge;',
+            "Object.defineProperty(window, 'okDesktop', { value: bridge });",
+          ],
+        },
+      ],
+      { [listed]: ['__listedGetter', '__listedHook'] },
+    );
+
+    expect(scan.findings).toEqual([
+      {
+        kind: 'unlisted-write',
+        path: listed,
+        line: 4,
+        global: '__unlistedHook',
+        excerpt: 'window.__unlistedHook = other;',
+      },
+      {
+        kind: 'unlisted-write',
+        path: listed,
+        line: 5,
+        global: '__unlistedGetter',
+        excerpt: 'Object.defineProperty(window, "__unlistedGetter", { get: () => other });',
+      },
+      {
+        kind: 'unlisted-write',
+        path: listed,
+        line: 6,
+        global: '__chainedHook',
+        excerpt: 'window.__listedHook = window.__chainedHook = both;',
+      },
+      {
+        kind: 'unlisted-write',
+        path: unlisted,
+        line: 1,
+        global: '__strayHook',
+        excerpt: 'window.__strayHook = hook;',
+      },
+    ]);
+    expect({ writes: scan.writes, writerFiles: scan.writerFiles }).toEqual({
+      writes: 7,
+      writerFiles: 2,
+    });
+  });
+
+  test('dev-gate rule reports an allowlist entry that matches no write', () => {
+    const writer = 'packages/app/src/editor/Writer.tsx';
+    const quiet = 'packages/app/src/components/Quiet.tsx';
+    const writerFile = { path: writer, lines: ['  window.__keptHook = hook;'] };
+
+    expect(
+      scanDevGatedWrites([writerFile, { path: quiet, lines: ['  render(window.__keptHook);'] }], {
+        [writer]: ['__keptHook', '__removedHook'],
+        [quiet]: [],
+        'packages/app/src/lib/Deleted.ts': ['__goneHook'],
+      }).findings,
+    ).toEqual([
+      { kind: 'stale-entry', path: writer, global: '__removedHook' },
+      { kind: 'empty-entry', path: quiet },
+      { kind: 'stale-entry', path: 'packages/app/src/lib/Deleted.ts', global: '__goneHook' },
+    ]);
+    expect(scanDevGatedWrites([writerFile], { [writer]: ['__keptHook'] }).findings).toEqual([]);
   });
 
   test('no static value import of the DEV ACP thread harness', () => {
@@ -721,7 +896,7 @@ describe('E2E STOP rule — zero allowlist', () => {
   test('the spawn-isolation rule resolves a dev-server spawn in exactly the pinned sites', () => {
     expect(
       mirroredFilesWithDevServerSpawns(e2eTsFiles),
-      'the files in which the guard resolves a dev-server spawn are no longer exactly the pinned dev-server spawn sites. Four causes, four different edits. (1) A pinned file moved or was renamed: update its path literal in DEV_SERVER_SPAWN_SITES, and add its new parent to E2E_DIRS if the move left the scanned tree — editing the call-shape recogniser will not bring it back. (2) The recogniser rotted against a call the corpus really has: it selects a `spawn`/`spawnSync` CallExpression whose command or argv array carries the literal argv token, so re-anchor SPAWN_CALLEE_NAMES and DEV_SERVER_ARGV_TOKEN on that shape. (3) A file listed in NON_DEV_SERVER_SPAWN_SITES now boots a dev server: move it to DEV_SERVER_SPAWN_SITES and give its spawn both isolation env keys. (4) A pinned file stopped parsing under the ts-morph program this guard runs, which is separate from the repo compiler: a file it cannot parse resolves no spawn call at all, and the isolation rule above reports that syntax error for the same file on the same run, so fix the syntax rather than either list. A site that drops out of this set carries no enforced isolation contract however its spawn env changes',
+      'the files in which the guard resolves a dev-server spawn are no longer exactly the pinned dev-server spawn sites. Four causes, four different edits. (1) A pinned file moved or was renamed: update its path literal in DEV_SERVER_SPAWN_SITES, and add its new parent to E2E_SCAN_ROOTS in e2e-stop-rules.reads.ts if the move left the scanned tree — editing the call-shape recogniser will not bring it back. (2) The recogniser rotted against a call the corpus really has: it selects a `spawn`/`spawnSync` CallExpression whose command or argv array carries the literal argv token, so re-anchor SPAWN_CALLEE_NAMES and DEV_SERVER_ARGV_TOKEN on that shape. (3) A file listed in NON_DEV_SERVER_SPAWN_SITES now boots a dev server: move it to DEV_SERVER_SPAWN_SITES and give its spawn both isolation env keys. (4) A pinned file stopped parsing under the ts-morph program this guard runs, which is separate from the repo compiler: a file it cannot parse resolves no spawn call at all, and the isolation rule above reports that syntax error for the same file on the same run, so fix the syntax rather than either list. A site that drops out of this set carries no enforced isolation contract however its spawn env changes',
     ).toEqual([...DEV_SERVER_SPAWN_SITES].sort());
   });
 
@@ -1192,7 +1367,7 @@ describe('E2E STOP rule — zero allowlist', () => {
   });
 
   test('selection-halo CSS rules use plugin-state propagation, not `:has()` (Precedent #34)', () => {
-    const cssPath = join(APP_SRC_DIR, 'globals.css');
+    const cssPath = join(REPO_ROOT, APP_STYLESHEET);
     const css = readFileSync(cssPath, 'utf-8');
     const lines = css.split('\n');
 
@@ -1210,7 +1385,7 @@ describe('E2E STOP rule — zero allowlist', () => {
       const selectorContext = lines.slice(windowStart, windowEnd).join('\n');
 
       if (selectionMarker.test(selectorContext)) {
-        violations.push(`  packages/app/src/globals.css:${i + 1}    ${line.trim()}`);
+        violations.push(`  ${APP_STYLESHEET}:${i + 1}    ${line.trim()}`);
       }
     }
 
@@ -1221,7 +1396,7 @@ describe('E2E STOP rule — zero allowlist', () => {
   });
 
   test('selection-halo transition uses `var(--ease-out-strong)`, not bare `ease-out` (round-2 review fix)', () => {
-    const cssPath = join(APP_SRC_DIR, 'globals.css');
+    const cssPath = join(REPO_ROOT, APP_STYLESHEET);
     const css = readFileSync(cssPath, 'utf-8');
     const lines = css.split('\n');
 
@@ -1246,7 +1421,7 @@ describe('E2E STOP rule — zero allowlist', () => {
       if (!line.includes('transition')) continue;
       const stripped = line.replace(/var\([^)]*\)/g, '');
       if (/\bease-out\b/.test(stripped)) {
-        violations.push(`  packages/app/src/globals.css:${i + 1}    ${line.trim()}`);
+        violations.push(`  ${APP_STYLESHEET}:${i + 1}    ${line.trim()}`);
       }
     }
 
@@ -1256,7 +1431,7 @@ describe('E2E STOP rule — zero allowlist', () => {
     ).toEqual([]);
   });
 
-  test('no remote placeholder-image hosts in tests/{stress,visual,a11y} (PRD-8532)', () => {
+  test('no remote placeholder-image hosts in tests/{stress,a11y} (PRD-8532)', () => {
     const violations = collectMatches(e2eTsFiles, isRemoteImageHost);
     expect(
       violations,

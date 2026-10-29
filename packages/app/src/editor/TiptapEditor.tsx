@@ -11,7 +11,7 @@ import type { AgentFlashEntry } from '@inkeep/open-knowledge-core/types/awarenes
 import { deriveIconColor } from '@inkeep/open-knowledge-core/utils/identity';
 import { randomUUID } from '@inkeep/open-knowledge-core/utils/random-uuid';
 import { t } from '@lingui/core/macro';
-import { type AnyExtension, Editor, type EditorOptions, Extension } from '@tiptap/core';
+import { type AnyExtension, Editor, type EditorOptions, Extension, isMacOS } from '@tiptap/core';
 import Collaboration from '@tiptap/extension-collaboration';
 import Placeholder from '@tiptap/extension-placeholder';
 import { EditorContent } from '@tiptap/react';
@@ -19,6 +19,7 @@ import { initProseMirrorDoc, yCursorPlugin, ySyncPluginKey } from '@tiptap/y-tip
 import { type FC, use, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { SelectionAnnouncer } from '@/components/editor/SelectionAnnouncer';
+import { useEditorPaneOnScreen } from '@/lib/use-editor-pane-on-screen';
 import {
   clearRenameSnapshot,
   editorScrollContainerOf,
@@ -30,7 +31,7 @@ import { getInteractionLayer } from './interaction-layer-host';
 
 const editorCtorStartTimes = new WeakMap<object, number>();
 
-import type { Transaction as PMTransaction } from '@tiptap/pm/state';
+import { type Transaction as PMTransaction, TextSelection } from '@tiptap/pm/state';
 import type { EditorView as PMEditorView } from '@tiptap/pm/view';
 import { CommentAnchorLayer } from '@/comments/anchor-decorations';
 import { CommentMarginRail } from '@/comments/CommentMarginRail';
@@ -52,11 +53,14 @@ import { useSingleFileMode } from '@/lib/single-file-mode';
 import { useIdentity } from '../presence/identity';
 import { registerEditor, unregisterEditor } from './active-editor';
 import { changedRangeIsOnScreen } from './agent-follow-scroll';
+import { REPEAT_ANCHOR_NAV_EVENT } from './anchor-navigation-event';
+import { findAnchorTarget } from './anchor-target';
 import { applyLintFixes } from './apply-lint-fix.ts';
 import { getAwarenessHeartbeat } from './awareness-heartbeat-runtime';
 import { buildAwarenessUser } from './awareness-user';
 import { bindingStalenessGuardPlugin, type WedgeDetail } from './binding-staleness-guard';
 import { BubbleMenuBar } from './bubble-menu/BubbleMenuBar';
+import { attachCaretLabel, caretLabelLayerPlugin } from './caret-label-layer';
 import {
   createClipboardHtmlSerializer,
   createClipboardTextSerializer,
@@ -71,7 +75,7 @@ import { setEditorDocName } from './extensions/doc-context.ts';
 import { setEditorSingleFileMode, setEditorSourceMode } from './extensions/editor-mode-context.ts';
 import { FrozenTableHeaders } from './extensions/frozen-table-headers.ts';
 import { MarkdownLintDecorations } from './extensions/markdown-lint-decorations.ts';
-import { sharedExtensions } from './extensions/shared.ts';
+import { scopeExtensionsToDocument, sharedExtensions } from './extensions/shared.ts';
 import { SkillPathLinks } from './extensions/skill-path-links';
 import { uploadDecorationPlugin } from './image-upload/index.ts';
 import type { LandingHandle } from './landing-controller';
@@ -115,7 +119,7 @@ function renderCursor(user: Record<string, string>): HTMLElement {
   label.style.backgroundColor = user.color;
   label.style.color = deriveIconColor(user.color);
   label.textContent = user.name;
-  cursor.append(label);
+  attachCaretLabel(cursor, label);
 
   return cursor;
 }
@@ -251,18 +255,7 @@ export function buildExtensionList(args: BuildEditorOptionsArgs): AnyExtension[]
   const { provider, placeholder, prebuiltMapping, onWedged } = args;
   const { collaboration, guard } = buildPrewarmBoundCollaboration(provider, prebuiltMapping);
   return [
-    ...sharedExtensions.map((ext) => {
-      if (
-        ext.name === 'link' ||
-        ext.name === 'wikiLink' ||
-        ext.name === 'jsxComponent' ||
-        ext.name === 'jsxInline' ||
-        ext.name === 'imageReference'
-      ) {
-        return ext.configure({ docName: provider.configuration.name ?? '' });
-      }
-      return ext;
-    }),
+    ...scopeExtensionsToDocument(sharedExtensions, provider.configuration.name ?? ''),
     createBareHtmlImageDecoration(provider.configuration.name ?? ''),
     Placeholder.configure({
       placeholder: () => placeholder ?? t`Type '/' for commands`,
@@ -289,6 +282,7 @@ export function buildExtensionList(args: BuildEditorOptionsArgs): AnyExtension[]
           yCursorPlugin(awareness, {
             cursorBuilder: renderCursor,
           }),
+          caretLabelLayerPlugin(),
         ];
       },
     }),
@@ -314,8 +308,66 @@ export function buildExtensionList(args: BuildEditorOptionsArgs): AnyExtension[]
   ];
 }
 
+function admitFocusedTextCaret(view: PMEditorView, event: KeyboardEvent): void {
+  const isLineEndKey =
+    !event.altKey &&
+    !event.ctrlKey &&
+    !event.shiftKey &&
+    (isMacOS()
+      ? event.key === 'ArrowRight' && event.metaKey
+      : event.key === 'End' && !event.metaKey);
+  if (
+    event.isComposing ||
+    view.composing ||
+    !view.editable ||
+    event.altKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    (!isLineEndKey && (event.metaKey || event.key.length !== 1)) ||
+    !view.hasFocus() ||
+    !(view.state.selection instanceof TextSelection) ||
+    !view.state.selection.empty
+  ) {
+    return;
+  }
+
+  const domSelection = view.dom.ownerDocument.getSelection();
+  const focusNode = domSelection?.focusNode;
+  if (!domSelection?.isCollapsed || !focusNode || !view.dom.contains(focusNode)) return;
+  const focusElement =
+    focusNode.nodeType === Node.ELEMENT_NODE ? (focusNode as Element) : focusNode.parentElement;
+  if (focusElement?.closest('[contenteditable="false"]')) return;
+
+  const pos = view.posAtDOM(focusNode, domSelection.focusOffset, 1);
+  const $pos = view.state.doc.resolve(pos);
+  if (!$pos.parent.isTextblock) return;
+  const nextSelection =
+    view.someProp('createSelectionBetween', (create) => create(view, $pos, $pos)) ??
+    TextSelection.between($pos, $pos, 1);
+  if (!(nextSelection instanceof TextSelection) || !nextSelection.empty) return;
+  if (focusNode.nodeType === Node.ELEMENT_NODE) {
+    const element = focusNode as Element;
+    const textNode = view.dom.ownerDocument
+      .createTreeWalker(element, NodeFilter.SHOW_TEXT)
+      .nextNode();
+    if (
+      textNode &&
+      !textNode.parentElement?.closest('[contenteditable="false"]') &&
+      view.posAtDOM(textNode, 0, 1) === pos
+    ) {
+      const range = view.dom.ownerDocument.createRange();
+      range.setStart(textNode, 0);
+      range.collapse(true);
+      domSelection.removeAllRanges();
+      domSelection.addRange(range);
+    }
+  }
+  if (pos === view.state.selection.head) return;
+  view.dispatch(view.state.tr.setSelection(nextSelection));
+}
+
 function buildEditorOptions(args: BuildEditorOptionsArgs): Partial<EditorOptions> {
-  const { provider, clipboard, ctorStart } = args;
+  const { provider, placeholder, clipboard, ctorStart } = args;
   return {
     onBeforeCreate: ({ editor }) => {
       editorCtorStartTimes.set(editor, ctorStart);
@@ -338,6 +390,7 @@ function buildEditorOptions(args: BuildEditorOptionsArgs): Partial<EditorOptions
     editorProps: {
       attributes: {
         class: 'pt-4 pb-4 h-full',
+        ...(placeholder === undefined ? {} : { 'data-empty-placeholder': placeholder }),
       },
       clipboardTextParser: (text, _context, _plain, view) => {
         const json = clipboard.mdManager.parse(text);
@@ -350,6 +403,10 @@ function buildEditorOptions(args: BuildEditorOptionsArgs): Partial<EditorOptions
       handlePaste: (view, event) => clipboard.paste(view, event),
       handleDrop: clipboard.drop,
       handleDOMEvents: {
+        keydown: (view, event) => {
+          admitFocusedTextCaret(view, event);
+          return false;
+        },
         copy: (view, event) => clipboard.copy(view, event as ClipboardEvent, false),
         cut: (view, event) => clipboard.copy(view, event as ClipboardEvent, true),
       },
@@ -493,6 +550,7 @@ const TiptapEditorChrome: FC<TiptapEditorChromeProps> = ({
   flashStateRef,
   portalTarget,
 }) => {
+  const editorPaneOnScreen = useEditorPaneOnScreen();
   const portalSlotRef = useRef<HTMLDivElement | null>(null);
   const singleFile = useSingleFileMode();
   const [editorContentRevision, setEditorContentRevision] = useState(0);
@@ -866,7 +924,12 @@ const TiptapEditorChrome: FC<TiptapEditorChromeProps> = ({
     const liveView = (): PMEditorView | null =>
       (editor as unknown as { editorView?: PMEditorView }).editorView ?? null;
 
-    const flashAndScroll = (view: PMEditorView, from: number, to: number): void => {
+    const flashAndScroll = (
+      view: PMEditorView,
+      from: number,
+      to: number,
+      followChange: boolean,
+    ): void => {
       view.dispatch(
         view.state.tr.setMeta(agentInsertFlashKey, { add: { from, to }, now: Date.now() }),
       );
@@ -880,9 +943,10 @@ const TiptapEditorChrome: FC<TiptapEditorChromeProps> = ({
         );
       }, AGENT_INSERT_FLASH_MS + 50);
 
-      if (!loadFollowFilePref()) return;
+      if (!followChange || !loadFollowFilePref()) return;
       if (document.visibilityState !== 'visible') return;
       if (view.hasFocus()) return;
+      if (view.dom.closest('[data-editor-pane-panel][inert]')) return;
       const elementAtPos = (sv: PMEditorView, pos: number): HTMLElement | null => {
         try {
           const domRef = sv.domAtPos(pos);
@@ -898,7 +962,13 @@ const TiptapEditorChrome: FC<TiptapEditorChromeProps> = ({
       };
       const scrollToChange = (): void => {
         const sv = liveView();
-        if (sv == null || sv.hasFocus() || document.visibilityState !== 'visible') return;
+        if (
+          sv == null ||
+          sv.hasFocus() ||
+          document.visibilityState !== 'visible' ||
+          sv.dom.closest('[data-editor-pane-panel][inert]')
+        )
+          return;
         if (isScrollRestoreSuppressed(docName)) return;
         const docSize = sv.state.doc.content.size;
         const clamp = (pos: number): number => Math.max(0, Math.min(pos, docSize - 1));
@@ -941,7 +1011,7 @@ const TiptapEditorChrome: FC<TiptapEditorChromeProps> = ({
       const view = liveView();
       if (view == null) return;
       if (fresh !== null) lastAgentFlashKeyRef.current = fresh.key;
-      flashAndScroll(view, range.from, range.to);
+      flashAndScroll(view, range.from, range.to, true);
     };
     editor.on('transaction', onTransaction);
 
@@ -956,7 +1026,12 @@ const TiptapEditorChrome: FC<TiptapEditorChromeProps> = ({
       const range = blockRangeToPositions(view.state.doc, blocks.from, blocks.to);
       if (range === null) return;
       lastAgentFlashKeyRef.current = fresh.key;
-      flashAndScroll(view, range.from, range.to);
+      flashAndScroll(
+        view,
+        range.from,
+        range.to,
+        view.dom.closest('[data-editor-pane-projected]') === null,
+      );
     };
     const activationRaf = requestAnimationFrame(replayFromEntry);
     const onSynced = (): void => {
@@ -994,18 +1069,9 @@ const TiptapEditorChrome: FC<TiptapEditorChromeProps> = ({
       attempts = 0;
     }
 
-    function findAnchorTarget(anchor: string): HTMLElement | null {
-      const realView = getEditorView(editor);
-      if (!realView) return null;
-      const escapedAnchor = CSS.escape(anchor);
-      return (
-        realView.dom.querySelector<HTMLElement>(`#${escapedAnchor}`) ??
-        realView.dom.querySelector<HTMLElement>(`[data-mirror-source-id="${escapedAnchor}"]`)
-      );
-    }
-
     function scrollAnchorIntoView(anchor: string): boolean {
-      const el = findAnchorTarget(anchor);
+      const realView = getEditorView(editor);
+      const el = realView ? findAnchorTarget(realView.dom, anchor) : null;
       if (!el) return false;
       return runScrollNavigation(docName, 'deep-link', () => {
         el.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1074,16 +1140,23 @@ const TiptapEditorChrome: FC<TiptapEditorChromeProps> = ({
       scheduleScrollFromHash();
     }
 
+    function repeatScrollFromHash() {
+      handledHash = null;
+      scheduleScrollFromHash();
+    }
+
     scheduleScrollFromHash();
     provider.on('synced', retryPendingOrSchedule);
     editor.on('transaction', retryPendingOrSchedule);
     window.addEventListener('hashchange', scheduleScrollFromHash);
+    window.addEventListener(REPEAT_ANCHOR_NAV_EVENT, repeatScrollFromHash);
 
     return () => {
       if (timeoutId !== undefined) clearTimeout(timeoutId);
       provider.off('synced', retryPendingOrSchedule);
       editor.off('transaction', retryPendingOrSchedule);
       window.removeEventListener('hashchange', scheduleScrollFromHash);
+      window.removeEventListener(REPEAT_ANCHOR_NAV_EVENT, repeatScrollFromHash);
     };
   }, [provider, editor, docName, activeDocName, isSourceMode]);
 
@@ -1131,6 +1204,7 @@ const TiptapEditorChrome: FC<TiptapEditorChromeProps> = ({
         scrollHeightBefore,
       });
       if (!claimed) return;
+      detail.onNavigated?.(realView.dom);
       clearTimeout(settleTimer);
       settleTimer = setTimeout(() => {
         emitDiagnosticBreadcrumb(OUTLINE_NAV_SETTLED_BREADCRUMB, {
@@ -1190,11 +1264,9 @@ const TiptapEditorChrome: FC<TiptapEditorChromeProps> = ({
       data-agent-flash-position="append"
       data-agent-flash-agent-id=""
     >
-      {}
-      {!isSourceMode && (
+      {!isSourceMode && editorPaneOnScreen && (
         <BubbleMenuBar editor={editor} shortcutEnabled={docName === activeDocName} />
       )}
-      {}
       {!isSourceMode && (
         <CommentsBoundary>
           <CommentSelectionAffordance
@@ -1207,8 +1279,6 @@ const TiptapEditorChrome: FC<TiptapEditorChromeProps> = ({
         </CommentsBoundary>
       )}
       {!isSourceMode && <TableCellHandles editor={editor} />}
-      {}
-      {}
       <div ref={portalSlotRef} style={{ display: 'contents' }} />
       {createPortal(
         // oxlint-disable-next-line ok/no-unportaled-editor-content -- canonical portaled site — H6 fix per PRECEDENTS.md #44
@@ -1219,13 +1289,14 @@ const TiptapEditorChrome: FC<TiptapEditorChromeProps> = ({
         />,
         portalTarget,
       )}
-      {}
       <SelectionAnnouncer editor={editor} />
-      {/**
-       * RawMdxFallback renders inline via `RawMdxFallbackCMView` (precedent #30) and never
-       * registers with InteractionLayer.
-       */}
-      <InteractionLayerView store={getInteractionLayer(editor).store} />
+      <InteractionLayerView
+        /**
+         * RawMdxFallback renders inline via `RawMdxFallbackCMView` (precedent #30) and never
+         * registers with InteractionLayer.
+         */
+        store={getInteractionLayer(editor).store}
+      />
     </div>
   );
 };

@@ -53,6 +53,8 @@ describe('tripwire reset readFileSync failure', () => {
     mkdirSync(join(contentDir, `${docName}.md`));
 
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir,
       projectDir: contentDir,
       gitEnabled: false,

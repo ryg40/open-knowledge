@@ -1,10 +1,61 @@
 export { acpCatalogBody } from './acp-catalog.ts';
 export {
+  DESKTOP_HEADER_PLATFORM_NAMES,
+  DESKTOP_HEADER_PLATFORMS,
+  type DesktopHeaderHost,
+  MAC_WINDOW_BUTTONS_WIDTH_PX,
+  MAC_WINDOW_BUTTONS_X_PX,
+  openDesktopHeader,
+  settledHeaderFit,
+  settleFrames,
+  type WindowControls,
+  windowControlsOf,
+} from './app-header-host.ts';
+export {
   AUDIT_CONSOLE_RECORD_CASES,
   chromiumResourceFailureRecord,
 } from './audit-console-records.test-helper.ts';
+export {
+  BORDER_SIDES,
+  type BorderSide,
+  type BorderSideName,
+  type CardSurface,
+  type ContrastPair,
+  contrastRatioOf,
+  countDifferingPixels,
+  innerClipsOf,
+  type RgbaBytes,
+  readBorderColors,
+  readCardSurface,
+  readContrastPair,
+  readRootColor,
+  relativeLuminance,
+  rgbaBytesOf,
+  type ScreenClip,
+  screenshotBrightness,
+} from './card-surface.ts';
 export { simulateCopyAndRead, simulateCutAndRead } from './clipboard.ts';
 export { resetContentToFixtureBaseline } from './content-reset.ts';
+export {
+  type CardPlacement,
+  CORNER_STACK_TEST_ID,
+  type ControlReach,
+  cornerStack,
+  cornerStackColumn,
+  expectDocumentOpen,
+  FLOATING_AND_HIT_TESTABLE,
+  feedbackCard,
+  identityOf,
+  newsletterCard,
+  noticeList,
+  noticeWithText,
+  placementOf,
+  REACHABLE,
+  reachOf,
+  SAME_NODE,
+  sidebarTrigger,
+} from './corner-stack.ts';
+export { afterEditorFocusSync, PROSEMIRROR_FOCUS_SYNC_DELAY_MS } from './editor-focus-sync.ts';
 export {
   type CaretPlacement,
   focusEditor,
@@ -21,6 +72,11 @@ export {
   hasExternalCue,
 } from './external-link-cue.ts';
 export {
+  FEEDBACK_NUDGE_KEY,
+  seedFeedbackEligibleDocs,
+  seedFeedbackNudgeStateBeforeLoad,
+} from './feedback-nudge.ts';
+export {
   type AgentIdentity,
   type ApiHelpers,
   expect,
@@ -36,6 +92,7 @@ export {
   CHUNK_WRAPPER_SELECTOR,
   injectForcedEstimateError,
   landingMarkCount,
+  readEditorCaretLine,
   readSourceCaretHead,
   readWysiwygCaretHead,
   scrollWysiwygBlockToTop,
@@ -43,6 +100,38 @@ export {
   toggleMode,
   waitForLandingSettled,
 } from './landing.ts';
+export {
+  arrangeTerminalAlone,
+  CHAT_PANE_CARD,
+  type DesktopLayoutOptions,
+  DOCK_WORKSPACE,
+  type DockSeamDrag,
+  type DockUnitRect,
+  dockSeam,
+  dockUnit,
+  dockUnitRect,
+  dragDockSeam,
+  EDITOR_PANE_CARD,
+  expectDockUnitOff,
+  expectEditorHidden,
+  type HeaderPane,
+  headerPaneButton,
+  type LayoutViewport,
+  openDesktopLayout,
+  openWebLayout,
+  presetTerminalPlacement,
+  runPaletteCommand,
+  setHeaderPane,
+  stubAgentCatalog,
+  terminalPaneCard,
+} from './pane-layout.ts';
+export {
+  appSourcesIn,
+  servedEntryScriptRoute,
+  servedModuleRoute,
+  servedModuleUrl,
+} from './prebuilt/served-modules.ts';
+export { openPropPanel } from './prop-panel.ts';
 export {
   installClockAfterSync,
   type WaitForProviderOptions,
@@ -88,6 +177,12 @@ export {
   waitForSlashMenuFirstOption,
   waitForSlashMenuOpen,
 } from './slash-menu.ts';
+export {
+  NEWSLETTER_KEY,
+  NEWSLETTER_USED_UP,
+  type NewsletterState,
+  seedNewsletterStateBeforeLoad,
+} from './subscribe-card.ts';
 export { blockMarker, generateTallDoc } from './tall-doc-fixture.ts';
 export { removeAllDuringTeardown } from './teardown-fs.ts';
 export {
@@ -100,6 +195,7 @@ export {
   type ThemeFadeProbeWindow,
   type ThemeFadeReport,
 } from './theme-fade.ts';
+export { threadRosterDelivered } from './thread-roster.ts';
 export {
   createMp3Buffer,
   createMp4Buffer,

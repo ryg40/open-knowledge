@@ -12,9 +12,16 @@ import {
   SkillFilePutSuccessSchema,
   SkillFileRenameRequestSchema,
   SkillFileRenameSuccessSchema,
+  skillFilePathSegments,
 } from '@inkeep/open-knowledge-core';
 import type { AgentSessionManager } from '../agent-sessions.ts';
+import {
+  type AgentWriteFlushOutcome,
+  answeredWithSuccessOnAppRoutes,
+  outcomeOfSavedWrite,
+} from '../agent-write-outcome.ts';
 import { composeAndWriteRawBody } from '../bridge-intake.ts';
+import type { RemovalLifecycleStatus } from '../conflict-kinds.ts';
 import {
   applySkillBundleFileDelete,
   applySkillBundleFileRename,
@@ -22,6 +29,8 @@ import {
   BUNDLE_FILE_MAX_BYTES,
   BUNDLE_MAX_FILES,
   countBundleFiles,
+  skillMutationErrorStatus,
+  validateSkillMutationPath,
 } from '../content/skills-write.ts';
 import { isSkillBundlePathWithheld } from '../content-filter.ts';
 import type {
@@ -90,16 +99,9 @@ export interface SkillsFileRouteDeps {
   };
   sessionManager: AgentSessionManager;
   respondStaleExternalWrite: (res: ServerResponse, handler: string, docName: string) => void;
-  flushDiskAndDetectOutcome: (
-    docName: string,
-  ) => Promise<
-    | { kind: 'failure'; failure: StoreFailure }
-    | { kind: 'divergence' }
-    | { kind: 'stale-external-write' }
-    | null
-  >;
+  flushDiskAndDetectOutcome: (docName: string) => Promise<AgentWriteFlushOutcome>;
+  markAgentWriteStore: (docName: string) => void;
   respondPersistenceFailure: (res: ServerResponse, failure: StoreFailure, handler: string) => void;
-  respondDiskDivergence: (res: ServerResponse, handler: string) => void;
   okArtifactKey: (
     kind: 'template' | 'folder-frontmatter' | 'folder' | 'skill',
     folder: string,
@@ -112,7 +114,7 @@ export interface SkillsFileRouteDeps {
   ) => ReturnType<typeof extractActorIdentity>;
   captureAndCloseDocuments: (
     docNames: string[],
-    lifecycleStatus: 'deleted-upstream' | 'renamed',
+    lifecycleStatus: RemovalLifecycleStatus,
   ) => Promise<Map<string, string>>;
   log: PinoLogger;
   commitOkArtifactWrite: (context: string) => Promise<unknown>;
@@ -158,13 +160,26 @@ function bundleTargetVerdict(skillDir: string, abs: string): 'admitted' | 'withh
 
 function rejectUnadmittedBundleTarget(
   res: ServerResponse,
+  boundary: string,
   skillDir: string,
   rel: string,
   handler: string,
   escapeTitle: string,
 ): boolean {
   const verdict = bundleTargetVerdict(skillDir, resolve(skillDir, rel));
-  if (verdict === 'admitted') return false;
+  if (verdict === 'admitted') {
+    const pathCheck = validateSkillMutationPath(boundary, skillDir, resolve(skillDir, rel));
+    if (pathCheck.ok) return false;
+    const status = skillMutationErrorStatus(pathCheck.error.code);
+    errorResponse(
+      res,
+      status,
+      status === 500 ? 'urn:ok:error:internal-server-error' : 'urn:ok:error:invalid-request',
+      pathCheck.error.message,
+      { handler, detail: `${rel}: ${pathCheck.error.code}`, cause: pathCheck.error.cause },
+    );
+    return true;
+  }
   errorResponse(
     res,
     400,
@@ -193,9 +208,9 @@ export function createSkillsFileRoutes(deps: SkillsFileRouteDeps): ApiRouteGroup
     extractAgentIdentity,
     sessionManager,
     flushDiskAndDetectOutcome,
+    markAgentWriteStore,
     respondStaleExternalWrite,
     respondPersistenceFailure,
-    respondDiskDivergence,
     attributeOkArtifactWrite,
     okArtifactKey,
     commitOkArtifactWrite,
@@ -208,10 +223,7 @@ export function createSkillsFileRoutes(deps: SkillsFileRouteDeps): ApiRouteGroup
   } = deps;
   function classifySkillFilePath(rel: string): 'reference' | 'script' | 'file' | null {
     if (rel.includes('\x00')) return null;
-    const segments = rel
-      .replace(/\\/g, '/')
-      .split('/')
-      .filter((s) => s !== '' && s !== '.');
+    const segments = skillFilePathSegments(rel);
     if (segments.length < 1 || segments.some((s) => s === '..')) return null;
     if (segments.length === 1 && (segments[0] as string).toLowerCase() === 'skill.md') return null;
     if (segments[0] === 'references' && segments.length >= 2) return 'reference';
@@ -406,6 +418,7 @@ export function createSkillsFileRoutes(deps: SkillsFileRouteDeps): ApiRouteGroup
         if (
           rejectUnadmittedBundleTarget(
             res,
+            fileBase,
             skillDirAbs,
             rel,
             'skill-file-put',
@@ -414,6 +427,7 @@ export function createSkillsFileRoutes(deps: SkillsFileRouteDeps): ApiRouteGroup
         )
           return;
         const routedThroughContent = isProjectMdReference(body.scope, kind, rel);
+        let fileFlushOutcome: AgentWriteFlushOutcome = null;
         let created: boolean;
 
         if (routedThroughContent) {
@@ -445,13 +459,14 @@ export function createSkillsFileRoutes(deps: SkillsFileRouteDeps): ApiRouteGroup
           session.dc.document.transact(() => {
             composeAndWriteRawBody(session.dc.document, body.content, 'agent');
           }, session.origin);
+          markAgentWriteStore(refDocName);
           const flushOutcome = await flushDiskAndDetectOutcome(refDocName);
-          if (flushOutcome?.kind === 'failure') {
+          fileFlushOutcome = flushOutcome;
+          if (
+            flushOutcome?.kind === 'failure' &&
+            !answeredWithSuccessOnAppRoutes(flushOutcome.failure)
+          ) {
             respondPersistenceFailure(res, flushOutcome.failure, 'skill-file-put');
-            return;
-          }
-          if (flushOutcome?.kind === 'divergence') {
-            respondDiskDivergence(res, 'skill-file-put');
             return;
           }
           if (flushOutcome?.kind === 'stale-external-write') {
@@ -460,6 +475,7 @@ export function createSkillsFileRoutes(deps: SkillsFileRouteDeps): ApiRouteGroup
           }
         } else {
           const fsResult = applySkillBundleFileWrite({
+            boundary: fileBase,
             skillsRoot: dirname(skillDirAbs),
             name: body.name,
             relPath: rel,
@@ -471,7 +487,7 @@ export function createSkillsFileRoutes(deps: SkillsFileRouteDeps): ApiRouteGroup
                 ? 500
                 : fsResult.error.code === 'SKILL_NOT_FOUND'
                   ? 404
-                  : 400;
+                  : skillMutationErrorStatus(fsResult.error.code);
             errorResponse(
               res,
               status,
@@ -505,7 +521,13 @@ export function createSkillsFileRoutes(deps: SkillsFileRouteDeps): ApiRouteGroup
           res,
           200,
           SkillFilePutSuccessSchema,
-          { path: rel, created, kind, content: routedThroughContent },
+          {
+            ...outcomeOfSavedWrite(undefined, fileFlushOutcome),
+            path: rel,
+            created,
+            kind,
+            content: routedThroughContent,
+          },
           { handler: 'skill-file-put' },
         );
       } catch (e) {
@@ -556,12 +578,14 @@ export function createSkillsFileRoutes(deps: SkillsFileRouteDeps): ApiRouteGroup
         }
         const realDir = resolveSkillDirForRead(scope, name);
         const skillsRoot = realDir !== null ? dirname(realDir) : resolveSkillsRoot(scope);
+        const fileBase = scope === 'project' ? contentDir : skillsHome;
 
         const bundleDir = realDir ?? join(skillsRoot, name);
         const bundleAbs = resolve(bundleDir, rel);
         if (
           rejectUnadmittedBundleTarget(
             res,
+            fileBase,
             bundleDir,
             rel,
             'skill-file-delete',
@@ -586,9 +610,17 @@ export function createSkillsFileRoutes(deps: SkillsFileRouteDeps): ApiRouteGroup
           if (docs.length > 0) await captureAndCloseDocuments(docs, 'deleted-upstream');
         }
 
-        const result = applySkillBundleFileDelete({ skillsRoot, name, relPath: rel });
+        const result = applySkillBundleFileDelete({
+          boundary: fileBase,
+          skillsRoot,
+          name,
+          relPath: rel,
+        });
         if (!result.ok) {
-          const status = result.error.code === 'UNLINK_FAILED' ? 500 : 400;
+          const status =
+            result.error.code === 'UNLINK_FAILED'
+              ? 500
+              : skillMutationErrorStatus(result.error.code);
           errorResponse(
             res,
             status,
@@ -680,10 +712,12 @@ export function createSkillsFileRoutes(deps: SkillsFileRouteDeps): ApiRouteGroup
           return;
         }
         const skillsRoot = dirname(realDir);
+        const fileBase = body.scope === 'project' ? contentDir : skillsHome;
         if (
           [from, to].some((rel) =>
             rejectUnadmittedBundleTarget(
               res,
+              fileBase,
               realDir,
               rel,
               'skill-file-rename',
@@ -715,13 +749,17 @@ export function createSkillsFileRoutes(deps: SkillsFileRouteDeps): ApiRouteGroup
         }
 
         const result = applySkillBundleFileRename({
+          boundary: fileBase,
           skillsRoot,
           name: body.name,
           relPath: from,
           toRelPath: to,
         });
         if (!result.ok) {
-          const status = result.error.code === 'RENAME_FAILED' ? 500 : 400;
+          const status =
+            result.error.code === 'RENAME_FAILED'
+              ? 500
+              : skillMutationErrorStatus(result.error.code);
           errorResponse(
             res,
             status,

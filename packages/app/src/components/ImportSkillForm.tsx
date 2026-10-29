@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 // oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — physical margin/padding/inset utilities predate the rule; drain by swapping ml/mr → ms/me, pl/pr → ps/pe, left/right → start/end, then deleting this line. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-physical-direction-utility
 
 import type { SkillScope } from '@inkeep/open-knowledge-core/schemas/api';
@@ -179,7 +180,6 @@ export function ImportSkillForm({
           <Label id={sourceGroupId}>
             <Trans>Source</Trans>
           </Label>
-          {}
           <RadioGroup
             value={source}
             onValueChange={(v) => {
@@ -255,7 +255,6 @@ export function ImportSkillForm({
           </RadioGroup>
           {isUpload ? (
             <>
-              {}
               <Input
                 key={source}
                 ref={inputRef}
@@ -310,7 +309,6 @@ export function ImportSkillForm({
                 placeholder={t`owner/repo, a git URL, or a local path`}
                 className="font-mono"
               />
-              {}
               {discovering || discoverMiss || (discovered && discovered.length === 1) ? (
                 <p className="text-1sm text-muted-foreground">
                   {discovering ? (
@@ -354,7 +352,6 @@ export function ImportSkillForm({
             </p>
           </div>
         ) : null}
-        {}
         <div role="note" className="space-y-3" data-testid="skill-import-disclosure">
           <p className="font-medium text-xs font-mono text-muted-foreground/80 uppercase tracking-wider">
             <Trans>What happens next</Trans>

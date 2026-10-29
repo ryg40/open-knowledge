@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 import { EDITOR_LABELS } from '@inkeep/open-knowledge-core/constants/editors';
 import { AGENTS_SKILLS_ROOT } from '@inkeep/open-knowledge-core/constants/skills';
 import type { SkillsListEntry } from '@inkeep/open-knowledge-core/schemas/api';
@@ -17,6 +18,16 @@ import {
   SkillMenuLabel,
   SkillMenuSeparator,
 } from '@/components/skill-menu-primitives';
+import {
+  AlertDialog,
+  AlertDialogBody,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useSkills } from '@/hooks/use-skills';
@@ -198,6 +209,80 @@ export function useSkillHostToggles(
   };
 }
 
+interface SkillInstallConfirmation {
+  title: string;
+  description: string;
+  confirmLabel: string;
+  paths?: readonly string[];
+  footnote?: string;
+  onConfirm: () => void;
+}
+
+const TREE_CONTEXT_MENU_ROOT = { 'data-file-tree-context-menu-root': 'true' } as const;
+
+function SkillInstallConfirmDialog({
+  confirmation,
+  onClose,
+  onCloseAutoFocus,
+}: {
+  confirmation: SkillInstallConfirmation | null;
+  onClose: () => void;
+  onCloseAutoFocus: (event: Event) => void;
+}) {
+  return (
+    <AlertDialog
+      open={confirmation !== null}
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      {confirmation !== null ? (
+        <AlertDialogContent
+          data-testid="skill-install-confirm"
+          {...TREE_CONTEXT_MENU_ROOT}
+          overlayProps={TREE_CONTEXT_MENU_ROOT}
+          onCloseAutoFocus={onCloseAutoFocus}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>{confirmation.title}</AlertDialogTitle>
+            <AlertDialogDescription>{confirmation.description}</AlertDialogDescription>
+          </AlertDialogHeader>
+          {confirmation.paths !== undefined || confirmation.footnote !== undefined ? (
+            <AlertDialogBody className="flex flex-col gap-2">
+              {confirmation.paths !== undefined ? (
+                <ul className="flex flex-col gap-0.5" data-testid="skill-install-confirm-paths">
+                  {confirmation.paths.map((path) => (
+                    <li key={path}>
+                      <code className="break-all font-mono text-xs">{path}</code>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {confirmation.footnote !== undefined ? (
+                <p className="text-muted-foreground text-sm">{confirmation.footnote}</p>
+              ) : null}
+            </AlertDialogBody>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel>
+              <Trans>Cancel</Trans>
+            </AlertDialogCancel>
+            <Button
+              onClick={() => {
+                onClose();
+                confirmation.onConfirm();
+              }}
+              data-testid="skill-install-confirm-action"
+            >
+              {confirmation.confirmLabel}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      ) : null}
+    </AlertDialog>
+  );
+}
+
 function Hint({ hint, children }: { hint: string; children: ReactElement }) {
   return (
     <Tooltip>
@@ -247,12 +332,33 @@ export function SkillInstallMenuItems({
   const subscribersOf = (rootRel: string): string[] => aliasSubscribersOf(aliases, rootRel);
   const hostLabel = (h: string): string =>
     h === 'agents' ? '.agents' : ((EDITOR_LABELS as Record<string, string>)[h] ?? h);
-  const confirmReach = (rootRel: string): boolean => {
+  const [confirmation, setConfirmation] = useState<SkillInstallConfirmation | null>(null);
+  const confirmOpenerRef = useRef<HTMLElement | null>(null);
+  const askToConfirm = (next: SkillInstallConfirmation): void => {
+    confirmOpenerRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setConfirmation(next);
+  };
+  const returnFocusToOpener = (event: Event): void => {
+    const opener = confirmOpenerRef.current;
+    confirmOpenerRef.current = null;
+    if (opener === null || !opener.isConnected) return;
+    event.preventDefault();
+    const usable = !opener.matches(':disabled, [data-disabled]');
+    (usable ? opener : opener.closest<HTMLElement>('[role="menu"]'))?.focus();
+  };
+  const withReachConfirm = (rootRel: string, proceed: () => void): void => {
     const subs = subscribersOf(rootRel);
-    if (subs.length === 0) return true;
-    return window.confirm(
-      t`Adds the skill to ${rootRel} — also read by ${subs.map(hostLabel).join(', ')}`,
-    );
+    if (subs.length === 0) {
+      proceed();
+      return;
+    }
+    askToConfirm({
+      title: t`Install in a shared folder?`,
+      description: t`Adds the skill to ${rootRel} — also read by ${subs.map(hostLabel).join(', ')}`,
+      confirmLabel: t`Install`,
+      onConfirm: proceed,
+    });
   };
   const audienceIcon = (h: string, poolRootRel: string) => {
     const subRoot = h.includes('/') ? h : skillHostRootDir(h, skill?.scope ?? 'project');
@@ -269,20 +375,21 @@ export function SkillInstallMenuItems({
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            if (
-              !window.confirm(
-                t`Stop ${hostLabel(h)} reading "${skill.name}"? ${subRoot} will keep its other skills (as symlinks) but stop following ${poolRootRel} — new skills added there won't reach ${hostLabel(h)} automatically.`,
-              )
-            )
-              return;
-            void putSkillFolderAction({
-              scope: skill.scope,
-              root: subRoot,
-              action: 'unlink',
-              exclude: [skill.name],
-            }).then((r) => {
-              if (!r.ok) toast.error(t`Couldn't update ${subRoot}: ${r.error}`);
-              else emitSkillsChanged();
+            askToConfirm({
+              title: t`Stop ${hostLabel(h)} reading this skill`,
+              description: t`Stop ${hostLabel(h)} reading "${skill.name}"? ${subRoot} will keep its other skills (as symlinks) but stop following ${poolRootRel} — new skills added there won't reach ${hostLabel(h)} automatically.`,
+              confirmLabel: t`Stop reading`,
+              onConfirm: () => {
+                void putSkillFolderAction({
+                  scope: skill.scope,
+                  root: subRoot,
+                  action: 'unlink',
+                  exclude: [skill.name],
+                }).then((r) => {
+                  if (!r.ok) toast.error(t`Couldn't update ${subRoot}: ${r.error}`);
+                  else emitSkillsChanged();
+                });
+              },
             });
           }}
           data-testid={`skill-audience-unfollow-${h}`}
@@ -308,20 +415,22 @@ export function SkillInstallMenuItems({
         <Button
           variant="ghost"
           size="sm"
-          className="h-5 shrink-0 rounded border border-yellow-500/40 bg-yellow-500/10 px-1 font-normal text-[10px] text-yellow-600 uppercase tracking-wide hover:bg-yellow-500/20"
+          className="h-5 shrink-0 rounded border border-warning/40 bg-warning/10 px-1 font-normal text-[10px] text-warning uppercase tracking-wide hover:bg-warning/20 hover:text-warning dark:hover:bg-warning/20"
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            if (
-              !window.confirm(
+            askToConfirm({
+              title: to === 'link' ? t`Replace with a symlink?` : t`Replace with a copy?`,
+              description:
                 to === 'link'
                   ? t`Replace the copy at ${display} with a symlink to the skill's source folder? Nothing else moves.`
                   : t`Replace the symlink at ${display} with an independent copy of the skill? Nothing else moves.`,
-              )
-            )
-              return;
-            onRunStart?.();
-            toggles.convertLocation?.(target, to);
+              confirmLabel: to === 'link' ? t`Replace with symlink` : t`Replace with copy`,
+              onConfirm: () => {
+                onRunStart?.();
+                toggles.convertLocation?.(target, to);
+              },
+            });
           }}
           data-testid={`skill-convert-${target}`}
         >
@@ -332,8 +441,6 @@ export function SkillInstallMenuItems({
   };
   return (
     <>
-      {}
-      {}
       <SkillMenuLabel menuKind={menuKind} className="flex items-center justify-between gap-2">
         <Trans>Install on</Trans>
         <Hint hint={t`Install on all agents`}>
@@ -349,7 +456,6 @@ export function SkillInstallMenuItems({
           </Button>
         </Hint>
       </SkillMenuLabel>
-      {}
       {sourceRow !== null ? (
         <Hint hint={t`The skill's own folder — the source other locations copy or link from`}>
           <SkillMenuCheckboxItem
@@ -359,7 +465,6 @@ export function SkillInstallMenuItems({
             onSelect={(e) => e.preventDefault()}
             data-testid="skill-source-row"
           >
-            {}
             <Folder aria-hidden className="size-4 text-muted-foreground" />
             <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
               <span className="min-w-0 truncate font-mono text-xs">{sourceRow}</span>
@@ -418,18 +523,16 @@ export function SkillInstallMenuItems({
               checked={hostSet.has(editor)}
               onCheckedChange={(on) => {
                 if (conflicted.has(editor)) return;
-                if (on === true && !confirmReach(rootRel)) return;
-                toggleEditor(editor, on === true);
+                if (on === true) withReachConfirm(rootRel, () => toggleEditor(editor, true));
+                else toggleEditor(editor, false);
               }}
               onSelect={(e) => e.preventDefault()}
               className="group"
               data-testid={`skill-install-editor-${editor}`}
             >
               <AgentBrandIcon host={editor} aria-hidden className="size-4" />
-              {}
               <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
                 <span className="min-w-0 truncate font-mono text-xs">{path ?? label}</span>
-                {}
                 {audience.length > 0 ? (
                   <span
                     className="flex shrink-0 items-center gap-0.5"
@@ -451,7 +554,7 @@ export function SkillInstallMenuItems({
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-5 shrink-0 rounded border border-yellow-500/40 bg-yellow-500/10 px-1 text-[10px] text-yellow-600 uppercase tracking-wide hover:bg-yellow-500/20"
+                      className="h-5 shrink-0 rounded border border-warning/40 bg-warning/10 px-1 text-[10px] text-warning uppercase tracking-wide hover:bg-warning/20 hover:text-warning dark:hover:bg-warning/20"
                       onClick={(e) => {
                         e.preventDefault();
                         onResolveFork?.(editor);
@@ -467,11 +570,9 @@ export function SkillInstallMenuItems({
                   </span>
                 ) : hostSet.has(editor) && skill?.hosts ? (
                   <>
-                    {}
                     {!busy && (linked.has(editor) ? 'link' : 'copy') !== expectedMode
                       ? convertRow(editor, path ?? label, linked.has(editor) ? 'link' : 'copy')
                       : null}
-                    {}
                     <Hint hint={t`Make this the source — the skill's real folder moves here`}>
                       <Button
                         variant="ghost"
@@ -501,7 +602,6 @@ export function SkillInstallMenuItems({
           </Hint>
         );
       })}
-      {}
       {customRootRows.map((r) => {
         const path = r.display;
         return (
@@ -523,8 +623,7 @@ export function SkillInstallMenuItems({
               checked={r.placed !== null}
               onCheckedChange={(on) => {
                 if (on === true && r.placed === null) {
-                  if (!confirmReach(r.root)) return;
-                  toggles.placeAt(r.root, expectedMode);
+                  withReachConfirm(r.root, () => toggles.placeAt(r.root, expectedMode));
                 } else if (r.placed !== null) {
                   toggles.unplaceAt?.(r.placed.path);
                 }
@@ -582,7 +681,6 @@ export function SkillInstallMenuItems({
         );
       })}
 
-      {}
       {rows.length === 0 && customRootRows.length === 0 && sourceRow === null ? (
         <div
           className="px-2 py-1.5 text-[11px] text-muted-foreground leading-snug"
@@ -592,7 +690,6 @@ export function SkillInstallMenuItems({
         </div>
       ) : null}
 
-      {}
       {convertible.length > 0 && toggles.convertLocations ? (
         <div className="flex items-center gap-1 px-2 pt-1 pb-1.5">
           <Button
@@ -608,19 +705,21 @@ export function SkillInstallMenuItems({
                 to === 'copy'
                   ? t`A copy is a real folder of its own, and OK keeps it in step with the source: edit the skill here and every copy is refreshed. That stops the moment you hand-edit a copy outside OK — from then on it goes its own way and shows up as a separate skill.`
                   : t`A symlink is a pointer to the source folder rather than a folder of its own. Every location reads the exact same bytes, so nothing can drift, and a location stops working if the source is deleted.`;
-              const question =
-                to === 'copy'
-                  ? t`Replace these symlinks with independent copies?`
-                  : t`Replace these copies with symlinks to the source?`;
-              const paths = targets.map((c) => c.display).join('\n');
-              if (
-                !window.confirm(
-                  `${explainer}\n\n${question}\n\n${paths}\n\n${t`The source folder itself does not move.`}`,
-                )
-              )
-                return;
-              onRunStart?.();
-              toggles.convertLocations?.(targets.map((c) => ({ target: c.target, mode: to })));
+              askToConfirm({
+                title:
+                  to === 'copy'
+                    ? t`Replace these symlinks with independent copies?`
+                    : t`Replace these copies with symlinks to the source?`,
+                description: explainer,
+                paths: targets.map((c) => c.display),
+                footnote: t`The source folder itself does not move.`,
+                confirmLabel:
+                  to === 'copy' ? t`Convert locations to copies` : t`Convert locations to symlinks`,
+                onConfirm: () => {
+                  onRunStart?.();
+                  toggles.convertLocations?.(targets.map((c) => ({ target: c.target, mode: to })));
+                },
+              });
             }}
             disabled={busy}
             data-testid="skill-convert-all"
@@ -631,7 +730,6 @@ export function SkillInstallMenuItems({
               <Trans>Convert locations to symlinks</Trans>
             )}
           </Button>
-          {}
           <Hint
             hint={t`A copy is a real folder of its own, and OK keeps it in step with the source: edit the skill here and every copy is refreshed. That stops the moment you hand-edit a copy outside OK — from then on it goes its own way and shows up as a separate skill. A symlink is a pointer to the source instead, so nothing can drift, but a location stops working if the source is deleted.`}
           >
@@ -649,7 +747,6 @@ export function SkillInstallMenuItems({
         </div>
       ) : null}
       <SkillMenuSeparator menuKind={menuKind} />
-      {}
       <Hint
         hint={t`Opens Settings → Skills Studio, where you link a whole folder into another so both agents read the same skills, and add custom skill roots.`}
       >
@@ -664,6 +761,11 @@ export function SkillInstallMenuItems({
           <Trans>Manage skill folders</Trans>
         </SkillMenuItem>
       </Hint>
+      <SkillInstallConfirmDialog
+        confirmation={confirmation}
+        onClose={() => setConfirmation(null)}
+        onCloseAutoFocus={returnFocusToOpener}
+      />
     </>
   );
 }

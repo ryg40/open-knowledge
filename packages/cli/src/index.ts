@@ -23,6 +23,7 @@ export { redactContent } from './commands/bug-report-redact.ts';
 export {
   ALL_EDITOR_IDS,
   buildManagedServerEntry,
+  canonicalEntryFor,
   droppedManagedKeys,
   EDITOR_LABELS,
   EDITOR_TARGETS,
@@ -35,6 +36,7 @@ export {
   isOwnManagedEntry,
   type McpInstallOptions,
 } from './commands/editors.ts';
+export { registerWindowsProcessStartReader } from './commands/holder-process-start.ts';
 export {
   classifyExistingMcpEntry,
   detectInstalledEditors,
@@ -75,6 +77,11 @@ export {
 export { runStop } from './commands/stop.ts';
 export { type LoadConfigResult, loadConfig } from './config/loader.ts';
 export { type PreviewResult, previewContent } from './content/preview.ts';
+export {
+  findJetsamKillSync,
+  type ProcessTerminationLookup,
+  type ProcessTerminationQuery,
+} from './diagnose/os-termination-evidence.ts';
 export {
   type ExpectedShareRepo,
   type ShareFolderValidationResult,

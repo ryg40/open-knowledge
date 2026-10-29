@@ -42,6 +42,7 @@ import { Field, FieldDescription, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { useSemanticSearchStatus } from '@/hooks/use-semantic-search-status';
+import { okUserHomeLabel } from '@/lib/channel-cli-copy';
 import { useConfigContext } from '@/lib/config-provider';
 import {
   type EmbeddingsKeyTransport,
@@ -363,7 +364,6 @@ export function SearchSection({ transport }: { transport?: EmbeddingsKeyTranspor
               data-testid="settings-search-base-url"
               className="h-8 font-mono text-sm"
             />
-            {}
             <p
               id="settings-search-base-url-message"
               aria-live="polite"
@@ -711,6 +711,7 @@ function EmbeddingsKeyField({
   loaded,
 }: EmbeddingsKeyFieldProps) {
   const { t } = useLingui();
+  const secretsPath = okUserHomeLabel('secrets.yml');
   const [keyInput, setKeyInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -757,9 +758,7 @@ function EmbeddingsKeyField({
             <Trans>
               Sent to <span className="font-medium">{endpointHost}</span> to embed your content.
               Stored on this machine only (in{' '}
-              <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
-                ~/.ok/secrets.yml
-              </code>
+              <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{secretsPath}</code>
               ), never in the project.
             </Trans>
           )}
@@ -879,7 +878,7 @@ function SemanticStatusPanel({ status }: SemanticStatusPanelProps) {
     return (
       <div
         role="alert"
-        className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-1sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+        className="mt-2 rounded-md border border-warning/40 px-3 py-2 text-1sm text-foreground"
         data-testid="settings-search-needs-key"
       >
         <Trans>
@@ -897,7 +896,7 @@ function SemanticStatusPanel({ status }: SemanticStatusPanelProps) {
     return (
       <div
         role="alert"
-        className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-1sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+        className="mt-2 rounded-md border border-warning/40 px-3 py-2 text-1sm text-foreground"
         data-testid="settings-search-restart-required"
       >
         <Trans>
@@ -912,7 +911,7 @@ function SemanticStatusPanel({ status }: SemanticStatusPanelProps) {
     return (
       <div
         role="alert"
-        className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-1sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+        className="mt-2 rounded-md border border-warning/40 px-3 py-2 text-1sm text-foreground"
         data-testid="settings-search-dimensions-mismatch"
       >
         <Trans>
@@ -930,7 +929,7 @@ function SemanticStatusPanel({ status }: SemanticStatusPanelProps) {
     return (
       <div
         role="alert"
-        className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-1sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+        className="mt-2 rounded-md border border-warning/40 px-3 py-2 text-1sm text-foreground"
         data-testid="settings-search-provider-error"
       >
         <Trans>
@@ -1077,9 +1076,9 @@ function TestConnectionMessage({
   children: ReactNode;
 }) {
   const toneClass = {
-    ok: 'border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-200',
-    warn: 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200',
-    error: 'border-destructive/50 bg-destructive/10 text-destructive',
+    ok: 'border-success/40 text-foreground',
+    warn: 'border-warning/40 text-foreground',
+    error: 'border-destructive/50 text-destructive',
   }[tone];
   return (
     <p
@@ -1129,7 +1128,7 @@ function ProviderChangeConfirmDialog({
         <DialogBody>
           <div
             role="alert"
-            className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+            className="rounded-md border border-warning/40 px-3 py-2.5 text-sm text-foreground"
           >
             <ul className="list-disc space-y-1.5 pl-5">
               <li>
@@ -1213,7 +1212,7 @@ function EnableSemanticSearchConfirmDialog({
         <DialogBody>
           <div
             role="alert"
-            className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+            className="rounded-md border border-warning/40 px-3 py-2.5 text-sm text-foreground"
           >
             <p className="mb-2 font-medium">
               <Trans>This sends content off your machine</Trans>
@@ -1228,10 +1227,7 @@ function EnableSemanticSearchConfirmDialog({
               <li>
                 <Trans>
                   Embeddings are computed only when a search runs and are cached locally under{' '}
-                  <code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-xs dark:bg-amber-900">
-                    .ok/local
-                  </code>
-                  .
+                  <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">.ok/local</code>.
                 </Trans>
               </li>
               <li>

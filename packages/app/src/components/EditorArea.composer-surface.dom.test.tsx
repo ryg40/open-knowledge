@@ -1,7 +1,9 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { SidebarProvider } from '@/components/ui/sidebar';
 import { ConfigProvider } from '@/lib/config-provider';
+import { DEFAULT_DOCK_TREE } from '@/lib/dock-tree';
 
 type EditorMode = 'wysiwyg' | 'source';
 
@@ -61,9 +63,6 @@ vi.doMock('@/components/EditorSkeleton', () => ({
 vi.doMock('@/components/EmptyEditorState', () => ({
   EmptyEditorState: () => <div data-testid="empty-editor-state" />,
 }));
-vi.doMock('./TerminalDock', () => ({
-  TerminalDock: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-}));
 vi.doMock('./EditorWorkspace', () => ({
   EditorWorkspace: ({
     renderPane,
@@ -112,12 +111,16 @@ const { EditorArea } = await import('./EditorArea');
 function renderEditorArea(editorMode: EditorMode) {
   return render(
     <ConfigProvider collabUrl={null}>
-      <EditorArea
-        editorMode={editorMode}
-        onModeChange={() => {}}
-        activeTab="timeline"
-        onActiveTabChange={() => {}}
-      />
+      <SidebarProvider>
+        <EditorArea
+          editorMode={editorMode}
+          onModeChange={() => {}}
+          activeTab="timeline"
+          onActiveTabChange={() => {}}
+          dockTree={DEFAULT_DOCK_TREE}
+          onDockTreeChange={() => {}}
+        />
+      </SidebarProvider>
     </ConfigProvider>,
   );
 }

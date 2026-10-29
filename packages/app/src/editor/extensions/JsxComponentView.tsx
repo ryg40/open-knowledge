@@ -6,18 +6,17 @@
 
 import { commentLeafText } from '@inkeep/open-knowledge-core/comments/leaf-text';
 import {
-  incrementJsxActionAborted,
   incrementJsxAutoConvertFailed,
   incrementJsxAutoConvertSucceeded,
   incrementJsxChromeDeleteFailed,
   incrementJsxKeyboardDeleteFailed,
   incrementJsxMoveFailed,
   incrementJsxPopoverCloseRestoreFailed,
-  incrementJsxRenderFailure,
   incrementJsxStuckCopyFailed,
   incrementJsxStuckDeleteFailed,
   type JsxNodeAction,
 } from '@inkeep/open-knowledge-core/metrics/parse-health';
+import { componentPropsBudgetError } from '@inkeep/open-knowledge-core/registry';
 import { Trans, useLingui } from '@lingui/react/macro';
 import type { NodeViewProps } from '@tiptap/core';
 import { NodeViewContent, NodeViewWrapper } from '@tiptap/react';
@@ -34,26 +33,24 @@ import {
 import type { ReactNode } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { ErrorBoundary, type FallbackProps } from 'react-error-boundary';
-import { toast } from 'sonner';
 import { emitStartComment } from '@/comments/store';
 import { Button } from '@/components/ui/button';
 import { useIsEmbedded } from '@/hooks/use-is-embedded';
-import { hashFromDocName } from '@/lib/doc-hash';
+import { hashFromDocName, hashFromMirrorSource } from '@/lib/doc-hash';
 import {
   Popover,
   PopoverAnchor,
   PopoverContent,
   PopoverTrigger,
 } from '../../components/ui/popover.tsx';
+import { ViewInSourceBubbleButton } from '../bubble-menu/ViewInSourceBubbleButton.tsx';
 import { OPT_OUT_ATTR } from '../clipboard/index.ts';
 import { CodePreviewEditModal } from '../components/CodePreviewEditModal';
 import { DescriptorPlaceholder } from '../components/DescriptorPlaceholder.tsx';
-import { boardDocNameFromSrc } from '../components/ExcalidrawEmbed.tsx';
+import { isLiveBoardSrc } from '../components/ExcalidrawEmbed.tsx';
 import { JsxComponentHostProvider } from '../components/jsx-host-context.tsx';
 import { MermaidLightbox } from '../components/Mermaid';
 import { PropPanel } from '../components/PropPanel.tsx';
-import { getEditorDocName } from '../extensions/doc-context.ts';
-import { normalizeDocRelativeMediaRenderProps } from '../extensions/media-render-props.ts';
 import { getWrapperBridgeId } from '../extensions/selection-state-plugin.ts';
 import { useBlockSelection } from '../hooks/use-block-selection.ts';
 import { markUserTyping } from '../observers.ts';
@@ -62,22 +59,32 @@ import {
   resolveDescriptorPlaceholder,
   shouldRenderPlaceholder,
 } from '../registry/resolve-descriptor-placeholder.ts';
+import type { JsxComponentDescriptor } from '../registry/types.ts';
 import { moveCaretAfterNode, placeGapCursorAfterNode } from '../selection/place-caret.ts';
 import {
   consumeAutoOpen,
   createChildNode,
   focusInsertedComponent,
 } from '../slash-command/component-items.tsx';
-import { ALIGNABLE_DESCRIPTOR_NAMES } from '../utils/alignable-descriptors.ts';
+import { authoredText } from '../utils/authored-text.ts';
 import { formatContainerAriaLabel } from '../utils/editor-strings.ts';
 import { getEditorView } from '../utils/get-editor-view.ts';
 import { reconstructSource } from '../utils/reconstruct-source.ts';
-import { sanitizeComponentProps } from '../utils/sanitize-url.ts';
 import {
   autonomousFragmentEditAllowed,
   markAutonomousFragmentEdit,
 } from './autonomous-fragment-edit.ts';
+import { reportJsxActionAborted, resolveJsxActionTarget } from './jsx-node-action.ts';
 import { isSameJsxElement, resolveJsxNodeTarget } from './jsx-node-target.ts';
+import {
+  JSX_WRAPPER_CLASS,
+  jsxChildrenClassName,
+  jsxWrapperDataAttributes,
+  prepareJsxProps,
+  reportJsxRenderFailure,
+  resolveJsxRenderProps,
+  resolveJsxSourceDocName,
+} from './jsx-render-contract.ts';
 
 interface ComponentErrorBoundaryProps {
   children: ReactNode;
@@ -97,18 +104,7 @@ function ComponentErrorBoundary(props: ComponentErrorBoundaryProps) {
     <ErrorBoundary
       resetKeys={[resetKey]}
       onError={(error, info) => {
-        const err = error instanceof Error ? error : new Error(String(error));
-        console.warn(
-          JSON.stringify({
-            event: 'jsx-render-failure',
-            component: descriptorName,
-            rawComponentName: String(rawComponentName ?? '').slice(0, 200),
-            error: String(err),
-            stack: info.componentStack,
-          }),
-        );
-        incrementJsxRenderFailure(descriptorName);
-        onError(err);
+        onError(reportJsxRenderFailure(descriptorName, rawComponentName, error, info));
       }}
       fallbackRender={(fbProps) => (
         <ComponentErrorFallback {...fbProps}>{children}</ComponentErrorFallback>
@@ -120,28 +116,21 @@ function ComponentErrorBoundary(props: ComponentErrorBoundaryProps) {
 }
 
 export function stableHash(value: unknown): string {
+  const budgetError = componentPropsBudgetError(value);
+  if (budgetError) throw new RangeError(budgetError);
+  return stableHashWithinBudget(value);
+}
+
+function stableHashWithinBudget(value: unknown): string {
   if (value === null || typeof value !== 'object') {
     return JSON.stringify(value);
   }
   if (Array.isArray(value)) {
-    return `[${value.map(stableHash).join(',')}]`;
+    return `[${value.map(stableHashWithinBudget).join(',')}]`;
   }
   const entries = Object.entries(value as Record<string, unknown>);
   entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableHash(v)}`).join(',')}}`;
-}
-
-export function extractPrimitiveProps(
-  attrs: Record<string, unknown>,
-  reactNodeNames: ReadonlySet<string>,
-): Record<string, unknown> {
-  const propsObj = (attrs.props ?? {}) as Record<string, unknown>;
-  const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(propsObj)) {
-    if (reactNodeNames.has(key)) continue;
-    result[key] = value;
-  }
-  return sanitizeComponentProps(result);
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableHashWithinBudget(v)}`).join(',')}}`;
 }
 
 interface ElementJsxAttrs extends Record<string, unknown> {
@@ -153,6 +142,42 @@ export function getElementJsxAttrs(attrs: Record<string, unknown>): ElementJsxAt
   return attrs.kind === 'element' ? (attrs as ElementJsxAttrs) : null;
 }
 
+function isMdxJsxAttributeNamed(attribute: unknown, names: ReadonlySet<string>): boolean {
+  if (attribute == null || typeof attribute !== 'object') return false;
+  const { type, name } = attribute as Record<string, unknown>;
+  return type === 'mdxJsxAttribute' && typeof name === 'string' && names.has(name);
+}
+
+export function attrsWithChangedProp(
+  elementAttrs: ElementJsxAttrs,
+  descriptor: Pick<JsxComponentDescriptor, 'props'>,
+  propName: string,
+  value: unknown,
+): ElementJsxAttrs {
+  const legacyNames = descriptor.props.find((prop) => prop.name === propName)?.legacyNames ?? [];
+  const removedNames = new Set(value === undefined ? [propName, ...legacyNames] : legacyNames);
+  const nextProps: Record<string, unknown> = { ...elementAttrs.props };
+  for (const removedName of removedNames) delete nextProps[removedName];
+  if (value !== undefined) nextProps[propName] = value;
+  if (
+    propName === 'src' &&
+    elementAttrs.componentName === 'CommonMarkImage' &&
+    value !== elementAttrs.props.src
+  ) {
+    delete nextProps.sourceUrl;
+  }
+  const attributes = Array.isArray(elementAttrs.attributes) ? elementAttrs.attributes : [];
+  return {
+    ...elementAttrs,
+    attributes:
+      removedNames.size === 0
+        ? attributes
+        : attributes.filter((attribute) => !isMdxJsxAttributeNamed(attribute, removedNames)),
+    props: nextProps,
+    sourceDirty: true,
+  };
+}
+
 const MAX_AUTO_CONVERT_ATTEMPTS = 3;
 
 export function JsxComponentView({ node, editor, extension, getPos, selected }: NodeViewProps) {
@@ -160,6 +185,7 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
   const descriptor = getDescriptor(node.attrs.componentName as string);
   const [renderError, setRenderError] = useState<Error | null>(null);
   const [popoverOpen, setPopoverOpen] = useState(false);
+  const panelInteractedOutside = useRef(false);
   const wasSelected = useRef(false);
 
   const pos = typeof getPos === 'function' ? getPos() : undefined;
@@ -204,21 +230,20 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
   );
 
   const currentProps = (node.attrs.props as Record<string, unknown>) ?? {};
+  const { props: primitiveProps, error: propsError } = prepareJsxProps(node.attrs, descriptor);
   const needsConfig =
     hasEditableProps &&
     descriptor.props.some((p) => {
       if (p.type !== 'string') return false;
       if (!p.required) return false;
       if ('hidden' in p && p.hidden) return false;
-      return !Object.hasOwn(currentProps, p.name);
+      return !Object.hasOwn(primitiveProps, p.name);
     });
 
   const showPlaceholder = shouldRenderPlaceholder(descriptor, currentProps);
   const resolvedPlaceholder = showPlaceholder ? resolveDescriptorPlaceholder(descriptor) : null;
 
   const isSelfClosingLeaf = !descriptor.hasChildren || !!descriptor.isSelfClosing;
-
-  const isAlignable = ALIGNABLE_DESCRIPTOR_NAMES.has(descriptor.name);
 
   const editableSource: { propName: string; language: 'mermaid' | 'latex' } | null =
     descriptor.name === 'MermaidFence'
@@ -257,18 +282,10 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
     wasSelected.current = selected;
   }, [selected, hasEditableProps, isSourceBearing, pos]);
 
-  const primitiveProps = extractPrimitiveProps(node.attrs, descriptor.reactNodePropNames);
-  const translatedProps =
-    descriptor.surface === 'compat' ? descriptor.translateProps(primitiveProps) : primitiveProps;
-  const configuredDocName = (extension.options as { docName?: unknown }).docName;
-  const sourceDocName =
-    typeof configuredDocName === 'string' && configuredDocName
-      ? configuredDocName
-      : getEditorDocName(editor);
-  const renderProps = normalizeDocRelativeMediaRenderProps(
-    descriptor.name,
-    translatedProps,
-    sourceDocName,
+  const renderProps = resolveJsxRenderProps(
+    descriptor,
+    primitiveProps,
+    resolveJsxSourceDocName(extension.options, editor),
   );
   const lightboxRenderChart =
     descriptor.name === 'MermaidFence' && typeof renderProps.chart === 'string'
@@ -280,39 +297,17 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
   useEffect(() => {
     if (!diagramExpandable) setDiagramLightboxOpen(false);
   }, [diagramExpandable]);
-  const boardExpandable =
-    descriptor.name === 'Excalidraw' &&
-    typeof renderProps.src === 'string' &&
-    boardDocNameFromSrc(renderProps.src) !== null;
+  const boardExpandable = descriptor.name === 'Excalidraw' && isLiveBoardSrc(renderProps.src);
   useEffect(() => {
     if (!boardExpandable) setBoardLightboxOpen(false);
   }, [boardExpandable]);
   const resetKey = `${descriptor.name}::${stableHash(primitiveProps)}`;
 
-  const reportAbortedAction = (action: JsxNodeAction, reason: 'changed' | 'removed') => {
-    incrementJsxActionAborted(action);
-    console.warn(
-      JSON.stringify({
-        event: 'jsx-component-action-aborted',
-        action,
-        reason,
-        component: descriptor.name === '*' ? 'wildcard' : descriptor.name,
-        rawComponentName: String(node.attrs.componentName ?? '').slice(0, 200),
-      }),
-    );
-    toast.info(
-      reason === 'removed' ? t`This component was removed.` : t`This component changed. Try again.`,
-    );
-  };
-
-  const resolveActionTarget = (action: JsxNodeAction) => {
-    const target = resolveJsxNodeTarget(editor.state.doc, getPos, node);
-    if (target.kind !== 'current') {
-      reportAbortedAction(action, target.kind);
-      return null;
-    }
-    return target;
-  };
+  const actionContext = { editor, getPos, node, descriptorName: descriptor.name };
+  const reportAbortedAction = (action: JsxNodeAction, reason: 'changed' | 'removed') =>
+    reportJsxActionAborted(actionContext, action, reason);
+  const resolveActionTarget = (action: JsxNodeAction) =>
+    resolveJsxActionTarget(actionContext, action);
 
   const resolveElementActionTarget = (action: JsxNodeAction) => {
     const target = resolveJsxNodeTarget(editor.state.doc, getPos, node);
@@ -455,7 +450,7 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
     return (
       <NodeViewWrapper className="jsx-component-wrapper my-2">
         <div
-          className="text-xs font-mono text-muted-foreground px-2 py-2 border border-destructive/40 rounded bg-destructive/5 flex items-center gap-2"
+          className="text-xs font-mono text-muted-foreground px-2 py-2 border border-destructive/40 rounded flex items-center gap-2"
           contentEditable={false}
           {...{ [OPT_OUT_ATTR]: 'true' }}
         >
@@ -474,6 +469,27 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
           >
             {t`Delete`}
           </button>
+        </div>
+        <NodeViewContent className="component-children" />
+      </NodeViewWrapper>
+    );
+  }
+
+  if (propsError) {
+    return (
+      <NodeViewWrapper className="jsx-component-wrapper my-2" data-jsx-props-error="">
+        <div
+          className="flex flex-wrap items-center gap-2 px-2 py-1 text-xs text-warning"
+          contentEditable={false}
+          {...{ [OPT_OUT_ATTR]: 'true' }}
+        >
+          <span role="status">
+            <Trans>This component is too large to render.</Trans>
+          </span>
+          <ViewInSourceBubbleButton
+            editor={editor}
+            getTargetPosition={() => resolveActionTarget('edit-source')?.pos}
+          />
         </div>
         <NodeViewContent className="component-children" />
       </NodeViewWrapper>
@@ -620,19 +636,8 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
   return (
     <Popover open={popoverOpen} onOpenChange={handleOpenChange}>
       <NodeViewWrapper
-        className="jsx-component-wrapper my-2"
-        data-jsx-component=""
-        data-component-type={descriptor.name.toLowerCase()}
-        data-align={(() => {
-          const rawAlign = currentProps.align;
-          if (rawAlign === 'left' || rawAlign === 'right' || rawAlign === 'center') {
-            return rawAlign;
-          }
-          if (isAlignable) {
-            return 'center';
-          }
-          return undefined;
-        })()}
+        className={JSX_WRAPPER_CLASS}
+        {...jsxWrapperDataAttributes(descriptor, currentProps)}
         data-selected={isInnermostSelected ? 'true' : undefined}
         data-has-child-selected={hasChildSelected ? 'true' : undefined}
         data-range-selected={isRangeEncompassed ? 'true' : undefined}
@@ -645,21 +650,15 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
         {...(!isChildOfComponent
           ? { 'data-drag-handle': '', draggable: 'true' }
           : { draggable: 'false', onDragStart: (e: React.DragEvent) => e.preventDefault() })}
-        data-component-name={descriptor.name}
         onClick={handleBodyClick}
         onKeyDown={handleKeyDown}
       >
-        {}
-        {/* biome-ignore lint/a11y/noStaticElementInteractions: stopPropagation required inside PM NodeView */}
-        <div
+        <div // oxlint-disable-line jsx-a11y/no-static-element-interactions -- stopPropagation required inside PM NodeView
           className="jsx-component-chrome"
           contentEditable={false}
           onMouseDown={(e) => e.stopPropagation()}
           {...{ [OPT_OUT_ATTR]: 'true' }}
         >
-          {}
-
-          {}
           {descriptor.name === 'Embed' &&
             typeof primitiveProps.src === 'string' &&
             /^https?:\/\//i.test(primitiveProps.src) && (
@@ -675,20 +674,18 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
               </a>
             )}
 
-          {}
           {descriptor.name === 'Mirror' &&
-            typeof primitiveProps.src === 'string' &&
-            primitiveProps.src.length > 0 &&
+            authoredText(primitiveProps.src) !== '' &&
             (() => {
-              const mirrorSrc = primitiveProps.src as string;
+              const mirrorSrc = authoredText(primitiveProps.src);
+              const mirrorName = authoredText(primitiveProps.name);
               return (
                 <a
-                  href={hashFromDocName(
-                    mirrorSrc,
-                    typeof primitiveProps.anchor === 'string' && primitiveProps.anchor.length > 0
-                      ? primitiveProps.anchor
-                      : null,
-                  )}
+                  href={
+                    mirrorName !== ''
+                      ? hashFromMirrorSource(mirrorSrc, mirrorName)
+                      : hashFromDocName(mirrorSrc)
+                  }
                   className="jsx-chrome-btn"
                   aria-label={t`Open source doc: ${mirrorSrc}`}
                   title={t`Open source: ${mirrorSrc}`}
@@ -699,7 +696,6 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
               );
             })()}
 
-          {}
           {canMoveUp && (
             <button
               type="button"
@@ -782,7 +778,6 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
             </button>
           )}
 
-          {}
           {editableSource && typeof pos === 'number' ? (
             <button
               type="button"
@@ -795,7 +790,6 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
             </button>
           ) : null}
 
-          {}
           {expandableChart !== null ? (
             <button
               type="button"
@@ -808,7 +802,6 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
             </button>
           ) : null}
 
-          {}
           {boardExpandable ? (
             <button
               type="button"
@@ -821,7 +814,6 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
             </button>
           ) : null}
 
-          {}
           {!isEmbedded && commentLeafText(node).length > 0 && typeof pos === 'number' ? (
             <button
               type="button"
@@ -864,7 +856,6 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
             </button>
           ) : null}
 
-          {}
           <button
             type="button"
             className="jsx-chrome-btn jsx-chrome-btn--delete"
@@ -907,7 +898,6 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
             <Trash2 size={12} aria-hidden="true" />
           </button>
 
-          {}
           {hasEditableProps && (
             <PopoverTrigger asChild>
               <button
@@ -922,8 +912,6 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
           )}
         </div>
 
-        {}
-        {}
         {showPlaceholder && resolvedPlaceholder ? (
           <PopoverAnchor asChild>
             <DescriptorPlaceholder
@@ -978,9 +966,7 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
                   : {})}
               >
                 <NodeViewContent
-                  className={`component-children ${
-                    !descriptor.hasChildren && node.childCount === 0 ? 'min-h-0 m-0 p-0' : ''
-                  }`}
+                  className={jsxChildrenClassName(descriptor, node)}
                   {...(!descriptor.hasChildren || descriptor.isSelfClosing
                     ? { contentEditable: false }
                     : {})}
@@ -990,7 +976,6 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
           </ComponentErrorBoundary>
         )}
 
-        {}
         {descriptor.emptyChildName &&
           !(descriptor.name === 'Tabs' && node.childCount > 0) &&
           (() => {
@@ -1077,21 +1062,23 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
           }}
         />
       ) : null}
-      {}
       {hasEditableProps && (
         <PopoverContent
           side={showPlaceholder ? 'bottom' : 'right'}
           align={showPlaceholder ? 'center' : 'start'}
           sideOffset={showPlaceholder ? -4 : 8}
           className="w-64 p-3 z-60 overflow-y-auto subtle-scrollbar max-h-(--radix-popper-available-height) overscroll-contain"
-          onCloseAutoFocus={
-            isSelfClosingLeaf
-              ? (e) => {
-                  e.preventDefault();
-                  editor.view.focus();
-                }
-              : undefined
-          }
+          onInteractOutside={() => {
+            panelInteractedOutside.current = true;
+          }}
+          onCloseAutoFocus={(e) => {
+            const interactedOutside = panelInteractedOutside.current;
+            panelInteractedOutside.current = false;
+            if (!isSelfClosingLeaf && interactedOutside) return;
+            e.preventDefault();
+            const view = getEditorView(editor);
+            if (view && !view.isDestroyed) view.focus();
+          }}
         >
           <div className="text-xs font-medium text-muted-foreground mb-2">
             <Trans>{propPanelDescriptorLabel} Properties</Trans>
@@ -1106,38 +1093,16 @@ export function JsxComponentView({ node, editor, extension, getPos, selected }: 
               const { pos: p, node: curNode } = target;
               const elementAttrs = getElementJsxAttrs(curNode.attrs);
               if (!elementAttrs) return;
-              const currentNodeProps = elementAttrs.props;
-              const nextProps: Record<string, unknown> = { ...currentNodeProps };
-              const currentAttributes = Array.isArray(curNode.attrs.attributes)
-                ? (curNode.attrs.attributes as unknown[])
-                : [];
-              let nextAttributes = currentAttributes;
-              if (value === undefined) {
-                delete nextProps[propName];
-                nextAttributes = currentAttributes.filter(
-                  (a) =>
-                    !(
-                      a != null &&
-                      typeof a === 'object' &&
-                      (a as Record<string, unknown>).type === 'mdxJsxAttribute' &&
-                      (a as Record<string, unknown>).name === propName
-                    ),
-                );
-              } else {
-                nextProps[propName] = value;
-              }
               editor.view.dispatch(
-                editor.state.tr.setNodeMarkup(p, null, {
-                  ...elementAttrs,
-                  attributes: nextAttributes,
-                  props: nextProps,
-                  sourceDirty: true,
-                }),
+                editor.state.tr.setNodeMarkup(
+                  p,
+                  null,
+                  attrsWithChangedProp(elementAttrs, descriptor, propName, value),
+                ),
               );
               markUserTyping();
             }}
           />
-          {}
           <div className="mt-3 flex justify-end border-t border-border pt-2">
             <Button
               type="button"

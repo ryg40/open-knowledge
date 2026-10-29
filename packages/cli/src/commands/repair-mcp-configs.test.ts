@@ -11,8 +11,8 @@ vi.mock('./init.ts', async (importOriginal) => {
   return { ...actual, writeEditorMcpConfig: vi.fn(actual.writeEditorMcpConfig) };
 });
 
-const CHAIN_ENTRY = buildManagedServerEntry({ mode: 'published' });
-const WIN_CHAIN_ENTRY = buildManagedServerEntry({ mode: 'published', platformName: 'win32' });
+let CHAIN_ENTRY: ReturnType<typeof buildManagedServerEntry>;
+let WIN_CHAIN_ENTRY: ReturnType<typeof buildManagedServerEntry>;
 const CMD_WORKAROUND = {
   command: 'cmd',
   args: ['/c', 'C:\\Users\\me\\AppData\\Roaming\\npm\\ok.cmd', 'mcp'],
@@ -36,6 +36,7 @@ describe('repairMcpConfigs', () => {
   let logEvents: RepairLogEvent[];
 
   beforeEach(() => {
+    vi.stubEnv('OK_CHANNEL', 'stable');
     testDir = resolve(
       tmpdir(),
       `repair-mcp-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -45,10 +46,13 @@ describe('repairMcpConfigs', () => {
     mkdirSync(join(fakeHome, '.claude'), { recursive: true });
     mkdirSync(projectDir, { recursive: true });
     Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+    CHAIN_ENTRY = buildManagedServerEntry({ mode: 'published' });
+    WIN_CHAIN_ENTRY = buildManagedServerEntry({ mode: 'published', platformName: 'win32' });
     logEvents = [];
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
     rmSync(testDir, { recursive: true, force: true });
   });
@@ -177,6 +181,37 @@ describe('repairMcpConfigs', () => {
 
     expect(outcome?.outcome).toBe('canonical');
     expect(readFileSync(configPath, 'utf-8')).toBe(before);
+  });
+
+  it('reads a recognized project launcher on the dev channel without building a launcher for it', () => {
+    const previous = process.env.OK_CHANNEL;
+    process.env.OK_CHANNEL = 'dev';
+    try {
+      const path = join(projectDir, '.mcp.json');
+      writeFileSync(
+        path,
+        JSON.stringify({
+          mcpServers: {
+            'open-knowledge-dev': {
+              command: '/bin/sh',
+              args: ['-l', '-c', '# ok-mcp-dev-v99\nfuture launcher body'],
+            },
+          },
+        }),
+      );
+      const before = readFileSync(path, 'utf-8');
+
+      const result = repairMcpConfigs({ projectDir, home: fakeHome });
+      const outcome = result.outcomes.find(
+        (item) => item.scope === 'project' && item.editorId === 'claude',
+      );
+
+      expect(outcome?.outcome).toBe('canonical');
+      expect(readFileSync(path, 'utf-8')).toBe(before);
+    } finally {
+      if (previous === undefined) delete process.env.OK_CHANNEL;
+      else process.env.OK_CHANNEL = previous;
+    }
   });
 
   it('declines a foreign project entry without writing it', () => {

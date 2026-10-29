@@ -12,6 +12,7 @@ import {
   type PersistedWindowBounds,
   parseAppState,
   removeRecentProject,
+  resolveUpdateMode,
   restoreSurvivorPath,
   type SaveAppStateFs,
   saveAppStateToDir,
@@ -21,6 +22,7 @@ import {
   setProjectWindowBounds,
   setSpellCheckEnabled,
   setTerminalDockState,
+  unrecognizedUpdateModeIn,
   windowRestoreKey,
 } from '../../src/main/state-store.ts';
 
@@ -273,6 +275,7 @@ describe('state-store (terminal full-restart state)', () => {
       terminalVisible: false,
       terminalSnapshot: { tabs: [], activeOrdinal: null },
       agentPanelVisible: false,
+      editorVisible: true,
     });
   });
 
@@ -287,6 +290,7 @@ describe('state-store (terminal full-restart state)', () => {
         activeOrdinal: 1,
       },
       agentPanelVisible: false,
+      editorVisible: true,
     });
     const parsed = parseAppState(JSON.parse(JSON.stringify(state)));
     expect(getTerminalDockState(parsed ?? emptyState(), '/tmp/project')).toEqual(
@@ -320,7 +324,27 @@ describe('state-store (terminal full-restart state)', () => {
         activeOrdinal: null,
       },
       agentPanelVisible: false,
+      editorVisible: true,
     });
+  });
+
+  test('a saved hidden editor round-trips, and a record from before the editor field reads as shown', () => {
+    const hidden = setTerminalDockState(emptyState(), '/tmp/project', {
+      terminalVisible: false,
+      terminalSnapshot: { tabs: [], activeOrdinal: null },
+      agentPanelVisible: false,
+      editorVisible: false,
+    });
+    const reparsed = parseAppState(JSON.parse(JSON.stringify(hidden)));
+    expect(getTerminalDockState(reparsed ?? emptyState(), '/tmp/project').editorVisible).toBe(
+      false,
+    );
+
+    const legacy = parseAppState({
+      recentProjects: [],
+      terminalDockStates: { '/tmp/project': { terminalVisible: true, agentPanelVisible: true } },
+    });
+    expect(getTerminalDockState(legacy ?? emptyState(), '/tmp/project').editorVisible).toBe(true);
   });
 
   test('removing a recent project also removes its terminal state', () => {
@@ -329,6 +353,7 @@ describe('state-store (terminal full-restart state)', () => {
       terminalVisible: true,
       terminalSnapshot: { tabs: [{ ordinal: 1, customLabel: null }], activeOrdinal: 1 },
       agentPanelVisible: false,
+      editorVisible: true,
     });
     expect(removeRecentProject(state, '/tmp/project').terminalDockStates).toEqual({});
   });
@@ -1010,5 +1035,45 @@ describe('state-store (doc restore entries — popped-out note windows)', () => 
     });
 
     expect(parsed?.pendingWindowRestore).toHaveLength(2);
+  });
+});
+
+describe('state-store (update preference fields)', () => {
+  test('a state.json without the update fields loads with no choice, no tombstone, no dismissal', () => {
+    const parsed = parseAppState({ recentProjects: [], schemaVersion: 1 });
+    expect(parsed?.updateMode).toBeNull();
+    expect(parsed?.gaveUpOnVersion).toBeNull();
+    expect(parsed?.dismissedUpdateVersion).toBeNull();
+    expect(parsed?.schemaVersion).toBe(1);
+  });
+
+  test('the update fields round-trip', () => {
+    const parsed = parseAppState({
+      recentProjects: [],
+      updateMode: 'off',
+      gaveUpOnVersion: '0.3.2',
+      dismissedUpdateVersion: '0.3.3',
+    });
+    expect(parsed?.updateMode).toBe('off');
+    expect(parsed?.gaveUpOnVersion).toBe('0.3.2');
+    expect(parsed?.dismissedUpdateVersion).toBe('0.3.3');
+  });
+
+  test('an unrecognized persisted mode never resolves to off', () => {
+    const parsed = parseAppState({ recentProjects: [], updateMode: 'never' });
+    expect(parsed?.updateMode).toBeNull();
+    expect(resolveUpdateMode('never')).toEqual({ mode: 'auto', source: 'default' });
+    expect(resolveUpdateMode(undefined)).toEqual({ mode: 'auto', source: 'default' });
+    expect(resolveUpdateMode('off')).toEqual({ mode: 'off', source: 'user' });
+  });
+
+  test('names an unrecognized persisted mode so the load path can report it', () => {
+    expect(unrecognizedUpdateModeIn({ updateMode: 'never' })).toBe('never');
+    expect(unrecognizedUpdateModeIn({ updateMode: 7 })).toBe('number');
+    expect(unrecognizedUpdateModeIn({ updateMode: 'x'.repeat(100) })).toBe('x'.repeat(64));
+    expect(unrecognizedUpdateModeIn({ updateMode: 'off' })).toBeNull();
+    expect(unrecognizedUpdateModeIn({ updateMode: null })).toBeNull();
+    expect(unrecognizedUpdateModeIn({ recentProjects: [] })).toBeNull();
+    expect(unrecognizedUpdateModeIn(null)).toBeNull();
   });
 });

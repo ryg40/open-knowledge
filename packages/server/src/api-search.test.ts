@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
+import { filesystemIdentity } from '@inkeep/open-knowledge-core/server';
 import { describe, expect, test } from 'vitest';
 import {
   createApiExtension,
@@ -49,11 +50,12 @@ function buildFileIndex(dir: string, base = ''): ReadonlyMap<string, FileIndexEn
       }
     } else if (entry.isFile() && entry.name.endsWith('.md')) {
       const stat = statSync(join(dir, entry.name));
+      const statIdentity = filesystemIdentity(statSync(join(dir, entry.name), { bigint: true }));
       index.set(rel.slice(0, -3), {
         size: stat.size,
         modified: stat.mtime.toISOString(),
         canonicalPath: join(dir, entry.name),
-        inode: stat.ino,
+        inode: statIdentity,
         aliases: [],
         kind: 'markdown',
       });
@@ -272,11 +274,12 @@ describe('GET /api/search', () => {
 
 function indexEntry(canonicalPath: string, kind: FileIndexEntry['kind']): FileIndexEntry {
   const stat = statSync(canonicalPath);
+  const statIdentity = filesystemIdentity(statSync(canonicalPath, { bigint: true }));
   return {
     size: stat.size,
     modified: stat.mtime.toISOString(),
     canonicalPath,
-    inode: stat.ino,
+    inode: statIdentity,
     aliases: [],
     kind,
   };
@@ -732,7 +735,7 @@ describe('GET /api/search — operational budget (D15)', () => {
             size: 1,
             modified: new Date(0).toISOString(),
             canonicalPath: join(dir, 'does-not-exist.csv'),
-            inode: 1,
+            inode: '0:1',
             aliases: [],
             kind: 'file',
           },
@@ -758,7 +761,7 @@ describe('GET /api/search — operational budget (D15)', () => {
           size: 1,
           modified: new Date(0).toISOString(),
           canonicalPath: join(dir, `f${i}`),
-          inode: i + 1,
+          inode: `0:${i + 1}`,
           aliases: [],
           kind: 'file',
         });
@@ -847,10 +850,7 @@ describe('GET /api/search — cold-start readiness', () => {
       writeFileSync(join(dir, 'architecture/overview.md'), '# System Overview\n', 'utf-8');
       const fileIndex = buildFileIndex(dir);
 
-      let resolveReady: () => void = () => {};
-      const ready = new Promise<void>((resolve) => {
-        resolveReady = resolve;
-      });
+      const { promise: ready, resolve: resolveReady } = Promise.withResolvers<void>();
       const ext = createApiExtension({
         hocuspocus: {} as unknown as Parameters<typeof createApiExtension>[0]['hocuspocus'],
         sessionManager: {} as unknown as Parameters<typeof createApiExtension>[0]['sessionManager'],
@@ -890,10 +890,7 @@ describe('GET /api/search — cold-start readiness', () => {
       writeFileSync(join(dir, 'guide.md'), '# Guide\n', 'utf-8');
       const fileIndex = buildFileIndex(dir);
 
-      let rejectReady: (err: Error) => void = () => {};
-      const ready = new Promise<void>((_resolve, reject) => {
-        rejectReady = reject;
-      });
+      const { promise: ready, reject: rejectReady } = Promise.withResolvers<void>();
       ready.catch(() => {});
       const ext = createApiExtension({
         hocuspocus: {} as unknown as Parameters<typeof createApiExtension>[0]['hocuspocus'],
@@ -1003,7 +1000,7 @@ describe('GET /api/search — incremental corpus (per-page document cache)', () 
         size: 0,
         modified: new Date(0).toISOString(),
         canonicalPath: alphaPath,
-        inode: 424242,
+        inode: '0:424242',
         aliases: [],
         kind: 'markdown',
       };

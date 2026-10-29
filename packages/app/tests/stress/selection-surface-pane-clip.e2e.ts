@@ -5,6 +5,7 @@ import type { Page } from '@playwright/test';
 import { EDITOR_BUBBLE_MENU_KEY } from '../../src/editor/bubble-menu/bubble-menu-key';
 import {
   type ApiHelpers,
+  acpCatalogBody,
   blockMarker,
   expect,
   generateTallDoc,
@@ -60,12 +61,13 @@ async function readFloatingSurfaceGeometry(page: Page, selector: string): Promis
         throw new Error(`missing chrome: scroller=${!!scroller} toolbar=${!!toolbar}`);
       }
       const scrollerBox = scroller.getBoundingClientRect();
-      const readRootPx = (name: string): number => {
-        const value = Number.parseFloat(document.documentElement.style.getPropertyValue(name));
-        return Number.isFinite(value) ? value : 0;
+      const readPx = (value: string): number => {
+        const parsed = Number.parseFloat(value);
+        return Number.isFinite(parsed) ? parsed : 0;
       };
       const overlayBandPx =
-        readRootPx('--ask-composer-height') + readRootPx('--conflict-footer-height');
+        readPx(getComputedStyle(scroller).getPropertyValue('--ask-composer-height')) +
+        readPx(document.documentElement.style.getPropertyValue('--conflict-footer-height'));
       const regionTop = toolbar.getBoundingClientRect().bottom;
       const regionBottom = scrollerBox.bottom - overlayBandPx;
       const region = {
@@ -403,6 +405,9 @@ function expectPluginAgreesWithLoop(
   ).toBeLessThanOrEqual(1);
 }
 
+test.beforeEach(async ({ page }) => {
+  await page.route('**/api/acp/catalog', (route) => route.fulfill({ json: acpCatalogBody([]) }));
+});
 test('bubble bar stays in the pane when a tall selection scrolls behind the toolbar', async ({
   page,
   api,
@@ -527,12 +532,13 @@ async function parkSelectionBottomAtRegionFloor(page: Page, inset: number): Prom
         );
         if (!editor) throw new Error('parkSelectionBottomAtRegionFloor: no active editor');
         if (!scroller) throw new Error('parkSelectionBottomAtRegionFloor: no painted scrollport');
-        const readRootPx = (name: string): number => {
-          const value = Number.parseFloat(document.documentElement.style.getPropertyValue(name));
-          return Number.isFinite(value) ? value : 0;
+        const readPx = (value: string): number => {
+          const parsed = Number.parseFloat(value);
+          return Number.isFinite(parsed) ? parsed : 0;
         };
         const overlayBandPx =
-          readRootPx('--ask-composer-height') + readRootPx('--conflict-footer-height');
+          readPx(getComputedStyle(scroller).getPropertyValue('--ask-composer-height')) +
+          readPx(document.documentElement.style.getPropertyValue('--conflict-footer-height'));
         const regionBottom = scroller.getBoundingClientRect().bottom - overlayBandPx;
         const { to } = editor.state.selection;
         const selectionBottom = editor.view.coordsAtPos(to, -1).bottom;

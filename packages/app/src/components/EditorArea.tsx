@@ -1,5 +1,3 @@
-// oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — physical margin/padding/inset utilities predate the rule; drain by swapping ml/mr → ms/me, pl/pr → ps/pe, left/right → start/end, then deleting this line. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-physical-direction-utility
-
 import type { HocuspocusProvider } from '@hocuspocus/provider';
 import { parseExternalSkillDocName } from '@inkeep/open-knowledge-core/constants/cc1';
 import { detectEmbeddedHostFromBrowser } from '@inkeep/open-knowledge-core/constants/embedded-host';
@@ -7,18 +5,18 @@ import {
   isFrontmatterSchemaAsset,
   isMarkdownlintJsonConfig,
 } from '@inkeep/open-knowledge-core/markdown/lint';
-import {
-  PREFERRED_TERMINAL_RIGHT_WIDTH,
-  type TerminalPlacement,
-} from '@inkeep/open-knowledge-core/terminal-layout';
 import { Trans, useLingui } from '@lingui/react/macro';
+import { ChevronLeft, PanelRightClose } from 'lucide-react';
+import { useTheme } from 'next-themes';
 import {
   lazy,
   type ReactNode,
+  type Ref,
   Suspense,
   useDeferredValue,
   useEffect,
   useEffectEvent,
+  useImperativeHandle,
   useLayoutEffect,
   useRef,
   useState,
@@ -28,23 +26,37 @@ import { createPortal } from 'react-dom';
 import { useGroupRef, usePanelRef } from 'react-resizable-panels';
 import { toast } from 'sonner';
 import { AssetPreview } from '@/components/AssetPreview';
+import { DocChangeNotice } from '@/components/DocChangeNotice';
+import { DockWorkspace } from '@/components/DockWorkspace';
 import { DocPanel, type PanelTab } from '@/components/DocPanel';
+import { DocPanelToggle } from '@/components/DocPanelToggle';
 import {
   consumePendingDocPanelTabRequest,
   subscribeToDocPanelTabRequests,
 } from '@/components/doc-panel-events';
 import { EditorSkeleton } from '@/components/EditorSkeleton';
 import { EmptyEditorState } from '@/components/EmptyEditorState';
+import { useAttachFileListHost, useFileListHost } from '@/components/FileListHost';
 import { FolderOverview } from '@/components/FolderOverview';
 import { LargeFileEditorState } from '@/components/LargeFileEditorState';
 import { MountStalledAffordance } from '@/components/MountStalledAffordance';
+import { NothingOpen } from '@/components/NothingOpen';
 import { OkBlobRunnerPage } from '@/components/OkBlobRunnerPage';
 import { PropertyProvider, useProperties } from '@/components/PropertyContext';
+import { PANE_LABEL } from '@/components/pane-icons';
 import { ShareReceiveMissPanel } from '@/components/ShareReceiveMissPanel';
 import { SkillFileViewer } from '@/components/SkillFileViewer';
 import { SkillPreviewTab } from '@/components/SkillPreviewTab';
 import { SettingsDialogShell } from '@/components/settings/SettingsDialogShell';
+import { Button } from '@/components/ui/button';
+import {
+  PANE_CARD_GAP_PX,
+  PaneCard,
+  SECONDARY_PANEL_SURFACE_CLASS,
+} from '@/components/ui/pane-card';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
+import { SidebarInset, useSidebar } from '@/components/ui/sidebar';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   isBlobRunnerNewTabId,
   useDocumentContext,
@@ -63,29 +75,38 @@ import { useDocConflict } from '@/hooks/use-conflicts';
 import { useDocumentStats } from '@/hooks/use-document-stats';
 import { useSelectionStats } from '@/hooks/use-selection-stats';
 import { closeAgentDiff, useAgentDiffView } from '@/lib/agent-diff-store';
-import {
-  type AgentsPanelPointerReleaseDecision,
-  getInitialAgentsPanelWidth,
-  MIN_AGENTS_PANEL_WIDTH,
-  resolveAgentsPanelPointerRelease,
-  writeAgentsPanelWidth,
-} from '@/lib/agents-panel-width-store';
 import type { OkDesktopBridge } from '@/lib/desktop-bridge-types';
 import { docNameFromHash, hashFromDocName, isSameHash } from '@/lib/doc-hash';
 import { getInitialDocPanelWidth, writeDocPanelWidth } from '@/lib/doc-panel-width-store';
+import { dockTerminalPlacement } from '@/lib/dock-arrangement-store';
+import { type DockLayout, dockPaneMinExtent, EMPTY_DOCK_LAYOUT } from '@/lib/dock-layout';
+import type { DockNode } from '@/lib/dock-tree';
+import { focusAwayFromHiddenEditor, focusWaitsForEditor } from '@/lib/editor-hidden-focus';
+import { type EditorSidebar, resolveEditorSidebarFit } from '@/lib/editor-sidebar-fit';
 import { matchesKeyboardShortcut } from '@/lib/keyboard-shortcuts';
 import { subscribeLocalMenuAction } from '@/lib/local-menu-action-bus';
 import { isNoteWindow } from '@/lib/note-window-mode';
 import { isOverlayLayerOpen } from '@/lib/overlay-layers';
+import type { PaneId } from '@/lib/pane-visibility-store';
 import { ProfilerBoundary } from '@/lib/perf';
+import { moveHostPreservingScroll, observeHostScrollRestore } from '@/lib/preserve-subtree-scroll';
+import { revealEditor, revealEditorBeforeActing } from '@/lib/reveal-editor';
 import {
   matchesShareReceiveMiss,
   pendingReceiveNavStore,
 } from '@/lib/share/pending-receive-nav-store';
 import { RIGHT_COLLAPSE_THRESHOLD, resolvePartition } from '@/lib/sidebar-partition';
-import { applyToggle, readPins, resolveEffectiveState } from '@/lib/sidebar-pin-store';
+import {
+  applyToggleAtEveryWidth,
+  openIntentAfterPartitionChange,
+  readPins,
+  resolveEffectiveState,
+} from '@/lib/sidebar-pin-store';
+import { documentPanelSide, useFileSidebarSide } from '@/lib/sidebar-side-store';
 import { closeTimelineDiff, useTimelineDiffView } from '@/lib/timeline-diff-store';
+import { EditorContentOnScreenContext } from '@/lib/use-editor-pane-on-screen';
 import { useSettingsRoute } from '@/lib/use-settings-route';
+import { cn } from '@/lib/utils';
 import { setViewMenuState } from '@/lib/view-menu-state-store';
 import { withViewTransition } from '@/lib/view-transition';
 import { useSyncStatus } from '@/presence/use-sync-status';
@@ -102,65 +123,142 @@ import {
 } from './EditorWorkspace';
 import { shouldPaintOverlay } from './editor-area-overlay';
 import {
-  describeRailFloorShortfall,
-  describeRailWidthShortfall,
   type RailPanelSpaceRefusal,
-  type RailPanelSpaceResult,
-  type RailWidthShortfall,
+  reportUnexpectedPanelGroupFailure,
   resolveRailPanelSpace,
   resolveRailPanelSpacePx,
 } from './editor-area-panel-space';
-import {
-  AGENTS_COLUMN_ID,
-  accountRailLayout,
-  DOC_PANEL_ID,
-  findResidualPanelId,
-  TERMINAL_COLUMN_ID,
-} from './editor-area-rail-registry';
+import { DOC_PANEL_ID, findResidualPanelId } from './editor-area-rail-registry';
 import { computeStickyRepinLayout } from './editor-area-sticky-repin';
-import {
-  RIGHT_TERMINAL_PANEL_MIN_WIDTH_PX,
-  resolveRightRailAdmission,
-} from './right-rail-admission';
 import { isSlidesHost } from './slides-host-gate';
-import { TerminalDock } from './TerminalDock';
-import { TerminalRevealTab } from './TerminalRevealTab';
+import { useLiveXtermTheme } from './use-live-xterm-theme';
 
 const LazyActivityModeContent = lazy(async () => {
   const mod = await import('@/components/ActivityModeContent');
   return { default: mod.ActivityModeContent };
 });
 
-const PANEL_GROUP_UNAVAILABLE_MESSAGE = /^Could not find Group with id "/;
 const BLOCKED_RAIL_LAYOUT_RETRY_DEADLINE_MS = 60_000;
+const DESTINATION_FOCUS_DEADLINE_MS = 10_000;
 
-type AgentsPanelCloseRetryContext = {
-  readonly decision: 'close';
-  readonly targetWidthPx: 0;
+function measureSidebarUnitWidth(element: HTMLElement | null, fallbackWidthPx: number | null) {
+  const width = element?.getBoundingClientRect().width;
+  return width != null && width > 0 ? width : fallbackWidthPx;
+}
+
+type SidebarFitContext = {
+  widthPx: number | null;
+  filesDockWidth: string;
+  filesPresent: boolean;
+  informationWidthPx: number;
+  filesIntentOpen: boolean;
+  informationIntentOpen: boolean;
+  preferredSidebar: EditorSidebar | null;
 };
 
-type AgentsPanelPointerReleaseRetryContext =
-  | AgentsPanelCloseRetryContext
-  | { readonly decision: 'restore-preferred'; readonly targetWidthPx: number }
-  | { readonly decision: 'settle-minimum'; readonly targetWidthPx: number }
-  | { readonly decision: 'commit-preferred'; readonly targetWidthPx: number };
+function resolveFilesDockWidthPx(filesDockWidth: string): number {
+  const filesWidth = Number.parseFloat(filesDockWidth);
+  return filesDockWidth.endsWith('rem')
+    ? filesWidth * Number.parseFloat(getComputedStyle(document.documentElement).fontSize)
+    : filesWidth;
+}
 
-type RailLayoutSyncRetryContext = {
-  readonly decision: 'sync-rail-columns' | 'sync-doc-presence';
+function sidebarFitWidthBucket(context: SidebarFitContext, widthPx: number | null): string {
+  const availablePx = widthPx == null ? Infinity : widthPx - DOC_USABLE_MIN_WIDTH_PX;
+  const filesPx = context.filesPresent ? resolveFilesDockWidthPx(context.filesDockWidth) : 0;
+  const informationPx = context.informationWidthPx + 1;
+  return [0, filesPx, informationPx, filesPx + informationPx]
+    .map((thresholdPx) => (availablePx >= thresholdPx ? '1' : '0'))
+    .join('');
+}
+
+function docPanelDockReadyFor(innerWidthPx: number | null, docPanelWidthPx: number): boolean {
+  return innerWidthPx == null || innerWidthPx >= docPanelWidthPx + DOC_USABLE_MIN_WIDTH_PX + 1;
+}
+
+function resolveCurrentEditorSidebarFit(
+  context: SidebarFitContext,
+  informationPresent: boolean,
+  filesOpen = context.filesIntentOpen,
+  informationOpen = context.informationIntentOpen,
+  preferred = context.preferredSidebar,
+  widthPx = context.widthPx,
+) {
+  const filesWidthPx = resolveFilesDockWidthPx(context.filesDockWidth);
+  return resolveEditorSidebarFit({
+    widthPx,
+    filesWidthPx: context.filesPresent ? filesWidthPx : null,
+    informationWidthPx: informationPresent ? context.informationWidthPx : null,
+    documentMinimumPx: DOC_USABLE_MIN_WIDTH_PX,
+    filesOpen,
+    informationOpen,
+    preferred,
+  });
+}
+
+type FilesRequestCoordinatorInputs = {
+  fit: SidebarFitContext;
+  editorCardRef: { current: HTMLDivElement | null };
+  docSlotPresent: boolean;
+  setPreferredSidebar: (preferred: EditorSidebar | null) => void;
+  setDocPanelCover: (open: boolean) => void;
+  setPendingDocPanelDestination: (destination: null) => void;
+  setFilesCanDock: (canDock: boolean) => void;
+};
+
+function useFilesRequestCoordinator(inputs: FilesRequestCoordinatorInputs) {
+  const current = useRef(inputs);
+  useLayoutEffect(() => {
+    current.current = inputs;
+  });
+  const [coordinate] = useState(() => (open: boolean) => {
+    const {
+      fit,
+      editorCardRef,
+      docSlotPresent,
+      setPreferredSidebar,
+      setDocPanelCover,
+      setPendingDocPanelDestination,
+      setFilesCanDock,
+    } = current.current;
+    if (!fit.filesPresent) return null;
+    const result = resolveCurrentEditorSidebarFit(
+      fit,
+      docSlotPresent,
+      open,
+      fit.informationIntentOpen,
+      'files',
+      measureSidebarUnitWidth(editorCardRef.current, fit.widthPx),
+    );
+    if (open) {
+      setPreferredSidebar(result.mode === 'both' ? null : 'files');
+      setDocPanelCover(false);
+      setPendingDocPanelDestination(null);
+    } else if (fit.preferredSidebar === 'files') {
+      setPreferredSidebar(null);
+    }
+    setFilesCanDock(result.filesDocked);
+    return result.filesDocked;
+  });
+  return coordinate;
+}
+
+type RailLayoutRetryContext = {
+  readonly decision: 'sync-doc-presence' | 'show-editor' | 'observed-doc-width';
   readonly targetWidthPx: number;
 };
 
-type AgentsPanelKeyboardRetryContext = {
-  readonly decision: 'keyboard-settle-minimum';
-  readonly targetWidthPx: typeof MIN_AGENTS_PANEL_WIDTH;
-};
-
-type RailLayoutRetryContext =
-  | AgentsPanelPointerReleaseRetryContext
-  | AgentsPanelKeyboardRetryContext
-  | RailLayoutSyncRetryContext;
-
 type RailLayoutRetryOutcome = 'applied' | 'blocked' | 'failed';
+
+type DocPanelPinMiss =
+  | { readonly cause: 'dragging' | 'group-missing' | 'layout-without-doc-panel' }
+  | { readonly cause: 'write-threw'; readonly writeError: string }
+  | { readonly cause: 'panel-space-unresolved'; readonly refusal: RailPanelSpaceRefusal }
+  | {
+      readonly cause: 'width-missed';
+      readonly pinnedWidthPx: number;
+      readonly landedWidthPx: number;
+    };
 
 type RailLayoutRetryController = {
   frameId: number;
@@ -171,38 +269,6 @@ type RailLayoutRetryController = {
 type RailLayoutRetryControllerRef = {
   current: RailLayoutRetryController;
 };
-
-function createAgentsPanelPointerReleaseRetryContext(
-  decision: AgentsPanelPointerReleaseDecision,
-): AgentsPanelPointerReleaseRetryContext {
-  switch (decision.kind) {
-    case 'close':
-      return { decision: decision.kind, targetWidthPx: 0 };
-    case 'restore-preferred':
-    case 'settle-minimum':
-    case 'commit-preferred':
-      return { decision: decision.kind, targetWidthPx: decision.widthPx };
-    default: {
-      const exhaustiveDecision: never = decision;
-      return exhaustiveDecision;
-    }
-  }
-}
-
-function reportUnexpectedPanelGroupFailure(
-  event: string,
-  error: unknown,
-  context?: RailLayoutRetryContext,
-) {
-  if (error instanceof Error && PANEL_GROUP_UNAVAILABLE_MESSAGE.test(error.message)) return;
-  console.warn(
-    JSON.stringify({
-      event,
-      error: error instanceof Error ? error.message : String(error),
-      ...context,
-    }),
-  );
-}
 
 function cancelRailLayoutRetry(retryRef: RailLayoutRetryControllerRef) {
   if (retryRef.current.frameId !== 0) cancelAnimationFrame(retryRef.current.frameId);
@@ -216,31 +282,23 @@ function runRailLayoutRetry({
   retryRef,
   attempt,
   context,
-  onComplete,
-  onExhausted,
+  describeMiss,
 }: {
   retryRef: RailLayoutRetryControllerRef;
   attempt: () => RailLayoutRetryOutcome;
   context: RailLayoutRetryContext;
-  onComplete?: () => void;
-  onExhausted?: () => void;
+  describeMiss?: () => DocPanelPinMiss | null;
 }) {
   cancelRailLayoutRetry(retryRef);
   retryRef.current.context = context;
   const deadlineTimestamp = performance.now() + BLOCKED_RAIL_LAYOUT_RETRY_DEADLINE_MS;
-  const completeRetry = () => {
-    cancelRailLayoutRetry(retryRef);
-    onComplete?.();
-  };
   const completeExhaustedRetry = () => {
     cancelRailLayoutRetry(retryRef);
     reportUnexpectedPanelGroupFailure(
       'rail-layout-retry-exhausted',
       new Error('Rail layout did not apply within the retry budget'),
-      context,
+      { ...context, ...describeMiss?.() },
     );
-    onExhausted?.();
-    onComplete?.();
   };
   retryRef.current.deadlineTimer = setTimeout(
     completeExhaustedRetry,
@@ -255,7 +313,7 @@ function runRailLayoutRetry({
     const outcome = attempt();
     switch (outcome) {
       case 'applied':
-        completeRetry();
+        cancelRailLayoutRetry(retryRef);
         return;
       case 'blocked':
         retryRef.current.frameId = requestAnimationFrame((timestamp) =>
@@ -311,17 +369,11 @@ function PaneDocumentToolbar({
   provider,
   isSourceMode,
   onModeChange,
-  isPanelCollapsed,
-  onTogglePanel,
-  reserveRightGutter,
 }: {
   docName: string;
   provider: HocuspocusProvider;
   isSourceMode: boolean;
   onModeChange: (mode: EditorMode) => void;
-  isPanelCollapsed: boolean;
-  onTogglePanel: () => void;
-  reserveRightGutter: boolean;
 }) {
   const { requestAddProperty } = useProperties();
   const syncStatus = useSyncStatus(provider);
@@ -345,9 +397,6 @@ function PaneDocumentToolbar({
       showAddPropertyButton={!isSourceMode}
       onAddProperty={() => requestAddProperty(docName)}
       frontmatterProblems={missingProperties}
-      isPanelCollapsed={isPanelCollapsed}
-      onTogglePanel={onTogglePanel}
-      reserveRightGutter={reserveRightGutter}
     />
   );
 }
@@ -361,27 +410,10 @@ const LazyAgentDiffPane = lazy(async () => {
   return { default: mod.AgentDiffPane };
 });
 
-export const MAX_RAIL_PIN_EXHAUSTED_REPORTS = 5;
-
-type RailPinOutcome =
-  | { readonly stage: 'pinned' }
-  | { readonly stage: 'group-missing' }
-  | { readonly stage: 'read-failed' }
-  | { readonly stage: 'panel-space-unresolved'; readonly refusal: RailPanelSpaceRefusal }
-  | { readonly stage: 'layout-unaccounted'; readonly unaccountedIds: readonly string[] }
-  | { readonly stage: 'no-residual-panel' }
-  | { readonly stage: 'no-pinned-columns' }
-  | { readonly stage: 'pins-do-not-fit'; readonly shortfall: Record<string, RailWidthShortfall> }
-  | { readonly stage: 'write-failed' }
-  | { readonly stage: 'verify-failed' }
-  | { readonly stage: 'width-shortfall'; readonly shortfall: Record<string, RailWidthShortfall> };
-
-type RailPinExhaustedTrigger = 'rail-column-sync' | 'doc-slot-presence';
-
 const DOC_PANEL_MIN_WIDTH_PX = 300;
+const DOC_USABLE_MIN_WIDTH_PX = 300;
 const DOC_PANEL_MIN_SIZE = `${DOC_PANEL_MIN_WIDTH_PX}px`;
 const DOC_PANEL_MAX_SIZE = '600px';
-
 interface SessionPanelPlacement {
   readonly container: HTMLElement | null;
   readonly isShowing: boolean;
@@ -393,32 +425,54 @@ export interface SessionPlacements {
   readonly editorRegion: HTMLElement | null;
 }
 
+type PanesOnScreen = Readonly<Record<PaneId, boolean>>;
+
+export interface EditorAreaHandle {
+  panesOnScreen(): PanesOnScreen;
+}
+
+function hasExtent(element: HTMLElement | null): boolean {
+  if (element == null) return false;
+  const { width, height } = element.getBoundingClientRect();
+  return width > 0 && height > 0;
+}
+
+export interface WorkspaceHeaderChrome {
+  readonly leading: ReactNode;
+  readonly trailing: ReactNode;
+  readonly sidebarSwap: boolean;
+}
+
 interface EditorAreaProps {
+  ref?: Ref<EditorAreaHandle>;
+  onPaneExtentChange?: () => void;
   editorMode: EditorMode;
   onModeChange: (mode: EditorMode) => void;
   activeTab: PanelTab;
   onActiveTabChange: (tab: PanelTab) => void;
   terminalBridge?: OkDesktopBridge | null;
+  editorVisible?: boolean;
   terminalVisible?: boolean;
-  terminalPlacement?: TerminalPlacement;
-  terminalRightWidth?: number;
-  onTerminalVisibleChange?: (visible: boolean) => void;
-  onTerminalRightWidthChange?: (width: number) => void;
   agentsVisible?: boolean;
-  onAgentsVisibleChange?: (visible: boolean) => void;
+  dockTree: DockNode;
+  onDockTreeChange: (update: (tree: DockNode) => DockNode) => void;
   onSessionPlacements?: (placements: SessionPlacements) => void;
-  onRevealAgents?: () => void;
-  renderWorkspaceHeader?: (tabs: ReactNode) => ReactNode;
+  renderWorkspaceHeader?: (tabs: ReactNode, chrome: WorkspaceHeaderChrome) => ReactNode;
 }
 
-function renderTabsWithoutHeader(tabs: ReactNode): ReactNode {
-  return tabs;
+function renderTabsWithoutHeader(tabs: ReactNode, chrome: WorkspaceHeaderChrome): ReactNode {
+  return (
+    <>
+      {chrome.leading}
+      {tabs}
+      {chrome.trailing}
+    </>
+  );
 }
 
 export function EditorArea(props: EditorAreaProps) {
   return (
     <ProfilerBoundary name="editor-area">
-      {}
       <PropertyProvider>
         <EditorAreaInner {...props} />
         <SettingsDialogPortal />
@@ -440,25 +494,112 @@ function SettingsDialogPortal() {
   );
 }
 
+function useDocPanelHost() {
+  const [host] = useState(() => {
+    const element = document.createElement('div');
+    element.className = 'flex h-full min-h-0 w-full flex-col';
+    return element;
+  });
+  const dockTarget = useRef<HTMLDivElement | null>(null);
+  const coverTarget = useRef<HTMLDivElement | null>(null);
+  useEffect(() => observeHostScrollRestore(host, host), [host]);
+  const [dockRef] = useState(() => (target: HTMLDivElement) => {
+    dockTarget.current = target;
+    if (coverTarget.current == null && host.parentNode !== target) {
+      moveHostPreservingScroll(host, target);
+    }
+    return () => {
+      if (dockTarget.current === target) dockTarget.current = null;
+      if (host.parentNode === target) target.removeChild(host);
+    };
+  });
+  const [coverRef] = useState(() => (target: HTMLDivElement) => {
+    coverTarget.current = target;
+    if (host.parentNode !== target) moveHostPreservingScroll(host, target);
+    return () => {
+      if (coverTarget.current === target) coverTarget.current = null;
+      if (host.parentNode !== target) return;
+      const dock = dockTarget.current;
+      if (dock?.isConnected) moveHostPreservingScroll(host, dock);
+      else target.removeChild(host);
+    };
+  });
+  return { host, dockRef, coverRef };
+}
+
+function useFileListSlot() {
+  const [node, setNode] = useState<HTMLDivElement | null>(null);
+  const nodeRef = useRef<HTMLDivElement | null>(null);
+  const [slotRef] = useState(() => (target: HTMLDivElement | null) => {
+    setNode(target);
+    nodeRef.current = target;
+  });
+  return { node, nodeRef, slotRef };
+}
+
+function escapeBelongsToCover(
+  event: KeyboardEvent,
+  coverSelector: string,
+  opener: HTMLElement | null,
+): boolean {
+  const target = event.target;
+  if (!(target instanceof Element)) return true;
+  const doc = target.ownerDocument;
+  if (target === doc.body || target === doc.documentElement) return true;
+  return target.closest(coverSelector) !== null || target === opener;
+}
+
+function useDocPanelDestinationCompletion(
+  coverOpen: boolean,
+  setPendingDestination: (destination: null) => void,
+  setCoverOpen: (open: boolean) => void,
+  setDestinationFocusDocName: (docName: string) => void,
+) {
+  const coverOpenRef = useRef(coverOpen);
+  useLayoutEffect(() => {
+    coverOpenRef.current = coverOpen;
+  }, [coverOpen]);
+  const [complete] = useState(() => (target?: HTMLElement) => {
+    if (!coverOpenRef.current) return;
+    setPendingDestination(null);
+    setCoverOpen(false);
+    const editorDocName = target?.matches('.ProseMirror, .cm-content')
+      ? target.closest<HTMLElement>('[data-editor-activity-mount]')?.dataset.docName
+      : undefined;
+    if (editorDocName !== undefined) {
+      setDestinationFocusDocName(editorDocName);
+      return;
+    }
+    requestAnimationFrame(() => {
+      if (target?.isConnected && target.getClientRects().length > 0) {
+        target.focus({ preventScroll: true });
+      }
+    });
+  });
+  return { complete, coverOpenRef };
+}
+
 function EditorAreaInner({
+  ref,
+  onPaneExtentChange,
   editorMode,
   onModeChange,
   activeTab,
   onActiveTabChange,
   terminalBridge,
+  editorVisible = true,
   terminalVisible = false,
-  terminalPlacement = 'bottom',
-  terminalRightWidth,
-  onTerminalVisibleChange,
-  onTerminalRightWidthChange,
   agentsVisible = false,
-  onAgentsVisibleChange,
+  dockTree,
+  onDockTreeChange,
   onSessionPlacements,
-  onRevealAgents,
   renderWorkspaceHeader = renderTabsWithoutHeader,
 }: EditorAreaProps) {
   const { t } = useLingui();
   const noteWindow = isNoteWindow();
+  const cardLook = !noteWindow;
+  const cardVariant = cardLook ? 'card' : 'flat';
+  const terminalAvailable = terminalBridge != null;
   const {
     activeDocName,
     activeProvider,
@@ -516,6 +657,7 @@ function EditorAreaInner({
     const agentPanelOpen = docPanelMode === 'agent' && docPanelAgentId !== null;
     if (!agentPanelOpen) closeAgentDiff();
   }, [docPanelMode, docPanelAgentId]);
+  const activeDocConflict = useDocConflict(activeDocName);
   const pendingReceiveNav = useSyncExternalStore(
     pendingReceiveNavStore.subscribe,
     pendingReceiveNavStore.getSnapshot,
@@ -525,51 +667,130 @@ function EditorAreaInner({
 
   const [embeddedHost] = useState(() => detectEmbeddedHostFromBrowser());
   const isEmbedded = embeddedHost !== null;
-  const [rightPartition, setRightPartition] = useState(() =>
+  const [initialRightPartition] = useState(() =>
     resolvePartition(embeddedHost, window.innerWidth, 'right'),
   );
-  const rightPartitionRef = useRef(rightPartition);
-  useEffect(() => {
-    rightPartitionRef.current = rightPartition;
-  }, [rightPartition]);
   const panelRef = usePanelRef();
-  const agentsColumnPanelRef = usePanelRef();
-  const terminalColumnPanelRef = usePanelRef();
   const [initialRightCollapsed] = useState(() => {
     const pins = readPins();
-    return resolveEffectiveState('right', rightPartition, pins) === 'collapsed';
+    return resolveEffectiveState('right', initialRightPartition, pins) === 'collapsed';
   });
   const [isCollapsed, setIsCollapsed] = useState(initialRightCollapsed);
   const isCollapsedRef = useRef(isCollapsed);
+  const [docPanelIntentOpen, setDocPanelIntentOpen] = useState(!initialRightCollapsed);
+  useEffect(() => {
+    const mql = window.matchMedia(`(min-width: ${RIGHT_COLLAPSE_THRESHOLD}px)`);
+    const onChange = () => {
+      const partition = resolvePartition(embeddedHost, window.innerWidth, 'right');
+      const intent = openIntentAfterPartitionChange('right', partition, readPins());
+      if (intent !== undefined) setDocPanelIntentOpen(intent);
+    };
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, [embeddedHost]);
+  const [docPanelCover, setDocPanelCover] = useState(false);
+  const [pendingDocPanelDestination, setPendingDocPanelDestination] = useState<{
+    docName: string;
+    allowMissing: boolean;
+    onReady?: () => void;
+    completion: 'synced' | 'navigated';
+  } | null>(null);
+  const [destinationFocusDocName, setDestinationFocusDocName] = useState<string | null>(null);
+  const pendingDocPanelDestinationRef = useRef(pendingDocPanelDestination);
+  useLayoutEffect(() => {
+    pendingDocPanelDestinationRef.current = pendingDocPanelDestination;
+  }, [pendingDocPanelDestination]);
+  const { complete: completeDocPanelDestination, coverOpenRef: docPanelCoverOpenRef } =
+    useDocPanelDestinationCompletion(
+      docPanelCover,
+      setPendingDocPanelDestination,
+      setDocPanelCover,
+      setDestinationFocusDocName,
+    );
+  function reportCoveredDiffFailure() {
+    if (docPanelCoverOpenRef.current) toast.error(t`Diff unavailable`);
+  }
+  const [editorCardWidthPx, setEditorCardWidthPx] = useState<number | null>(null);
+  const [innerWidthPx, setInnerWidthPx] = useState<number | null>(null);
+  const liveEditorCardWidthPxRef = useRef<number | null>(null);
+  const liveInnerWidthPxRef = useRef<number | null>(null);
+  const [preferredSidebar, setPreferredSidebar] = useState<EditorSidebar | null>(null);
+  const docPanelBackRef = useRef<HTMLButtonElement | null>(null);
+  const docPanelDockFocusRef = useRef<HTMLElement | null>(null);
+  const docPanelCoverOpenerRef = useRef<HTMLElement | null>(null);
+  const {
+    host: docPanelHost,
+    dockRef: docPanelDockRef,
+    coverRef: docPanelCoverRef,
+  } = useDocPanelHost();
+  useEffect(() => {
+    const trackFocus = (event: FocusEvent) => {
+      if (event.target === document.body) return;
+      docPanelDockFocusRef.current =
+        event.target instanceof HTMLElement && docPanelHost.contains(event.target)
+          ? event.target
+          : null;
+    };
+    document.addEventListener('focusin', trackFocus, true);
+    return () => document.removeEventListener('focusin', trackFocus, true);
+  }, [docPanelHost]);
+  const {
+    cover: filesCover,
+    dismissCover: dismissFilesCover,
+    setCanDock: setFilesCanDock,
+    registerOpenRequestHandler: registerFilesOpenRequestHandler,
+    registerCoverSelectionHandler: registerFilesCoverSelectionHandler,
+    open: filesIntentOpen,
+    width: filesDockWidth,
+  } = useSidebar();
+  const fileListHost = useFileListHost();
+  const fileSidebarSide = useFileSidebarSide();
+  const docPanelSide = fileListHost != null ? documentPanelSide(fileSidebarSide) : 'end';
+  const [filesCoverTarget, setFilesCoverTarget] = useState<HTMLDivElement | null>(null);
 
-  const [agentsContainer, setAgentsContainer] = useState<HTMLDivElement | null>(null);
-  const [rightTerminalContainer, setRightTerminalContainer] = useState<HTMLDivElement | null>(null);
+  const [agentsContainer, setAgentsContainer] = useState<HTMLElement | null>(null);
+  const [terminalContainer, setTerminalContainer] = useState<HTMLDivElement | null>(null);
   const [workspaceHeaderContainer, setWorkspaceHeaderContainer] = useState<HTMLDivElement | null>(
     null,
   );
-  const [workspaceColumnEl, setWorkspaceColumnEl] = useState<HTMLDivElement | null>(null);
-  const [bottomTerminalContainer, setBottomTerminalContainer] = useState<HTMLDivElement | null>(
-    null,
-  );
+  const [workspaceColumnEl, setWorkspaceColumnEl] = useState<HTMLElement | null>(null);
   const [terminalEditorRegion, setTerminalEditorRegion] = useState<HTMLDivElement | null>(null);
+  const { resolvedTheme } = useTheme();
+  const xtermBackground = useLiveXtermTheme(resolvedTheme).background;
 
-  const agentsColumnPresent = !noteWindow && agentsVisible;
-  const terminalColumnPresent = !noteWindow && terminalVisible && terminalPlacement === 'right';
-  const [agentsColumnCollapsed, setAgentsColumnCollapsed] = useState(false);
-  const [terminalColumnCollapsed, setTerminalColumnCollapsed] = useState(false);
-  const [agentsShowingHold, setAgentsShowingHold] = useState(false);
-  const [terminalShowingHold, setTerminalShowingHold] = useState(false);
-  const resizableRailColumnPresent = terminalColumnPresent || agentsColumnPresent;
-  const rightRevealTabPresent =
-    !noteWindow && (!agentsVisible || agentsColumnCollapsed) && onRevealAgents != null;
-  const terminalContainer =
-    terminalPlacement === 'right' ? rightTerminalContainer : bottomTerminalContainer;
+  const agentsUnitShown = !noteWindow && agentsVisible;
+  const terminalUnitShown = !noteWindow && terminalAvailable && terminalVisible;
+  const terminalPlacement = dockTerminalPlacement(dockTree);
+  const [dockLayout, setDockLayout] = useState<DockLayout>(EMPTY_DOCK_LAYOUT);
+  const editorVisibleRef = useRef(editorVisible);
+  const editorCardRef = useRef<HTMLDivElement | null>(null);
+  const [paneVisibilityWhileEditorShown, setPaneVisibilityWhileEditorShown] = useState({
+    terminalVisible,
+    agentsVisible,
+  });
+  if (
+    editorVisible &&
+    (paneVisibilityWhileEditorShown.terminalVisible !== terminalVisible ||
+      paneVisibilityWhileEditorShown.agentsVisible !== agentsVisible)
+  ) {
+    setPaneVisibilityWhileEditorShown({ terminalVisible, agentsVisible });
+  }
+  const editorVisibleBeforeRef = useRef(editorVisible);
+  useLayoutEffect(() => {
+    const wasVisible = editorVisibleBeforeRef.current;
+    editorVisibleBeforeRef.current = editorVisible;
+    editorVisibleRef.current = editorVisible;
+    if (editorVisible) {
+      if (!wasVisible && focusWaitsForEditor()) terminalEditorRegion?.focus();
+      return;
+    }
+    const card = editorCardRef.current;
+    if (card?.contains(document.activeElement)) focusAwayFromHiddenEditor();
+  }, [editorVisible, terminalEditorRegion]);
   const terminalShowing =
-    terminalVisible &&
-    terminalContainer != null &&
-    (terminalPlacement !== 'right' || !terminalColumnCollapsed || terminalShowingHold);
+    terminalUnitShown && terminalContainer != null && dockLayout.panes.has('terminal');
   const agentsShowing =
-    agentsColumnPresent && (!agentsColumnCollapsed || agentsShowingHold) && agentsContainer != null;
+    agentsUnitShown && agentsContainer != null && dockLayout.panes.has('agents');
   useEffect(() => {
     onSessionPlacements?.({
       terminal: { container: terminalContainer, isShowing: terminalShowing },
@@ -584,10 +805,30 @@ function EditorAreaInner({
     agentsShowing,
     terminalEditorRegion,
   ]);
-  useEffect(() => {
-    if (!agentsColumnPresent) setAgentsShowingHold(false);
-    if (!terminalColumnPresent) setTerminalShowingHold(false);
-  }, [agentsColumnPresent, terminalColumnPresent]);
+
+  const onPaneExtentChangeRef = useRef(onPaneExtentChange);
+  useLayoutEffect(() => {
+    onPaneExtentChangeRef.current = onPaneExtentChange;
+  });
+  const paneExtentObserverRef = useRef<ResizeObserver | null>(null);
+  useLayoutEffect(() => {
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => onPaneExtentChangeRef.current?.());
+    paneExtentObserverRef.current = observer;
+    return () => {
+      observer.disconnect();
+      paneExtentObserverRef.current = null;
+    };
+  }, []);
+  useLayoutEffect(() => {
+    const observer = paneExtentObserverRef.current;
+    if (observer == null) return;
+    const mounts = [agentsContainer, terminalContainer].filter((mount) => mount != null);
+    for (const mount of mounts) observer.observe(mount);
+    return () => {
+      for (const mount of mounts) observer.unobserve(mount);
+    };
+  }, [agentsContainer, terminalContainer]);
 
   useEffect(() => {
     isCollapsedRef.current = isCollapsed;
@@ -597,6 +838,20 @@ function EditorAreaInner({
 
   const [initialDocPanelWidthPx] = useState(() => getInitialDocPanelWidth());
   const docPanelWidthPxRef = useRef(initialDocPanelWidthPx);
+  const [preferredDocPanelWidthPx, setPreferredDocPanelWidthPx] = useState(initialDocPanelWidthPx);
+  const [docPanelSeed, setDocPanelSeed] = useState(() => ({
+    side: docPanelSide,
+    collapsed: initialRightCollapsed,
+    widthPx: initialDocPanelWidthPx,
+  }));
+  if (docPanelSeed.side !== docPanelSide) {
+    setDocPanelSeed({
+      side: docPanelSide,
+      collapsed: isCollapsed,
+      widthPx: preferredDocPanelWidthPx,
+    });
+  }
+  const [docPanelEl, setDocPanelEl] = useState<HTMLElement | null>(null);
   const writeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   function debouncedWriteDocPanelWidth(px: number) {
     if (writeTimerRef.current != null) clearTimeout(writeTimerRef.current);
@@ -606,49 +861,36 @@ function EditorAreaInner({
     }, 100);
   }
 
-  const [initialAgentsWidthPx] = useState(() => getInitialAgentsPanelWidth());
-  const agentsPreferredWidthPxRef = useRef(initialAgentsWidthPx);
-  const [isDraggingAgentsHandle, setIsDraggingAgentsHandle] = useState(false);
-  const isDraggingAgentsHandleRef = useRef(false);
-  const agentsSettlementRetryRef = useRef<RailLayoutRetryController>({
-    frameId: 0,
-    deadlineTimer: null,
-  });
-  const railColumnSyncRetryRef = useRef<RailLayoutRetryController>({
-    frameId: 0,
-    deadlineTimer: null,
-  });
-  const pendingAgentsVisibilityRetryContextRef = useRef<AgentsPanelCloseRetryContext | null>(null);
-
-  const [initialTerminalWidthPx] = useState(() =>
-    Math.max(
-      terminalRightWidth ?? PREFERRED_TERMINAL_RIGHT_WIDTH,
-      RIGHT_TERMINAL_PANEL_MIN_WIDTH_PX,
-    ),
-  );
-  const terminalWidthPxRef = useRef(initialTerminalWidthPx);
-  const [isDraggingTerminalHandle, setIsDraggingTerminalHandle] = useState(false);
-  const isDraggingTerminalHandleRef = useRef(false);
-  const terminalWriteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  function debouncedWriteTerminalWidth(px: number) {
-    if (terminalWriteTimerRef.current != null) clearTimeout(terminalWriteTimerRef.current);
-    terminalWriteTimerRef.current = setTimeout(() => {
-      onTerminalRightWidthChange?.(px);
-      terminalWriteTimerRef.current = null;
-    }, 100);
-  }
-
   useEffect(
     () => () => {
       if (writeTimerRef.current != null) clearTimeout(writeTimerRef.current);
-      if (terminalWriteTimerRef.current != null) clearTimeout(terminalWriteTimerRef.current);
-      cancelRailLayoutRetry(agentsSettlementRetryRef);
     },
     [],
   );
 
-  const [groupContainerEl, setGroupContainerEl] = useState<HTMLDivElement | null>(null);
-  const groupContainerElRef = useRef<HTMLDivElement | null>(null);
+  const [innerContainerEl, setInnerContainerEl] = useState<HTMLDivElement | null>(null);
+  const innerContainerElRef = useRef<HTMLDivElement | null>(null);
+  const { node: fileListSlotEl, slotRef: fileListSlotRef } = useFileListSlot();
+  useLayoutEffect(() => {
+    if (docPanelCover || isCollapsed) return;
+    const focusedPanelControl = docPanelDockFocusRef.current;
+    if (focusedPanelControl == null) return;
+    const frame = requestAnimationFrame(() => {
+      if (
+        docPanelDockFocusRef.current === focusedPanelControl &&
+        focusedPanelControl.isConnected &&
+        docPanelHost.contains(focusedPanelControl) &&
+        docPanelHost.closest('#doc-panel') != null &&
+        focusedPanelControl.closest('[inert]') == null &&
+        focusedPanelControl.getClientRects().length > 0
+      ) {
+        focusedPanelControl.focus({ preventScroll: true });
+        if (document.activeElement === focusedPanelControl) docPanelDockFocusRef.current = null;
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [docPanelCover, isCollapsed, docPanelHost]);
+  useAttachFileListHost(fileListHost, filesCover ? filesCoverTarget : fileListSlotEl);
 
   useLayoutEffect(() => {
     if (workspaceHeaderContainer == null || workspaceColumnEl == null) return;
@@ -666,282 +908,105 @@ function EditorAreaInner({
   }, [workspaceHeaderContainer, workspaceColumnEl]);
 
   const docSlotPresentRef = useRef(false);
+  const docSlotHeldForLoadRef = useRef(false);
   const presenceRepinRetryRef = useRef<RailLayoutRetryController>({
     frameId: 0,
     deadlineTimer: null,
   });
-  const railPinOutcomeRef = useRef<RailPinOutcome>({ stage: 'group-missing' });
-  const railPinExhaustedReportsRef = useRef<Record<RailPinExhaustedTrigger, number>>({
-    'rail-column-sync': 0,
-    'doc-slot-presence': 0,
+  const observedDocWidthRetryRef = useRef<RailLayoutRetryController>({
+    frameId: 0,
+    deadlineTimer: null,
   });
 
-  const reportRailPinExhausted = useEffectEvent((trigger: RailPinExhaustedTrigger) => {
-    if (railPinExhaustedReportsRef.current[trigger] >= MAX_RAIL_PIN_EXHAUSTED_REPORTS) return;
-    railPinExhaustedReportsRef.current[trigger] += 1;
-    console.warn(
-      JSON.stringify({
-        event: 'right-rail-pin-exhausted',
-        trigger,
-        ...railPinOutcomeRef.current,
-      }),
-    );
-  });
-
-  const groupRef = useGroupRef();
-  function resolveGroupPxWidth(): number | null {
-    return resolveRailPanelSpacePx(groupContainerElRef.current);
+  const innerGroupRef = useGroupRef();
+  function resolveInnerGroupPxWidth(): number | null {
+    return resolveRailPanelSpacePx(innerContainerElRef.current);
   }
 
-  function resolveAdmissionMetrics(): {
-    workspaceWidthPx: number;
-    otherRailWidthPx: number;
-  } | null {
-    const group = groupRef.current;
-    if (group == null) return null;
-    try {
-      const workspaceWidthPx = resolveGroupPxWidth();
-      if (workspaceWidthPx == null) return null;
-      if (!docSlotPresentRef.current) {
-        return { workspaceWidthPx, otherRailWidthPx: 0 };
-      }
-      const measuredWidthPx = panelRef.current?.getSize().inPixels;
-      const docWidthPx =
-        measuredWidthPx != null && measuredWidthPx > 0
-          ? measuredWidthPx
-          : docPanelWidthPxRef.current;
-      return {
-        workspaceWidthPx,
-        otherRailWidthPx: Math.max(docWidthPx, DOC_PANEL_MIN_WIDTH_PX),
-      };
-    } catch (error) {
-      reportUnexpectedPanelGroupFailure('resolve-admission-metrics-failed', error);
-      return null;
-    }
-  }
-
-  type AdmissionVisibility = {
-    readonly terminalRightVisible: boolean;
-    readonly agentsVisible: boolean;
-  };
-  const admissionVisibility: AdmissionVisibility = {
-    terminalRightVisible: terminalColumnPresent,
-    agentsVisible,
-  };
-  const admissionVisibilityRef = useRef(admissionVisibility);
-  const previousAdmissionVisibilityRef = useRef(admissionVisibility);
-  const previousAdmissionCollapsedRef = useRef(isCollapsed);
-  const pendingAdmissionCloseRef = useRef<'close-agents' | 'close-terminal' | null>(null);
-
-  function enforceRightRailAdmission(
-    trigger: 'state-change' | 'resize',
-    previous: AdmissionVisibility,
-  ) {
-    const metrics = resolveAdmissionMetrics();
-    if (metrics == null) return;
-    const decision = resolveRightRailAdmission({
-      ...metrics,
-      agentsMinimumWidthPx: MIN_AGENTS_PANEL_WIDTH,
-      previous,
-      current: admissionVisibilityRef.current,
-      trigger,
-    });
-    if (decision.kind === 'none' || pendingAdmissionCloseRef.current === decision.kind) return;
-
-    if (decision.kind === 'close-agents') {
-      if (onAgentsVisibleChange == null) return;
-      pendingAdmissionCloseRef.current = decision.kind;
-      onAgentsVisibleChange(false);
-      toast.info(t`Agent panel closed to keep Terminal readable.`);
-      return;
-    }
-
-    if (onTerminalVisibleChange == null) return;
-    pendingAdmissionCloseRef.current = decision.kind;
-    onTerminalVisibleChange(false);
-    toast.info(t`Terminal closed to make room for the agent panel.`);
-  }
-
-  const enforceRightRailAdmissionRef = useRef(enforceRightRailAdmission);
-  useLayoutEffect(() => {
-    enforceRightRailAdmissionRef.current = enforceRightRailAdmission;
-    admissionVisibilityRef.current = admissionVisibility;
-  });
-
-  useLayoutEffect(() => {
-    if (!agentsVisible && pendingAdmissionCloseRef.current === 'close-agents') {
-      pendingAdmissionCloseRef.current = null;
-    }
-    if (!terminalColumnPresent && pendingAdmissionCloseRef.current === 'close-terminal') {
-      pendingAdmissionCloseRef.current = null;
-    }
-    const previous = previousAdmissionVisibilityRef.current;
-    const previousCollapsed = previousAdmissionCollapsedRef.current;
-    previousAdmissionVisibilityRef.current = {
-      terminalRightVisible: terminalColumnPresent,
-      agentsVisible,
-    };
-    previousAdmissionCollapsedRef.current = isCollapsed;
-    queueMicrotask(() => {
-      enforceRightRailAdmissionRef.current(
-        previousCollapsed === isCollapsed ? 'state-change' : 'resize',
-        previous,
-      );
-    });
-  }, [agentsVisible, terminalColumnPresent, isCollapsed]);
-
-  function applyRailLayout(
+  function attemptDocPanelPin(
     docCollapsed: boolean,
-    {
-      agentsWidthOverridePx,
-    }: {
-      agentsWidthOverridePx?: number;
-    } = {},
-  ): boolean {
-    const group = groupRef.current;
-    if (group == null) {
-      railPinOutcomeRef.current = { stage: 'group-missing' };
-      return false;
+    recordMiss: (miss: DocPanelPinMiss) => void = () => {},
+  ): RailLayoutRetryOutcome {
+    const missDocPanelPin = (miss: DocPanelPinMiss, outcome: 'blocked' | 'failed') => {
+      recordMiss(miss);
+      return outcome;
+    };
+    isCollapsedRef.current = docCollapsed;
+    if (!editorVisibleRef.current) return 'applied';
+    if (isDraggingDocHandleRef.current) return missDocPanelPin({ cause: 'dragging' }, 'blocked');
+    const group = innerGroupRef.current;
+    if (group == null) return missDocPanelPin({ cause: 'group-missing' }, 'blocked');
+    const space = resolveRailPanelSpace(innerContainerElRef.current);
+    if (!space.ok) {
+      return missDocPanelPin(
+        { cause: 'panel-space-unresolved', refusal: space.refusal },
+        'blocked',
+      );
     }
-    let panelSpace: RailPanelSpaceResult;
-    let layout: Record<string, number>;
+    const innerPx = space.panelSpacePx;
     try {
-      panelSpace = resolveRailPanelSpace(groupContainerElRef.current);
-      layout = group.getLayout();
-    } catch (error) {
-      railPinOutcomeRef.current = { stage: 'read-failed' };
-      reportUnexpectedPanelGroupFailure('apply-rail-layout-read-failed', error);
-      return false;
-    }
-    if (!panelSpace.ok) {
-      railPinOutcomeRef.current = { stage: 'panel-space-unresolved', refusal: panelSpace.refusal };
-      return false;
-    }
-    const containerPx = panelSpace.panelSpacePx;
-    const accounting = accountRailLayout(Object.keys(layout));
-    if (!accounting.ok) {
-      railPinOutcomeRef.current =
-        accounting.unaccountedIds.length === 0
-          ? { stage: 'no-residual-panel' }
-          : { stage: 'layout-unaccounted', unaccountedIds: accounting.unaccountedIds };
-      if (import.meta.env.DEV) {
-        console.warn(
-          JSON.stringify({
-            event: 'right-rail-accounting-failed',
-            unaccountedIds: accounting.unaccountedIds,
-          }),
-        );
+      const layout = group.getLayout();
+      const residualId = findResidualPanelId(Object.keys(layout));
+      if (residualId == null || !(DOC_PANEL_ID in layout)) {
+        return missDocPanelPin({ cause: 'layout-without-doc-panel' }, 'blocked');
       }
-      return false;
-    }
-    const residualId = accounting.residualId;
-
-    const buildPins = (atFloor: boolean): Record<string, number> => {
-      const pins: Record<string, number> = {};
-      if (DOC_PANEL_ID in layout) {
-        pins[DOC_PANEL_ID] =
-          !docSlotPresentRef.current || docCollapsed
-            ? 0
-            : atFloor
-              ? DOC_PANEL_MIN_WIDTH_PX
-              : docPanelWidthPxRef.current;
-      }
-      if (TERMINAL_COLUMN_ID in layout) {
-        pins[TERMINAL_COLUMN_ID] = !admissionVisibilityRef.current.terminalRightVisible
-          ? 0
-          : atFloor
-            ? RIGHT_TERMINAL_PANEL_MIN_WIDTH_PX
-            : terminalWidthPxRef.current;
-      }
-      if (AGENTS_COLUMN_ID in layout) {
-        pins[AGENTS_COLUMN_ID] = !admissionVisibilityRef.current.agentsVisible
-          ? 0
-          : atFloor
-            ? MIN_AGENTS_PANEL_WIDTH
-            : (agentsWidthOverridePx ?? agentsPreferredWidthPxRef.current);
-      }
-      return pins;
-    };
-
-    const widthsFrom = (pcts: Record<string, number>) => {
-      const widths = new Map<string, number>();
-      for (const [id, pct] of Object.entries(pcts)) widths.set(id, (pct / 100) * containerPx);
-      return widths;
-    };
-
-    let pins = buildPins(false);
-    if (Object.keys(pins).length === 0) {
-      railPinOutcomeRef.current = { stage: 'no-pinned-columns' };
-      return false;
-    }
-
-    let next = computeStickyRepinLayout({
-      currentLayout: layout,
-      containerPx,
-      pinnedPx: pins,
-      residualId,
-    });
-    if (next === layout) {
-      pins = buildPins(true);
-      next = computeStickyRepinLayout({
+      const pinnedPx = docCollapsed || !docSlotPresentRef.current ? 0 : docPanelWidthPxRef.current;
+      const next = computeStickyRepinLayout({
         currentLayout: layout,
-        containerPx,
-        pinnedPx: pins,
+        containerPx: innerPx,
+        pinnedPx: { [DOC_PANEL_ID]: pinnedPx },
         residualId,
       });
-    }
-    if (next === layout) {
-      const shortfall = describeRailFloorShortfall(pins, widthsFrom(layout));
-      const pinned = Object.keys(shortfall).length === 0;
-      railPinOutcomeRef.current = pinned
-        ? { stage: 'pinned' }
-        : { stage: 'pins-do-not-fit', shortfall };
-      return pinned;
-    }
-    try {
+      if (next === layout) return 'applied';
       group.setLayout(next);
+      const landedPx = ((group.getLayout()[DOC_PANEL_ID] ?? 0) / 100) * innerPx;
+      if (Math.abs(landedPx - pinnedPx) <= 1) return 'applied';
+      return missDocPanelPin(
+        { cause: 'width-missed', pinnedWidthPx: pinnedPx, landedWidthPx: landedPx },
+        'failed',
+      );
     } catch (error) {
-      railPinOutcomeRef.current = { stage: 'write-failed' };
-      reportUnexpectedPanelGroupFailure('apply-rail-layout-write-failed', error);
-      return false;
+      reportUnexpectedPanelGroupFailure('pin-doc-panel-failed', error);
+      return missDocPanelPin(
+        {
+          cause: 'write-threw',
+          writeError: error instanceof Error ? error.message : String(error),
+        },
+        'failed',
+      );
     }
-    let readBack: Record<string, number>;
-    try {
-      readBack = group.getLayout();
-    } catch (error) {
-      railPinOutcomeRef.current = { stage: 'verify-failed' };
-      reportUnexpectedPanelGroupFailure('apply-rail-layout-verify-failed', error);
-      return false;
-    }
-    const shortfall = describeRailWidthShortfall(pins, widthsFrom(readBack));
-    const pinned = Object.keys(shortfall).length === 0;
-    railPinOutcomeRef.current = pinned
-      ? { stage: 'pinned' }
-      : { stage: 'width-shortfall', shortfall };
-    return pinned;
   }
 
-  function reclaimHiddenRailColumn(columnId: string, present: boolean, widthPx: number) {
+  function pinDocPanel(docCollapsed: boolean): boolean {
+    return attemptDocPanelPin(docCollapsed) !== 'failed';
+  }
+
+  const pinDocPanelRef = useRef(pinDocPanel);
+  useEffect(() => {
+    pinDocPanelRef.current = pinDocPanel;
+  });
+
+  function reclaimHiddenDocPanel(present: boolean, widthPx: number) {
     if (present || widthPx <= 0) return;
     queueMicrotask(() => {
-      const group = groupRef.current;
+      const group = innerGroupRef.current;
       if (group == null) return;
       let layout: Record<string, number>;
       let containerPx: number | null;
       try {
         layout = group.getLayout();
-        containerPx = resolveGroupPxWidth();
+        containerPx = resolveInnerGroupPxWidth();
       } catch (error) {
         reportUnexpectedPanelGroupFailure('reclaim-hidden-rail-read-failed', error);
         return;
       }
-      if (containerPx == null || !(columnId in layout) || layout[columnId] === 0) return;
+      if (containerPx == null || !(DOC_PANEL_ID in layout) || layout[DOC_PANEL_ID] === 0) return;
       const residualId = findResidualPanelId(Object.keys(layout));
       if (residualId == null) return;
       const next = computeStickyRepinLayout({
         currentLayout: layout,
         containerPx,
-        pinnedPx: { [columnId]: 0 },
+        pinnedPx: { [DOC_PANEL_ID]: 0 },
         residualId,
       });
       if (next === layout) return;
@@ -953,32 +1018,9 @@ function EditorAreaInner({
     });
   }
 
-  function attemptRailLayout(
-    docCollapsed: boolean,
-    overrides?: { agentsWidthOverridePx?: number },
-  ): RailLayoutRetryOutcome {
-    if (
-      isDraggingDocHandleRef.current ||
-      isDraggingTerminalHandleRef.current ||
-      isDraggingAgentsHandleRef.current
-    )
-      return 'blocked';
-    isCollapsedRef.current = docCollapsed;
-    return applyRailLayout(docCollapsed, overrides) ? 'applied' : 'failed';
-  }
-
-  function assertRightRailLayout(docCollapsed: boolean): boolean {
-    return attemptRailLayout(docCollapsed) !== 'failed';
-  }
-
-  const assertRightRailLayoutRef = useRef(assertRightRailLayout);
-  useEffect(() => {
-    assertRightRailLayoutRef.current = assertRightRailLayout;
-  });
-
   const endHandleDragRef = useRef<(() => void) | null>(null);
   function trackHandleDrag(
-    pointerId: number,
+    pointerId: number | null,
     setDragging: (dragging: boolean) => void,
     draggingRef: { current: boolean },
     onCommit?: () => void,
@@ -996,182 +1038,289 @@ function EditorAreaInner({
       onDragEnd?.();
     }
     function onPointerUp(event: PointerEvent) {
-      if (event.pointerId !== pointerId) return;
+      if (pointerId != null && event.pointerId !== pointerId) return;
       end();
       onCommit?.();
+      pinDocPanelRef.current(isCollapsedRef.current);
     }
     function onPointerCancel(event: PointerEvent) {
-      if (event.pointerId !== pointerId) return;
+      if (pointerId != null && event.pointerId !== pointerId) return;
       end();
-      assertRightRailLayoutRef.current(isCollapsedRef.current);
+      pinDocPanelRef.current(isCollapsedRef.current);
     }
     endHandleDragRef.current = end;
     window.addEventListener('pointerup', onPointerUp);
     window.addEventListener('pointercancel', onPointerCancel);
   }
+  function beginDocHandleDrag(pointerId: number | null) {
+    trackHandleDrag(
+      pointerId,
+      setIsDraggingDocHandle,
+      isDraggingDocHandleRef,
+      () => {
+        if (panelRef.current?.isCollapsed()) writeDocPanelIntent(false);
+      },
+      () => setPreferredDocPanelWidthPx(docPanelWidthPxRef.current),
+    );
+  }
+  function adoptLibraryDrag() {
+    const active = innerContainerElRef.current?.querySelector(
+      ':scope > [data-group] > [data-separator="active"]',
+    );
+    if (!(active instanceof HTMLElement)) return;
+    if (active.hasAttribute('data-doc-panel-handle') && !isDraggingDocHandleRef.current) {
+      beginDocHandleDrag(null);
+    }
+  }
   useEffect(() => () => endHandleDragRef.current?.(), []);
 
-  function cancelAgentsSettlement() {
-    cancelRailLayoutRetry(agentsSettlementRetryRef);
+  useImperativeHandle(ref, () => ({
+    panesOnScreen: () => ({
+      editor: editorVisible && dockLayout.panes.has('editor'),
+      agents: hasExtent(agentsContainer),
+      terminal: hasExtent(terminalContainer),
+    }),
+  }));
+
+  function docPanelToggleable(): boolean {
+    return docSlotPresentRef.current && !docSlotHeldForLoadRef.current;
   }
 
-  function cancelAgentsKeyboardSettlement() {
-    if (agentsSettlementRetryRef.current.context?.decision === 'keyboard-settle-minimum') {
-      cancelAgentsSettlement();
-    }
+  function writeDocPanelIntent(open: boolean) {
+    if (!open && preferredSidebar === 'information') setPreferredSidebar(null);
+    const next = open ? 'open' : 'collapsed';
+    applyToggleAtEveryWidth('right', next);
+    setDocPanelIntentOpen(open);
   }
 
-  function superviseAgentsPointerSettlement(context: AgentsPanelPointerReleaseRetryContext) {
-    runRailLayoutRetry({
-      retryRef: agentsSettlementRetryRef,
-      attempt: () => attemptRailLayout(isCollapsedRef.current),
-      context,
-    });
-  }
-
-  function settleAgentsPointerRelease() {
-    cancelAgentsSettlement();
-    const measuredWidthPx = agentsColumnPanelRef.current?.getSize().inPixels;
-    const decision = resolveAgentsPanelPointerRelease(
-      measuredWidthPx,
-      agentsPreferredWidthPxRef.current,
-    );
-    const context = createAgentsPanelPointerReleaseRetryContext(decision);
-    switch (context.decision) {
-      case 'close':
-        if (onAgentsVisibleChange != null) {
-          pendingAgentsVisibilityRetryContextRef.current = context;
-          onAgentsVisibleChange(false);
-        } else {
-          superviseAgentsPointerSettlement(context);
+  function returnFocusFromDocPanelCover() {
+    const opener = docPanelCoverOpenerRef.current;
+    requestAnimationFrame(() => {
+      const candidates = [
+        opener,
+        document.querySelector<HTMLElement>('[data-doc-panel-toggle]'),
+        document.querySelector<HTMLElement>('[data-header-pane-button="editor"]'),
+        terminalEditorRegion,
+      ];
+      for (const candidate of candidates) {
+        if (
+          candidate?.isConnected &&
+          candidate !== document.body &&
+          (candidate.tabIndex >= 0 || candidate === terminalEditorRegion) &&
+          !candidate.matches(':disabled') &&
+          candidate.closest('[inert]') == null &&
+          candidate.getClientRects().length > 0 &&
+          getComputedStyle(candidate).visibility === 'visible'
+        ) {
+          candidate.focus();
+          if (document.activeElement === candidate) return;
         }
-        return;
-      case 'restore-preferred':
-        agentsPreferredWidthPxRef.current = context.targetWidthPx;
-        superviseAgentsPointerSettlement(context);
-        return;
-      case 'settle-minimum':
-      case 'commit-preferred':
-        agentsPreferredWidthPxRef.current = context.targetWidthPx;
-        writeAgentsPanelWidth(context.targetWidthPx);
-        superviseAgentsPointerSettlement(context);
-        return;
-      default: {
-        const exhaustiveContext: never = context;
-        return exhaustiveContext;
       }
-    }
+    });
   }
 
-  function settleAgentsKeyboardLayout(layout: Record<string, number>, isUserInteraction: boolean) {
+  function dismissDocPanelCover() {
+    setPendingDocPanelDestination(null);
+    setDocPanelCover(false);
+    returnFocusFromDocPanelCover();
+  }
+
+  function requestDocPanelDestination(
+    docName: string,
+    allowMissing = false,
+    onReady?: () => void,
+    completion: 'synced' | 'navigated' = 'synced',
+  ) {
+    if (docPanelCover)
+      setPendingDocPanelDestination({ docName, allowMissing, onReady, completion });
+    else onReady?.();
+  }
+
+  const sidebarFitContext: SidebarFitContext = {
+    widthPx: editorCardWidthPx,
+    filesDockWidth,
+    filesPresent: fileListHost != null,
+    informationWidthPx: preferredDocPanelWidthPx,
+    filesIntentOpen,
+    informationIntentOpen: docPanelIntentOpen,
+    preferredSidebar,
+  };
+  function adoptDraggedDocPanelWidth(widthPx: number) {
+    const liveCardPx = liveEditorCardWidthPxRef.current ?? editorCardWidthPx;
+    const liveInnerPx = liveInnerWidthPxRef.current ?? innerWidthPx;
+    const crossesThreshold =
+      sidebarFitWidthBucket({ ...sidebarFitContext, informationWidthPx: widthPx }, liveCardPx) !==
+        sidebarFitWidthBucket(sidebarFitContext, liveCardPx) ||
+      docPanelDockReadyFor(liveInnerPx, widthPx) !==
+        docPanelDockReadyFor(liveInnerPx, preferredDocPanelWidthPx);
+    if (crossesThreshold) setPreferredDocPanelWidthPx(widthPx);
+  }
+  const syncMeasuredWidths = useEffectEvent(() => {
+    const liveCardPx = liveEditorCardWidthPxRef.current;
     if (
-      !isUserInteraction ||
-      isDraggingDocHandleRef.current ||
-      isDraggingTerminalHandleRef.current ||
-      isDraggingAgentsHandleRef.current
-    )
-      return;
-    const activeElement = document.activeElement;
-    if (
-      !(activeElement instanceof HTMLElement) ||
-      !activeElement.hasAttribute('data-agents-panel-resize-handle')
+      liveCardPx !== editorCardWidthPx &&
+      sidebarFitWidthBucket(sidebarFitContext, liveCardPx) !==
+        sidebarFitWidthBucket(sidebarFitContext, editorCardWidthPx)
     ) {
-      cancelAgentsKeyboardSettlement();
+      setEditorCardWidthPx(liveCardPx);
+    }
+    const liveInnerPx = liveInnerWidthPxRef.current;
+    if (
+      liveInnerPx !== innerWidthPx &&
+      docPanelDockReadyFor(liveInnerPx, preferredDocPanelWidthPx) !==
+        docPanelDockReadyFor(innerWidthPx, preferredDocPanelWidthPx)
+    ) {
+      setInnerWidthPx(liveInnerPx);
+    }
+  });
+  useLayoutEffect(() => {
+    syncMeasuredWidths();
+  });
+  useLayoutEffect(() => {
+    const card = editorCardRef.current;
+    if (card == null || typeof ResizeObserver === 'undefined') return;
+    const measure = () => {
+      const cardWidth = card.getBoundingClientRect().width;
+      if (cardWidth <= 0) return;
+      liveEditorCardWidthPxRef.current = cardWidth;
+      syncMeasuredWidths();
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(card);
+    return () => observer.disconnect();
+  }, []);
+  useLayoutEffect(() => {
+    if (innerContainerEl == null || typeof ResizeObserver === 'undefined') return;
+    const measure = () => {
+      const width = innerContainerEl.getBoundingClientRect().width;
+      if (width <= 0) return;
+      liveInnerWidthPxRef.current = width;
+      syncMeasuredWidths();
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(innerContainerEl);
+    return () => observer.disconnect();
+  }, [innerContainerEl]);
+
+  function expandDocPanel(explicit = false) {
+    if (!docPanelToggleable()) return;
+    if (filesCover) dismissFilesCover(false);
+    const fit = resolveCurrentEditorSidebarFit(
+      sidebarFitContext,
+      docSlotPresentRef.current,
+      filesIntentOpen,
+      true,
+      'information',
+      measureSidebarUnitWidth(editorCardRef.current, editorCardWidthPx),
+    );
+    setPreferredSidebar(fit.mode === 'both' ? null : 'information');
+    setFilesCanDock(fit.filesDocked);
+    if (explicit) writeDocPanelIntent(true);
+    else setDocPanelIntentOpen(true);
+    if (fit.mode !== 'cover') {
+      setDocPanelCover(false);
       return;
     }
-    cancelAgentsSettlement();
-    const agentsPercentage = layout[AGENTS_COLUMN_ID];
-    const groupWidthPx = resolveGroupPxWidth();
-    if (agentsPercentage == null || groupWidthPx == null) return;
-    const measuredWidthPx = (agentsPercentage / 100) * groupWidthPx;
-    if (measuredWidthPx <= 0 || measuredWidthPx >= MIN_AGENTS_PANEL_WIDTH) return;
-    runRailLayoutRetry({
-      retryRef: agentsSettlementRetryRef,
-      attempt: () =>
-        attemptRailLayout(isCollapsedRef.current, {
-          agentsWidthOverridePx: MIN_AGENTS_PANEL_WIDTH,
-        }),
-      context: {
-        decision: 'keyboard-settle-minimum',
-        targetWidthPx: MIN_AGENTS_PANEL_WIDTH,
-      },
-    });
-  }
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: agentsVisible and render-bound attemptRailLayout are sampled only when rail column presence changes; the presence dependencies own retry replacement
-  useEffect(() => {
-    if (pendingAgentsVisibilityRetryContextRef.current?.decision === 'close' && agentsVisible) {
-      pendingAgentsVisibilityRetryContextRef.current = null;
-    }
-    const pendingContext = pendingAgentsVisibilityRetryContextRef.current;
-    const context: RailLayoutRetryContext = pendingContext ?? {
-      decision: 'sync-rail-columns',
-      targetWidthPx: agentsVisible ? agentsPreferredWidthPxRef.current : 0,
-    };
-    runRailLayoutRetry({
-      retryRef: railColumnSyncRetryRef,
-      attempt: () => attemptRailLayout(isCollapsedRef.current),
-      context,
-      onExhausted:
-        pendingContext == null ? () => reportRailPinExhausted('rail-column-sync') : undefined,
-      onComplete: () => {
-        if (pendingAgentsVisibilityRetryContextRef.current === context) {
-          pendingAgentsVisibilityRetryContextRef.current = null;
-        }
-      },
-    });
-    return () => cancelRailLayoutRetry(railColumnSyncRetryRef);
-  }, [terminalColumnPresent, agentsColumnPresent]);
-
-  function expandDocPanel() {
-    if (!docSlotPresentRef.current) return;
-    assertRightRailLayout(false);
+    docPanelCoverOpenerRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    pinDocPanel(true);
+    setDocPanelCover(true);
   }
 
   function togglePanel() {
-    if (!docSlotPresentRef.current) return;
-    const partition = rightPartitionRef.current;
-    const collapsed = isCollapsedRef.current;
-    if (collapsed) {
-      applyToggle('right', partition, 'open');
-      assertRightRailLayout(false);
-    } else {
-      applyToggle('right', partition, 'collapsed');
-      assertRightRailLayout(true);
+    if (!docPanelToggleable()) return;
+    revealEditorBeforeActing();
+    if (docPanelCover || (!isCollapsedRef.current && docPanelIntentOpen)) {
+      writeDocPanelIntent(false);
+      pinDocPanel(true);
+      if (docPanelCover) dismissDocPanelCover();
+      return;
     }
+    expandDocPanel(true);
   }
 
-  useEffect(() => {
-    const mql = window.matchMedia(`(min-width: ${RIGHT_COLLAPSE_THRESHOLD}px)`);
-    const onChange = () => {
-      const newPartition = resolvePartition(embeddedHost, window.innerWidth, 'right');
-      setRightPartition(newPartition);
-      const pins = readPins();
-      const effective = resolveEffectiveState('right', newPartition, pins);
-      const nextCollapsed = effective === 'collapsed';
-      setIsCollapsed(nextCollapsed);
-      assertRightRailLayout(nextCollapsed);
-    };
-    mql.addEventListener('change', onChange);
-    return () => mql.removeEventListener('change', onChange);
-  }, [
-    embeddedHost,
-    // biome-ignore lint/correctness/useExhaustiveDependencies: assertRightRailLayout is render-bound; re-subscribing keeps the handler fresh (mirrors the ⌥⌘B menu effect below)
-    assertRightRailLayout,
-  ]);
+  const attemptObservedDocWidth = useEffectEvent((): RailLayoutRetryOutcome => {
+    if (!editorVisibleRef.current) return 'applied';
+    if (isDraggingDocHandleRef.current) return 'blocked';
+    const innerPx = resolveInnerGroupPxWidth();
+    if (innerPx == null) return 'blocked';
+    const collapsed =
+      !docSlotPresentRef.current ||
+      !docPanelIntentOpen ||
+      !resolveCurrentEditorSidebarFit(sidebarFitContext, docSlotPresentRef.current)
+        .informationDocked ||
+      innerPx < docPanelWidthPxRef.current + DOC_USABLE_MIN_WIDTH_PX;
+    const expectedDocWidth = collapsed ? 0 : docPanelWidthPxRef.current;
+    const actualDocWidth = innerContainerElRef.current
+      ?.querySelector<HTMLElement>(`#${DOC_PANEL_ID}`)
+      ?.getBoundingClientRect().width;
+    if (actualDocWidth != null && Math.abs(actualDocWidth - expectedDocWidth) <= 1)
+      return 'applied';
+    const group = innerGroupRef.current;
+    if (group == null) return 'blocked';
+    try {
+      const layout = group.getLayout();
+      const residualId = findResidualPanelId(Object.keys(layout));
+      if (residualId == null || !(DOC_PANEL_ID in layout)) return 'blocked';
+      isCollapsedRef.current = collapsed;
+      group.setLayout(
+        computeStickyRepinLayout({
+          currentLayout: layout,
+          containerPx: innerPx,
+          pinnedPx: { [DOC_PANEL_ID]: expectedDocWidth },
+          residualId,
+        }),
+      );
+      return 'failed';
+    } catch (error) {
+      reportUnexpectedPanelGroupFailure('settle-observed-information-width-failed', error);
+      return 'failed';
+    }
+  });
+  const settleObservedDocWidth = useEffectEvent(() => {
+    if (observedDocWidthRetryRef.current.context != null) return;
+    runRailLayoutRetry({
+      retryRef: observedDocWidthRetryRef,
+      attempt: attemptObservedDocWidth,
+      context: {
+        decision: 'observed-doc-width',
+        targetWidthPx: docPanelWidthPxRef.current,
+      },
+    });
+  });
+
+  const editorUnitWidthPx = dockLayout.panes.get('editor')?.width ?? null;
+  const followEditorUnit = useEffectEvent(() => {
+    attemptDocPanelPin(isCollapsedRef.current);
+  });
+  useLayoutEffect(() => {
+    if (editorUnitWidthPx !== null) followEditorUnit();
+  }, [editorUnitWidthPx]);
 
   useEffect(() => {
-    if (groupContainerEl == null) return;
+    if (innerContainerEl == null) return;
     if (isEmbedded) return;
-    const ro = new ResizeObserver(() => {
-      assertRightRailLayoutRef.current(isCollapsedRef.current);
-      enforceRightRailAdmissionRef.current('resize', admissionVisibilityRef.current);
+    let docSettlementFrame = 0;
+    const observer = new ResizeObserver(() => {
+      if (docSettlementFrame !== 0) return;
+      docSettlementFrame = requestAnimationFrame(() => {
+        docSettlementFrame = 0;
+        settleObservedDocWidth();
+      });
     });
-    ro.observe(groupContainerEl);
-    return () => ro.disconnect();
-  }, [groupContainerEl, isEmbedded]);
+    observer.observe(innerContainerEl);
+    if (docPanelEl != null) observer.observe(docPanelEl);
+    return () => {
+      observer.disconnect();
+      if (docSettlementFrame !== 0) cancelAnimationFrame(docSettlementFrame);
+      cancelRailLayoutRetry(observedDocWidthRetryRef);
+    };
+  }, [innerContainerEl, isEmbedded, docPanelEl]);
 
   const openRequestedDocPanelTab = useEffectEvent((tab: PanelTab) => {
+    revealEditor();
     if (docPanelMode === 'agent') closeActivityPanel();
     onActiveTabChange(tab);
     expandDocPanel();
@@ -1189,17 +1338,15 @@ function EditorAreaInner({
     });
   }, []);
 
+  const expandDocPanelEvent = useEffectEvent(() => expandDocPanel());
   useEffect(() => {
     if (docPanelExpandSignal === 0) return;
-    expandDocPanel();
-  }, [
-    docPanelExpandSignal,
-    // biome-ignore lint/correctness/useExhaustiveDependencies: expandDocPanel is render-bound; re-running keeps the closure fresh
-    expandDocPanel,
-  ]);
+    revealEditor();
+    expandDocPanelEvent();
+  }, [docPanelExpandSignal]);
 
   useLayoutEffect(() => {
-    if (!isCollapsed) return;
+    if (!isCollapsed || docPanelCover) return;
     const panelEl = document.getElementById(DOC_PANEL_ID);
     if (!panelEl?.contains(document.activeElement)) return;
     const toggle = document.querySelector<HTMLElement>('[data-doc-panel-toggle]');
@@ -1208,13 +1355,15 @@ function EditorAreaInner({
       return;
     }
     document.querySelector<HTMLElement>('[data-sidebar="trigger"]')?.focus();
-  }, [isCollapsed]);
+  }, [isCollapsed, docPanelCover]);
 
   useEffect(() => {
-    setViewMenuState({ docPanelVisible: !isCollapsed });
+    setViewMenuState({ docPanelVisible: !isCollapsed || docPanelCover });
     if (window.okDesktop == null) return;
-    window.okDesktop.editor.notifyViewMenuStateChanged({ docPanelVisible: !isCollapsed });
-  }, [isCollapsed]);
+    window.okDesktop.editor.notifyViewMenuStateChanged({
+      docPanelVisible: !isCollapsed || docPanelCover,
+    });
+  }, [isCollapsed, docPanelCover]);
 
   useEffect(() => {
     return subscribeLocalMenuAction((action) => {
@@ -1268,7 +1417,8 @@ function EditorAreaInner({
   let viewContent: ReactNode;
   let docSlotContent: ReactNode = null;
   let renderFocusedDocument: ((activityMount: ReactNode) => ReactNode) | null = null;
-  let coldStartSkeleton = false;
+  let docSlotHeldForLoad = false;
+  let skeletonReplacesWorkspace = false;
 
   if (activeTarget?.kind === 'large-file') {
     viewContent = (
@@ -1289,10 +1439,8 @@ function EditorAreaInner({
     });
     viewContent = (
       <div className="relative flex h-full min-h-0 flex-col">
-        {}
         <div className="relative flex min-h-0 flex-1 flex-col">
           <FolderOverview folderPath={activeTarget.folderPath} />
-          {}
           {showFolderComposer ? (
             <div
               aria-hidden
@@ -1300,7 +1448,9 @@ function EditorAreaInner({
             />
           ) : null}
         </div>
-        {showFolderComposer ? <BottomComposer folderPath={activeTarget.folderPath} /> : null}
+        {showFolderComposer ? (
+          <BottomComposer folderPath={activeTarget.folderPath} editorVisible={editorVisible} />
+        ) : null}
       </div>
     );
     const showAgentActivity = docPanelMode === 'agent' && docPanelAgentId !== null;
@@ -1317,7 +1467,10 @@ function EditorAreaInner({
             </div>
           }
         >
-          <LazyActivityModeContent showBackButton={false} />
+          <LazyActivityModeContent
+            showBackButton={false}
+            onDestinationRequested={requestDocPanelDestination}
+          />
         </Suspense>
       );
     }
@@ -1364,7 +1517,6 @@ function EditorAreaInner({
         subtitle={activeTarget.subtitle}
         level={activeTarget.level}
         path={activeTarget.path}
-        reserveRightGutter={rightRevealTabPresent}
       />
     );
   } else if (shareReceiveMiss) {
@@ -1372,12 +1524,10 @@ function EditorAreaInner({
   } else if (!activeProvider || !activeDocName) {
     const hashDoc = typeof window !== 'undefined' ? docNameFromHash(window.location.hash) : null;
     if (hashDoc !== null) {
-      if (terminalBridge != null && everHadProvider) {
-        viewContent = <EditorSkeleton />;
-        docSlotContent = <div className="min-h-0 flex-1" />;
-      } else {
-        coldStartSkeleton = true;
-      }
+      viewContent = <EditorSkeleton />;
+      docSlotContent = <div className="min-h-0 flex-1" />;
+      docSlotHeldForLoad = true;
+      skeletonReplacesWorkspace = terminalBridge == null || !everHadProvider;
     } else if (isBlobRunnerNewTabId(activeNewTabId)) {
       viewContent = <OkBlobRunnerPage />;
     } else {
@@ -1400,8 +1550,7 @@ function EditorAreaInner({
   } else {
     const showBottomComposer =
       shouldShowBottomComposer({
-        terminalVisible,
-        agentsVisible,
+        ...(editorVisible ? { terminalVisible, agentsVisible } : paneVisibilityWhileEditorShown),
         isEmbedded,
         activeDocName,
       }) &&
@@ -1410,18 +1559,16 @@ function EditorAreaInner({
     const externalSkillEdit = activeDocName ? parseExternalSkillDocName(activeDocName) : null;
     const renderEditorContent = (activityMount: ReactNode) => (
       <div className="relative flex h-full flex-col">
-        {}
         {externalSkillEdit ? (
           <Suspense fallback={null}>
             <SkillEditBanner name={externalSkillEdit.name} />
           </Suspense>
         ) : null}
+        <DocChangeNotice docName={activeDocName} timelineAvailable={!noteWindow} />
         <div className="relative min-h-0 flex-1">
-          {}
           <div className="relative h-full">
             {activityMount}
             <FindReplaceController activeDocName={activeDocName} isSourceMode={isSourceMode} />
-            {}
             {shouldPaintOverlay({
               activeDocName,
               deferredActiveDocName,
@@ -1430,36 +1577,37 @@ function EditorAreaInner({
             }) ? (
               <div className="absolute inset-0 z-10 bg-background">
                 <EditorSkeleton />
-                {}
                 {activeDocName !== null ? <MountStalledAffordance docName={activeDocName} /> : null}
               </div>
             ) : null}
-            {}
             {timelineDiff && timelineDiff.docName === activeDocName ? (
               <Suspense fallback={null}>
                 <LazyTimelineDiffPane
                   view={timelineDiff}
-                  isPanelCollapsed={isCollapsed}
+                  isPanelCollapsed={isCollapsed && !docPanelCover}
                   onTogglePanel={togglePanel}
+                  onDestinationComplete={completeDocPanelDestination}
+                  onDestinationFailed={reportCoveredDiffFailure}
                 />
               </Suspense>
             ) : null}
-            {}
             {agentDiff && agentDiffDoc === activeDocName ? (
               <Suspense fallback={null}>
                 <LazyAgentDiffPane
                   view={agentDiff}
-                  isPanelCollapsed={isCollapsed}
+                  isPanelCollapsed={isCollapsed && !docPanelCover}
                   onTogglePanel={togglePanel}
+                  onDestinationComplete={completeDocPanelDestination}
+                  onDestinationFailed={reportCoveredDiffFailure}
                 />
               </Suspense>
             ) : null}
           </div>
-          {}
           {showBottomComposer ? (
             <BottomComposer
               docName={activeDocName}
               surface={editingSurface}
+              editorVisible={editorVisible}
               dismissed={composerDismissed}
               onDismiss={() => setComposerDismissed(true)}
               onReopen={() => setComposerDismissed(false)}
@@ -1488,7 +1636,9 @@ function EditorAreaInner({
         activeTab={activeTab}
         onActiveTabChange={onActiveTabChange}
         mode={docPanelMode}
-        isCollapsed={isCollapsed}
+        isCollapsed={isCollapsed && !docPanelCover}
+        onDestinationComplete={completeDocPanelDestination}
+        onDestinationRequested={requestDocPanelDestination}
       />
     );
   }
@@ -1496,20 +1646,229 @@ function EditorAreaInner({
   if (noteWindow) docSlotContent = null;
 
   const docSlotPresent = docSlotContent != null;
+  const sidebarFit = resolveCurrentEditorSidebarFit(sidebarFitContext, docSlotPresent);
+  const docPanelCanDock = sidebarFit.informationDocked;
+  const docPanelDockReady = docPanelDockReadyFor(innerWidthPx, preferredDocPanelWidthPx);
+  const coordinateFilesRequest = useFilesRequestCoordinator({
+    fit: sidebarFitContext,
+    editorCardRef,
+    docSlotPresent,
+    setPreferredSidebar,
+    setDocPanelCover,
+    setPendingDocPanelDestination,
+    setFilesCanDock,
+  });
+  useLayoutEffect(() => registerFilesOpenRequestHandler(coordinateFilesRequest));
+  useLayoutEffect(() => registerFilesCoverSelectionHandler(setDestinationFocusDocName));
+  useLayoutEffect(() => {
+    setFilesCanDock(sidebarFit.filesDocked);
+  }, [sidebarFit.filesDocked, setFilesCanDock]);
+  const docPanelOnScreen = docPanelCover || !isCollapsed;
+  useLayoutEffect(() => {
+    if (sidebarFit.mode === 'both' && preferredSidebar != null) setPreferredSidebar(null);
+  }, [sidebarFit.mode, preferredSidebar]);
+  const showDocPanelToggle =
+    !noteWindow && renderFocusedDocument != null && activeDocConflict === null;
+  const docPanelToggle = showDocPanelToggle ? (
+    <DocPanelToggle
+      isPanelCollapsed={!docPanelOnScreen}
+      onTogglePanel={togglePanel}
+      panelId={docPanelCover ? 'doc-panel-cover' : DOC_PANEL_ID}
+      side={docPanelSide}
+    />
+  ) : null;
+  const workspaceHeaderChrome: WorkspaceHeaderChrome = {
+    leading: docPanelSide === 'start' ? docPanelToggle : null,
+    trailing: docPanelSide === 'end' ? docPanelToggle : null,
+    sidebarSwap: fileListHost != null,
+  };
+
+  const returnFocusFromDocPanelCoverEvent = useEffectEvent(returnFocusFromDocPanelCover);
+  useLayoutEffect(() => {
+    if (filesCover && docPanelCover) setDocPanelCover(false);
+  }, [filesCover, docPanelCover]);
+  const dismissFilesCoverEvent = useEffectEvent(dismissFilesCover);
+  useLayoutEffect(() => {
+    if (!filesCover) return;
+    if (fileListHost == null) {
+      dismissFilesCoverEvent(false);
+      return;
+    }
+    filesCoverTarget?.querySelector<HTMLElement>('[data-files-back]')?.focus();
+  }, [filesCover, fileListHost, filesCoverTarget]);
+  useEffect(() => {
+    if (!filesCover) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        event.isComposing ||
+        event.defaultPrevented ||
+        isOverlayLayerOpen() ||
+        !escapeBelongsToCover(event, '[data-files-cover]', null)
+      )
+        return;
+      event.preventDefault();
+      dismissFilesCoverEvent();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [filesCover]);
+  useLayoutEffect(() => {
+    if (!docSlotPresent) {
+      if (docPanelCover) {
+        setDocPanelCover(false);
+        setPendingDocPanelDestination(null);
+        returnFocusFromDocPanelCoverEvent();
+      }
+      return;
+    }
+    const collapsed = !docPanelIntentOpen || !docPanelCanDock || !docPanelDockReady;
+    if (isCollapsedRef.current !== collapsed) pinDocPanelRef.current(collapsed);
+    if (docPanelCover && docPanelCanDock && docPanelDockReady) {
+      const pendingDestination = pendingDocPanelDestinationRef.current;
+      if (pendingDestination !== null) {
+        pendingDestination.onReady?.();
+        if (pendingDestination.completion === 'synced') {
+          setDestinationFocusDocName(pendingDestination.docName);
+        }
+      } else {
+        if (document.activeElement === docPanelBackRef.current) returnFocusFromDocPanelCoverEvent();
+        if (
+          document.activeElement instanceof HTMLElement &&
+          docPanelHost.contains(document.activeElement)
+        ) {
+          docPanelDockFocusRef.current = document.activeElement;
+        }
+      }
+      setDocPanelCover(false);
+    }
+  }, [
+    docSlotPresent,
+    docPanelIntentOpen,
+    docPanelCanDock,
+    docPanelDockReady,
+    docPanelCover,
+    docPanelHost,
+  ]);
 
   useLayoutEffect(() => {
+    if (docPanelCover) docPanelBackRef.current?.focus();
+  }, [docPanelCover]);
+
+  const dismissDocPanelCoverEvent = useEffectEvent(dismissDocPanelCover);
+  useEffect(() => {
+    if (!docPanelCover) setPendingDocPanelDestination(null);
+  }, [docPanelCover]);
+  useEffect(() => {
+    if (!docPanelCover || pendingDocPanelDestination?.docName !== activeDocName) return;
+    const completeWhenSynced = () => {
+      if (
+        !activeProvider?.isSynced &&
+        !(pendingDocPanelDestination.allowMissing && activeTarget?.kind === 'missing')
+      )
+        return;
+      pendingDocPanelDestination.onReady?.();
+      setPendingDocPanelDestination(null);
+      if (pendingDocPanelDestination.completion === 'navigated') return;
+      setDocPanelCover(false);
+      setDestinationFocusDocName(activeDocName);
+    };
+    completeWhenSynced();
+    activeProvider?.on('synced', completeWhenSynced);
+    return () => {
+      activeProvider?.off('synced', completeWhenSynced);
+    };
+  }, [docPanelCover, pendingDocPanelDestination, activeDocName, activeProvider, activeTarget]);
+  useEffect(() => {
+    if (filesCover || docPanelCover) setDestinationFocusDocName(null);
+  }, [filesCover, docPanelCover]);
+  useEffect(() => {
+    if (destinationFocusDocName === null) return;
+    const abandon = () => setDestinationFocusDocName(null);
+    const deadline = window.setTimeout(abandon, DESTINATION_FOCUS_DEADLINE_MS);
+    window.addEventListener('pointerdown', abandon, true);
+    window.addEventListener('keydown', abandon, true);
+    return () => {
+      window.clearTimeout(deadline);
+      window.removeEventListener('pointerdown', abandon, true);
+      window.removeEventListener('keydown', abandon, true);
+    };
+  }, [destinationFocusDocName]);
+  useEffect(() => {
+    if (
+      filesCover ||
+      docPanelCover ||
+      destinationFocusDocName === null ||
+      destinationFocusDocName !== activeDocName
+    )
+      return;
+    const focusDestination = () => {
+      const mount = Array.from(
+        document.querySelectorAll<HTMLElement>('[data-editor-activity-mount]'),
+      ).find(
+        (element) =>
+          element.dataset.docName === destinationFocusDocName &&
+          element.closest('[inert]') === null &&
+          element.getClientRects().length > 0,
+      );
+      const editor = mount?.querySelector<HTMLElement>(
+        '.ProseMirror[contenteditable="true"], .cm-content[contenteditable="true"]',
+      );
+      if (!editor || editor.getClientRects().length === 0) return;
+      editor.focus({ preventScroll: true });
+      if (document.activeElement === editor) setDestinationFocusDocName(null);
+    };
+    const observer = new MutationObserver(focusDestination);
+    observer.observe(document.getElementById('root') ?? document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['inert', 'style', 'contenteditable'],
+    });
+    focusDestination();
+    return () => observer.disconnect();
+  }, [filesCover, docPanelCover, destinationFocusDocName, activeDocName]);
+  useEffect(() => {
+    if (!docPanelCover) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        event.isComposing ||
+        event.defaultPrevented ||
+        isOverlayLayerOpen() ||
+        !escapeBelongsToCover(event, '[data-doc-panel-cover]', docPanelCoverOpenerRef.current)
+      )
+        return;
+      event.preventDefault();
+      dismissDocPanelCoverEvent();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [docPanelCover]);
+
+  const editorVisibleAtPinRef = useRef(editorVisible);
+  useLayoutEffect(() => {
     const docSlotPresenceChanged = docSlotPresentRef.current !== docSlotPresent;
+    const editorShown = editorVisible && !editorVisibleAtPinRef.current;
     docSlotPresentRef.current = docSlotPresent;
-    if (!docSlotPresenceChanged) return;
+    docSlotHeldForLoadRef.current = docSlotHeldForLoad;
+    editorVisibleAtPinRef.current = editorVisible;
+    if (!docSlotPresenceChanged && !editorShown) return;
     const docCollapsed = isCollapsedRef.current;
+    let lastMiss: DocPanelPinMiss | null = null;
     runRailLayoutRetry({
       retryRef: presenceRepinRetryRef,
-      attempt: () => attemptRailLayout(docCollapsed),
-      context: {
-        decision: 'sync-doc-presence',
-        targetWidthPx: agentsVisible ? agentsPreferredWidthPxRef.current : 0,
+      attempt: () => {
+        lastMiss = null;
+        return attemptDocPanelPin(docCollapsed, (miss) => {
+          lastMiss = miss;
+        });
       },
-      onExhausted: () => reportRailPinExhausted('doc-slot-presence'),
+      context: {
+        decision: docSlotPresenceChanged ? 'sync-doc-presence' : 'show-editor',
+        targetWidthPx: docPanelWidthPxRef.current,
+      },
+      describeMiss: () => lastMiss,
     });
   });
   useEffect(() => () => cancelRailLayoutRetry(presenceRepinRetryRef), []);
@@ -1617,9 +1976,6 @@ function EditorAreaInner({
               provider={provider}
               isSourceMode={isSourceMode}
               onModeChange={onModeChange}
-              isPanelCollapsed={isCollapsed}
-              onTogglePanel={togglePanel}
-              reserveRightGutter={docName === activeDocName && rightRevealTabPresent && isCollapsed}
             />
           )
         }
@@ -1632,225 +1988,265 @@ function EditorAreaInner({
     );
   }
 
-  const leftColumn = (
-    <TerminalDock
-      placement={terminalPlacement}
-      visible={terminalVisible}
-      onVisibleChange={onTerminalVisibleChange ?? (() => {})}
-      onBottomContainer={setBottomTerminalContainer}
-      onEditorRegion={setTerminalEditorRegion}
+  const documentArea = skeletonReplacesWorkspace ? (
+    <EditorSkeleton />
+  ) : (
+    <div
+      ref={setTerminalEditorRegion}
+      tabIndex={-1}
+      data-editor-region=""
+      className="relative flex min-h-0 flex-1 flex-col outline-none"
     >
-      <EditorWorkspace
-        renderHeader={(tabs) =>
-          workspaceHeaderContainer == null
-            ? null
-            : createPortal(renderWorkspaceHeader(tabs), workspaceHeaderContainer)
+      <EditorContentOnScreenContext value={!docPanelCover && !filesCover}>
+        <EditorWorkspace
+          renderHeader={(tabs) =>
+            workspaceHeaderContainer == null
+              ? null
+              : createPortal(
+                  renderWorkspaceHeader(tabs, workspaceHeaderChrome),
+                  workspaceHeaderContainer,
+                )
+          }
+          renderPane={renderWorkspacePane}
+          renderActivityPool={renderWorkspaceActivityPool}
+        />
+      </EditorContentOnScreenContext>
+    </div>
+  );
+
+  const docHandle = (
+    <ResizableHandle
+      data-doc-panel-handle=""
+      aria-controls={DOC_PANEL_ID}
+      aria-label={t`Resize document panel`}
+      withHandle={docSlotPresent && !isCollapsed && !docPanelCover}
+      disabled={!docSlotPresent || isCollapsed || docPanelCover}
+      className={docSlotPresent ? undefined : 'pointer-events-none'}
+      style={docSlotPresent && !isCollapsed && !docPanelCover ? undefined : { display: 'none' }}
+      onPointerDown={(event) => {
+        beginDocHandleDrag(event.pointerId);
+      }}
+    />
+  );
+  const docPanelSlot = (
+    <ResizablePanel
+      id={DOC_PANEL_ID}
+      role="region"
+      aria-label={t`Document panel`}
+      panelRef={panelRef}
+      defaultSize={!docSlotPresent || docPanelSeed.collapsed ? 0 : `${docPanelSeed.widthPx}px`}
+      elementRef={setDocPanelEl}
+      minSize={DOC_PANEL_MIN_SIZE}
+      maxSize={docSlotPresent ? DOC_PANEL_MAX_SIZE : '0px'}
+      collapsible
+      collapsedSize={0}
+      onResize={(size) => {
+        if (docSlotPresent) {
+          setIsCollapsed(size.asPercentage === 0);
         }
-        renderPane={renderWorkspacePane}
-        renderActivityPool={renderWorkspaceActivityPool}
-      />
-    </TerminalDock>
+        if (size.inPixels > 0 && isDraggingDocHandleRef.current) {
+          docPanelWidthPxRef.current = size.inPixels;
+          adoptDraggedDocPanelWidth(size.inPixels);
+          debouncedWriteDocPanelWidth(size.inPixels);
+        }
+        reclaimHiddenDocPanel(docSlotPresent, size.inPixels);
+      }}
+      inert={!docSlotPresent || isCollapsed}
+      className={cn('flex flex-col', SECONDARY_PANEL_SURFACE_CLASS)}
+    >
+      <div ref={docPanelDockRef} className="flex h-full min-h-0 w-full flex-col" />
+    </ResizablePanel>
+  );
+  const docSlot =
+    docPanelSide === 'start' ? (
+      <>
+        {docPanelSlot}
+        {docHandle}
+      </>
+    ) : (
+      <>
+        {docHandle}
+        {docPanelSlot}
+      </>
+    );
+
+  const chatAlone = !editorVisible && agentsShowing && !terminalShowing;
+  const nothingOpen = !editorVisible && !agentsVisible && !terminalVisible;
+  const workspaceAbsorbsResidual = docSlotPresent && !initialRightCollapsed;
+  const workspaceHeaderTarget = (
+    <div
+      ref={setWorkspaceHeaderContainer}
+      data-editor-area-header=""
+      className={cn('relative z-30 shrink-0', (filesCover || docPanelCover) && 'invisible')}
+    />
   );
 
-  const docSlot = (
-    <>
-      <ResizableHandle
-        data-doc-panel-handle=""
-        withHandle={docSlotPresent && !isCollapsed}
-        disabled={!docSlotPresent || isCollapsed}
-        className={docSlotPresent ? undefined : 'pointer-events-none'}
-        style={docSlotPresent ? undefined : { display: 'none' }}
-        onPointerDown={(event) => {
-          trackHandleDrag(event.pointerId, setIsDraggingDocHandle, isDraggingDocHandleRef);
-        }}
+  const fileListSlot =
+    fileListHost != null ? (
+      <div
+        data-editor-file-list-slot=""
+        data-side={fileSidebarSide}
+        inert={docPanelCover}
+        className="relative flex shrink-0"
+        ref={fileListSlotRef}
       />
-      <ResizablePanel
-        id={DOC_PANEL_ID}
-        panelRef={panelRef}
-        defaultSize={!docSlotPresent || initialRightCollapsed ? 0 : `${initialDocPanelWidthPx}px`}
-        minSize={DOC_PANEL_MIN_SIZE}
-        maxSize={docSlotPresent ? DOC_PANEL_MAX_SIZE : '0px'}
-        collapsible
-        collapsedSize={0}
-        onResize={(size) => {
-          if (docSlotPresent) {
-            setIsCollapsed(size.asPercentage === 0);
-          }
-          if (size.inPixels > 0 && isDraggingDocHandleRef.current) {
-            docPanelWidthPxRef.current = size.inPixels;
-            debouncedWriteDocPanelWidth(size.inPixels);
-          }
-          reclaimHiddenRailColumn(DOC_PANEL_ID, docSlotPresent, size.inPixels);
-        }}
-        inert={!docSlotPresent || isCollapsed}
-        className="flex flex-col bg-muted/20"
-      >
-        {docSlotContent}
-      </ResizablePanel>
-    </>
-  );
+    ) : null;
 
-  const terminalColumn = (
-    <>
-      <ResizableHandle
-        withHandle={terminalColumnPresent}
-        className={terminalColumnPresent ? undefined : 'pointer-events-none'}
-        style={terminalColumnPresent ? undefined : { display: 'none' }}
-        onPointerDown={(event) => {
-          trackHandleDrag(
-            event.pointerId,
-            setIsDraggingTerminalHandle,
-            isDraggingTerminalHandleRef,
-            () => {
-              if (terminalColumnPanelRef.current?.isCollapsed()) {
-                onTerminalVisibleChange?.(false);
-              }
-            },
-            () => {
-              if (!terminalColumnPanelRef.current?.isCollapsed()) setTerminalShowingHold(false);
-            },
-          );
-        }}
-      />
-      <ResizablePanel
-        id={TERMINAL_COLUMN_ID}
-        panelRef={terminalColumnPanelRef}
-        defaultSize={terminalColumnPresent ? `${initialTerminalWidthPx}px` : 0}
-        minSize={terminalColumnPresent ? `${RIGHT_TERMINAL_PANEL_MIN_WIDTH_PX}px` : '0px'}
-        maxSize={terminalColumnPresent ? undefined : '0px'}
-        collapsible
-        collapsedSize={0}
-        onResize={(size) => {
-          if (size.inPixels > 0 && isDraggingTerminalHandleRef.current) {
-            terminalWidthPxRef.current = size.inPixels;
-            debouncedWriteTerminalWidth(size.inPixels);
-          }
-          setTerminalColumnCollapsed(size.inPixels === 0);
-          if (size.inPixels === 0 && isDraggingTerminalHandleRef.current) {
-            setTerminalShowingHold(true);
-          } else if (size.inPixels > 0 && !isDraggingTerminalHandleRef.current) {
-            setTerminalShowingHold(false);
-          }
-          reclaimHiddenRailColumn(TERMINAL_COLUMN_ID, terminalColumnPresent, size.inPixels);
-        }}
-        className="flex flex-col"
-      >
+  const editorUnit = (
+    <PaneCard
+      ref={editorCardRef}
+      pane="editor"
+      variant={cardVariant}
+      className="flex-row"
+      inert={!editorVisible}
+      data-editor-hidden={editorVisible ? undefined : ''}
+    >
+      {fileSidebarSide === 'start' ? fileListSlot : null}
+      <SidebarInset inert={docPanelCover || filesCover} className="min-w-0 overflow-hidden">
         <div
-          ref={setRightTerminalContainer}
-          data-terminal-panel-mount=""
-          inert={!terminalColumnPresent || (terminalColumnCollapsed && !terminalShowingHold)}
-          className="flex min-h-0 flex-1 flex-col overflow-hidden"
-        />
-      </ResizablePanel>
-    </>
+          data-editor-inner-panels=""
+          className="relative flex min-h-0 flex-1"
+          ref={(el) => {
+            setInnerContainerEl(el);
+            innerContainerElRef.current = el;
+          }}
+        >
+          <ResizablePanelGroup
+            orientation="horizontal"
+            groupRef={innerGroupRef}
+            data-editor-row="inner"
+            onLayoutChange={adoptLibraryDrag}
+            data-dragging={isDraggingDocHandle || undefined}
+          >
+            {docPanelSide === 'start' ? docSlot : null}
+            <ResizablePanel
+              minSize={docSlotPresent && !isCollapsed ? `${DOC_USABLE_MIN_WIDTH_PX}px` : '0%'}
+              {...(workspaceAbsorbsResidual ? {} : { defaultSize: '100%' })}
+            >
+              <main
+                ref={setWorkspaceColumnEl}
+                data-editor-workspace-column=""
+                className="flex h-full min-w-0 flex-col"
+              >
+                {noteWindow ? null : workspaceHeaderTarget}
+                {documentArea}
+              </main>
+            </ResizablePanel>
+            {docPanelSide === 'end' ? docSlot : null}
+          </ResizablePanelGroup>
+        </div>
+      </SidebarInset>
+      {fileSidebarSide === 'end' ? fileListSlot : null}
+      {filesCover && fileListHost != null ? (
+        <section
+          aria-label={t`Files`}
+          data-files-cover=""
+          className={cn(
+            'absolute inset-0 z-20 flex min-h-0 min-w-0 flex-col',
+            SECONDARY_PANEL_SURFACE_CLASS,
+          )}
+        >
+          <div ref={setFilesCoverTarget} className="relative min-h-0 flex-1" />
+        </section>
+      ) : null}
+      {docPanelCover && docSlotPresent ? (
+        <section
+          id="doc-panel-cover"
+          aria-label={t`Document panel`}
+          data-doc-panel-cover=""
+          className={cn(
+            'absolute inset-0 z-20 flex min-h-0 min-w-0 flex-col',
+            SECONDARY_PANEL_SURFACE_CLASS,
+          )}
+        >
+          <div className="flex h-11 shrink-0 items-center gap-1 px-2">
+            <Button
+              ref={docPanelBackRef}
+              data-doc-panel-back=""
+              variant="ghost"
+              size="icon-sm"
+              aria-label={t`Back to editor`}
+              title={t`Back to editor`}
+              onClick={dismissDocPanelCover}
+              onKeyDown={(event) => {
+                if (event.key !== 'Escape' || isOverlayLayerOpen()) return;
+                event.preventDefault();
+                dismissDocPanelCover();
+              }}
+            >
+              <ChevronLeft aria-hidden="true" />
+            </Button>
+            <h2 className="min-w-0 flex-1 truncate font-mono text-xs font-normal uppercase tracking-wide text-muted-foreground">
+              {activeDocName ?? t`Activity`}
+            </h2>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  data-doc-panel-hide=""
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={t`Hide panel`}
+                  onClick={togglePanel}
+                >
+                  <PanelRightClose aria-hidden="true" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" sideOffset={8}>{t`Hide panel`}</TooltipContent>
+            </Tooltip>
+          </div>
+          <div ref={docPanelCoverRef} className="min-h-0 flex-1" />
+        </section>
+      ) : null}
+    </PaneCard>
   );
 
-  const agentsColumn = (
-    <>
-      <ResizableHandle
-        withHandle={agentsColumnPresent}
-        aria-controls={terminalColumnPresent ? TERMINAL_COLUMN_ID : AGENTS_COLUMN_ID}
-        aria-label={terminalColumnPresent ? t`Terminal` : t`Agents`}
-        data-agents-panel-resize-handle=""
-        className={agentsColumnPresent ? undefined : 'pointer-events-none'}
-        style={agentsColumnPresent ? undefined : { display: 'none' }}
-        onPointerDown={(event) => {
-          cancelAgentsSettlement();
-          trackHandleDrag(
-            event.pointerId,
-            setIsDraggingAgentsHandle,
-            isDraggingAgentsHandleRef,
-            settleAgentsPointerRelease,
-            () => {
-              if (!agentsColumnPanelRef.current?.isCollapsed()) setAgentsShowingHold(false);
-            },
-          );
-        }}
+  const agentsUnit = noteWindow ? null : (
+    <PaneCard pane="agents" variant={cardVariant}>
+      <section
+        ref={setAgentsContainer}
+        data-agents-panel-mount=""
+        data-chat-alone={chatAlone ? '' : undefined}
+        aria-label={t`Agent panel`}
+        inert={!agentsUnitShown}
+        className="flex min-h-0 flex-1 flex-col overflow-hidden"
       />
-      <ResizablePanel
-        id={AGENTS_COLUMN_ID}
-        panelRef={agentsColumnPanelRef}
-        defaultSize={agentsColumnPresent ? `${initialAgentsWidthPx}px` : 0}
-        minSize="0px"
-        maxSize={agentsColumnPresent ? '95%' : '0px'}
-        collapsible
-        collapsedSize={0}
-        onResize={(size) => {
-          setAgentsColumnCollapsed(size.inPixels === 0);
-          if (size.inPixels === 0 && isDraggingAgentsHandleRef.current) {
-            setAgentsShowingHold(true);
-          } else if (size.inPixels > 0 && !isDraggingAgentsHandleRef.current) {
-            setAgentsShowingHold(false);
-          }
-          reclaimHiddenRailColumn(AGENTS_COLUMN_ID, agentsColumnPresent, size.inPixels);
-        }}
-        className="flex flex-col"
-      >
-        {}
-        <div
-          ref={setAgentsContainer}
-          data-agents-panel-mount=""
-          inert={!agentsColumnPresent || (agentsColumnCollapsed && !agentsShowingHold)}
-          className="flex min-h-0 flex-1 flex-col overflow-hidden"
-        />
-      </ResizablePanel>
-    </>
+    </PaneCard>
   );
 
-  if (coldStartSkeleton) return <EditorSkeleton />;
-
-  const editorAbsorbsResidual =
-    (docSlotPresent && !initialRightCollapsed) || resizableRailColumnPresent;
+  const terminalUnit = terminalAvailable ? (
+    <PaneCard
+      pane="terminal"
+      variant={cardVariant}
+      data-placement={terminalPlacement}
+      style={{ backgroundColor: xtermBackground }}
+    >
+      <div
+        ref={setTerminalContainer}
+        data-terminal-panel-mount=""
+        inert={!terminalUnitShown}
+        className="flex min-h-0 flex-1 flex-col overflow-hidden"
+      />
+    </PaneCard>
+  ) : null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div
-        ref={setWorkspaceHeaderContainer}
-        data-editor-area-header=""
-        className="relative z-30 shrink-0"
-      />
-      <div
-        data-editor-area-panels=""
-        className="relative flex min-h-0 flex-1"
-        ref={(el) => {
-          setGroupContainerEl(el);
-          groupContainerElRef.current = el;
-        }}
-      >
-        <ResizablePanelGroup
-          orientation="horizontal"
-          groupRef={groupRef}
-          onLayoutChanged={(layout, meta) => {
-            settleAgentsKeyboardLayout(layout, meta.isUserInteraction);
-          }}
-          data-dragging={
-            isDraggingDocHandle || isDraggingTerminalHandle || isDraggingAgentsHandle || undefined
-          }
-        >
-          <ResizablePanel
-            minSize={resizableRailColumnPresent ? '5%' : '30%'}
-            {...(editorAbsorbsResidual ? {} : { defaultSize: '100%' })}
-          >
-            <div ref={setWorkspaceColumnEl} className="flex h-full min-w-0 flex-col">
-              {leftColumn}
-            </div>
-          </ResizablePanel>
-          {docSlot}
-          {terminalColumn}
-          {agentsColumn}
-        </ResizablePanelGroup>
-        {rightRevealTabPresent ? (
-          <TerminalRevealTab
-            edge="right"
-            onReveal={() => {
-              if (agentsVisible && agentsColumnCollapsed) {
-                assertRightRailLayout(isCollapsedRef.current);
-              } else onRevealAgents();
-            }}
-            className="top-2.5 right-0"
-          />
-        ) : null}
+      {noteWindow ? workspaceHeaderTarget : null}
+      <div data-editor-area-panels="" className="relative flex min-h-0 flex-1">
+        <DockWorkspace
+          tree={dockTree}
+          visible={{ editor: editorVisible, agents: agentsUnitShown, terminal: terminalUnitShown }}
+          units={{ editor: editorUnit, agents: agentsUnit, terminal: terminalUnit }}
+          gap={cardLook ? PANE_CARD_GAP_PX : 0}
+          minExtent={dockPaneMinExtent}
+          paneLabel={(pane) => t(PANE_LABEL[pane])}
+          onTreeChange={onDockTreeChange}
+          onLayoutChange={setDockLayout}
+          redockable={!noteWindow}
+        />
+        {nothingOpen ? <NothingOpen /> : null}
       </div>
+      {createPortal(docSlotContent, docPanelHost)}
     </div>
   );
 }

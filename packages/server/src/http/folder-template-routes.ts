@@ -4,6 +4,7 @@ import type { ServerResponse } from 'node:http';
 import { relative, resolve, sep } from 'node:path';
 import type { Hocuspocus } from '@hocuspocus/server';
 import {
+  canonicalTemplateName,
   EmptyRequestSchema,
   FolderConfigGetSuccessSchema,
   FolderConfigPutRequestSchema,
@@ -15,6 +16,7 @@ import {
   parseTemplateFile,
   stripFrontmatter,
   TEMPLATE_NAME_REGEX,
+  TEMPLATE_NAME_RULE,
   TemplateDeleteSuccessSchema,
   TemplateGetSuccessSchema,
   TemplateImportRequestSchema,
@@ -28,10 +30,16 @@ import {
 } from '@inkeep/open-knowledge-core';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import type { AgentSessionManager } from '../agent-sessions.ts';
+import {
+  type AgentWriteFlushOutcome,
+  answeredWithSuccessOnAppRoutes,
+  outcomeOfSavedWrite,
+} from '../agent-write-outcome.ts';
 import { composeAndWriteRawBody } from '../bridge-intake.ts';
 import { isConfigDoc, isSystemDoc } from '../cc1-broadcast.ts';
 import type { ConflictAuthority } from '../conflict-authority.ts';
 import { DocInConflictError, respondDocInConflict } from '../conflict-errors.ts';
+import type { RemovalLifecycleStatus } from '../conflict-kinds.ts';
 import { enrichDirectory } from '../content/enrichment.ts';
 import {
   applyFolderFrontmatterPatch,
@@ -101,22 +109,16 @@ export interface FolderTemplateRouteDeps {
     previousPaths?: Array<{ from: string; to: string }>,
   ) => void;
   scheduleOkArtifactFlush: (context: string) => void;
-  flushDiskAndDetectOutcome: (
-    docName: string,
-  ) => Promise<
-    | { kind: 'failure'; failure: StoreFailure }
-    | { kind: 'divergence' }
-    | { kind: 'stale-external-write' }
-    | null
-  >;
+  flushDiskAndDetectOutcome: (docName: string) => Promise<AgentWriteFlushOutcome>;
+  markAgentWriteStore: (docName: string) => void;
   respondPersistenceFailure: (res: ServerResponse, failure: StoreFailure, handler: string) => void;
-  respondDiskDivergence: (res: ServerResponse, handler: string) => void;
   respondStaleExternalWrite: (res: ServerResponse, handler: string, docName: string) => void;
   registerWrittenDocInFileIndex: (docName: string, content: string) => void;
   captureAndCloseDocuments: (
     docNames: string[],
-    lifecycleStatus: 'deleted-upstream' | 'renamed',
+    lifecycleStatus: RemovalLifecycleStatus,
   ) => Promise<Map<string, string>>;
+  captureNamespaceMove?: (docName: string) => () => void;
   renameTrackedPathInGit: (
     projectDir: string | undefined,
     sourcePath: string,
@@ -156,11 +158,12 @@ export function createFolderTemplateRoutes(deps: FolderTemplateRouteDeps): ApiRo
     attributeOkArtifactWrite,
     scheduleOkArtifactFlush,
     flushDiskAndDetectOutcome,
+    markAgentWriteStore,
     respondPersistenceFailure,
-    respondDiskDivergence,
     respondStaleExternalWrite,
     registerWrittenDocInFileIndex,
     captureAndCloseDocuments,
+    captureNamespaceMove,
     renameTrackedPathInGit,
     renamePathOnDisk,
     splitContentPath,
@@ -173,7 +176,7 @@ export function createFolderTemplateRoutes(deps: FolderTemplateRouteDeps): ApiRo
         res,
         400,
         'urn:ok:error:invalid-request',
-        'Invalid name: must be letters / digits / `_` / `-` only (no `.md` extension).',
+        `Invalid name: must use ${TEMPLATE_NAME_RULE}, without the \`.md\` extension.`,
         { handler },
       );
       return false;
@@ -253,6 +256,13 @@ export function createFolderTemplateRoutes(deps: FolderTemplateRouteDeps): ApiRo
 
   function templateDocNameFor(folderRel: string, name: string): string {
     return templateContentDocName(folderRel, name);
+  }
+
+  const reservedImportTargets = new Set<string>();
+
+  function isTemplateNameTaken(templatesDir: string, name: string): boolean {
+    const filePath = resolve(templatesDir, `${name}.md`);
+    return reservedImportTargets.has(filePath) || existsSync(filePath);
   }
 
   const handleFolderConfigGet = withValidation(
@@ -689,14 +699,14 @@ export function createFolderTemplateRoutes(deps: FolderTemplateRouteDeps): ApiRo
         templateSession.dc.document.transact(() => {
           composeAndWriteRawBody(templateSession.dc.document, composed.content, 'agent');
         }, templateSession.origin);
+        markAgentWriteStore(templateDocName);
 
         const templateFlush = await flushDiskAndDetectOutcome(templateDocName);
-        if (templateFlush?.kind === 'failure') {
+        if (
+          templateFlush?.kind === 'failure' &&
+          !answeredWithSuccessOnAppRoutes(templateFlush.failure)
+        ) {
           respondPersistenceFailure(res, templateFlush.failure, 'template-put');
-          return;
-        }
-        if (templateFlush?.kind === 'divergence') {
-          respondDiskDivergence(res, 'template-put');
           return;
         }
         if (templateFlush?.kind === 'stale-external-write') {
@@ -717,6 +727,7 @@ export function createFolderTemplateRoutes(deps: FolderTemplateRouteDeps): ApiRo
           200,
           TemplatePutSuccessSchema,
           {
+            ...outcomeOfSavedWrite(undefined, templateFlush),
             path: templateRelPath,
             created: templateCreated,
             warnings: composed.warnings,
@@ -871,6 +882,9 @@ export function createFolderTemplateRoutes(deps: FolderTemplateRouteDeps): ApiRo
           'renamed',
         );
 
+        const acceptMove = captureNamespaceMove?.(
+          templateDocNameFor(toValidated.folderRel, body.toName),
+        );
         const result = await applyTemplateMove({
           projectDir: fromValidated.resolvedContentDir,
           fromFolder: fromValidated.folderRel,
@@ -950,6 +964,7 @@ export function createFolderTemplateRoutes(deps: FolderTemplateRouteDeps): ApiRo
           return;
         }
 
+        acceptMove?.();
         recentlyRemovedDocs?.setDeleted(templateDocNameFor(fromValidated.folderRel, body.fromName));
 
         const movedAbs = resolve(toValidated.resolvedContentDir, result.toPath);
@@ -1072,6 +1087,7 @@ export function createFolderTemplateRoutes(deps: FolderTemplateRouteDeps): ApiRo
   const handleTemplateImport = withValidation(
     TemplateImportRequestSchema,
     async (_req, res, body) => {
+      let reservedTarget: string | undefined;
       try {
         if (ephemeral) {
           errorResponse(
@@ -1172,7 +1188,9 @@ export function createFolderTemplateRoutes(deps: FolderTemplateRouteDeps): ApiRo
         if (!name) {
           const { basename } = splitContentPath(sourcePath);
           const nameWithoutExt = basename.replace(/\.(md|mdx)$/i, '');
-          name = nameWithoutExt.replace(/[^A-Za-z0-9_-]/g, '-').toLowerCase();
+          name = canonicalTemplateName(nameWithoutExt)
+            .replace(/[^\p{L}\p{M}\p{N}_-]|\p{DI}/gu, '-')
+            .toLowerCase();
           name = name.replace(/^[-_]+|[-_]+$/g, '');
           name ||= 'imported-template';
         }
@@ -1188,13 +1206,20 @@ export function createFolderTemplateRoutes(deps: FolderTemplateRouteDeps): ApiRo
         );
         if (!validated) return;
 
-        const templateFilePath = resolve(
+        const templatesDir = resolve(
           validated.resolvedContentDir,
           validated.folderRel,
           '.ok',
           'templates',
-          `${name}.md`,
         );
+        if (!body.name) {
+          const baseName = name;
+          for (let suffix = 2; isTemplateNameTaken(templatesDir, name); suffix++) {
+            name = `${baseName}-${suffix}`;
+          }
+        }
+
+        const templateFilePath = resolve(templatesDir, `${name}.md`);
         if (checkSymlinkLeaf(templateFilePath).kind === 'symlink') {
           errorResponse(
             res,
@@ -1214,6 +1239,19 @@ export function createFolderTemplateRoutes(deps: FolderTemplateRouteDeps): ApiRo
           )
         )
           return;
+
+        if (isTemplateNameTaken(templatesDir, name)) {
+          errorResponse(
+            res,
+            409,
+            'urn:ok:error:doc-already-exists',
+            `Template "${name}" already exists in "${validated.folderRel || '(root)'}". Choose another name, or edit the existing template instead.`,
+            { handler: 'template-import', detail: 'TEMPLATE_EXISTS' },
+          );
+          return;
+        }
+        reservedImportTargets.add(templateFilePath);
+        reservedTarget = templateFilePath;
 
         const { frontmatter: sourceFmText, body: sourceBody } = stripFrontmatter(sourceContent);
         const cleanFmText = unwrapFrontmatterFences(sourceFmText);
@@ -1277,14 +1315,14 @@ export function createFolderTemplateRoutes(deps: FolderTemplateRouteDeps): ApiRo
         templateSession.dc.document.transact(() => {
           composeAndWriteRawBody(templateSession.dc.document, composed.content, 'agent');
         }, templateSession.origin);
+        markAgentWriteStore(templateDocName);
 
         const templateFlush = await flushDiskAndDetectOutcome(templateDocName);
-        if (templateFlush?.kind === 'failure') {
+        if (
+          templateFlush?.kind === 'failure' &&
+          !answeredWithSuccessOnAppRoutes(templateFlush.failure)
+        ) {
           respondPersistenceFailure(res, templateFlush.failure, 'template-import');
-          return;
-        }
-        if (templateFlush?.kind === 'divergence') {
-          respondDiskDivergence(res, 'template-import');
           return;
         }
         if (templateFlush?.kind === 'stale-external-write') {
@@ -1322,6 +1360,7 @@ export function createFolderTemplateRoutes(deps: FolderTemplateRouteDeps): ApiRo
           200,
           TemplateImportSuccessSchema,
           {
+            ...outcomeOfSavedWrite(undefined, templateFlush),
             path: templateRelPath,
             created: templateCreated,
             warnings: composed.warnings,
@@ -1339,6 +1378,8 @@ export function createFolderTemplateRoutes(deps: FolderTemplateRouteDeps): ApiRo
             cause: e,
           },
         );
+      } finally {
+        if (reservedTarget !== undefined) reservedImportTargets.delete(reservedTarget);
       }
     },
     { handler: 'template-import', method: 'POST' },

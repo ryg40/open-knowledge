@@ -1,14 +1,26 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 import { SHOW_INSTALL_SKILL } from '@inkeep/open-knowledge-core/constants/feature-flags';
 import { mediaKindForSidebarAssetExtension } from '@inkeep/open-knowledge-core/constants/upload';
-import { lazy, type ReactNode, Suspense, useEffect, useRef, useState } from 'react';
+import {
+  type CSSProperties,
+  lazy,
+  type ReactNode,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import { toast } from 'sonner';
 import { CommentQueueShortcut } from '@/comments/CommentQueueShortcut';
+import { APP_HEADER_HEIGHT, AppHeader } from '@/components/AppHeader';
 import { BranchRecycleBanner } from '@/components/BranchRecycleBanner';
 import { CommandPalette } from '@/components/CommandPalette';
 import { ConnectingBanner } from '@/components/ConnectingBanner';
+import { CornerCardStack } from '@/components/CornerCardStack';
 import { CreateProjectMenuTrigger } from '@/components/CreateProjectMenuTrigger';
 import { EditorPane } from '@/components/EditorPane';
 import { FeedbackMenuTrigger } from '@/components/FeedbackMenuTrigger';
+import { FileListHostProvider } from '@/components/FileListHost';
 import { FileSidebar } from '@/components/FileSidebar';
 import { defaultInitialDir } from '@/components/file-tree-utils';
 import { ExternalHandoffGateProvider } from '@/components/handoff/ExternalHandoffGate';
@@ -32,7 +44,7 @@ import { PageListProvider, usePageList } from '@/components/PageListContext';
 import { ReportBugMenuTrigger } from '@/components/ReportBugMenuTrigger';
 import { SkillTrackInGitDialog } from '@/components/SkillTrackInGitDialog';
 import { SystemDocSubscriber } from '@/components/SystemDocSubscriber';
-import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
+import { SidebarProvider } from '@/components/ui/sidebar';
 import { ValidationFreshness } from '@/components/ValidationFreshness';
 import { BackgroundThrottleReporter } from '@/editor/BackgroundThrottleReporter';
 import {
@@ -43,7 +55,9 @@ import {
 import { EditorLifecycleFlush } from '@/editor/EditorLifecycleFlush';
 import { parseEditorTabId, tabIdForNavigationTarget } from '@/editor/editor-tabs';
 import { previewOpenDisposition } from '@/editor/preview-open-disposition';
+import { StaleTabReloadPrompt } from '@/editor/StaleTabReloadPrompt';
 import { ConflictsProvider } from '@/hooks/use-conflicts';
+import { DocNoticesProvider } from '@/hooks/use-doc-notices';
 import { useFolderConfig } from '@/hooks/use-folder-config';
 import { useInstalledClis } from '@/hooks/use-installed-clis';
 import { useReconcileSkillTabs } from '@/hooks/use-reconcile-skill-tabs';
@@ -51,28 +65,29 @@ import { ConfigProvider, useConfigContext } from '@/lib/config-provider';
 import { createPageRequest, nextUntitledDocName, openCreatedPage } from '@/lib/create-page-request';
 import {
   assetPathFromHash,
+  clearHashWithoutNavigation,
   docNameFromHash,
   hashFromDocName,
   isContentRootHash,
   isManagedHashHistoryState,
   markCurrentHashHistoryEntry,
-  replaceHashWithoutNavigation,
+  readManagedHashHistoryEntry,
   skillFileFromHash,
   skillPreviewFromHash,
   skillsFromHash,
 } from '@/lib/doc-hash';
 import { subscribeLocalMenuAction } from '@/lib/local-menu-action-bus';
+import { isExplicitInitialDocumentNavigation } from '@/lib/narrow-workspace-session';
 import { isNoteWindow } from '@/lib/note-window-mode';
 import { isOverlayLayerOpen } from '@/lib/overlay-layers';
 import { mark, ProfilerBoundary } from '@/lib/perf';
+import { revealEditor } from '@/lib/reveal-editor';
 import { SingleFileModeProvider, useSingleFileMode } from '@/lib/single-file-mode';
 import { consumeHashNavigationSuppression } from '@/lib/tab-session-restore-suppression';
 import { useServerKeepalive } from '@/lib/use-server-keepalive';
-import {
-  isSettingsHashOpen,
-  isSettingsShortcut,
-  SETTINGS_OPEN_HASH,
-} from '@/lib/use-settings-route';
+import { isSettingsHashOpen, isSettingsShortcut, openSettings } from '@/lib/use-settings-route';
+import { cn } from '@/lib/utils';
+import { consumeWorkspaceHashWrite } from '@/lib/workspace-hash-writes';
 
 const ShareBranchSwitchDialog = lazy(() =>
   import('@/components/ShareBranchSwitchDialog').then((m) => ({
@@ -159,8 +174,20 @@ function NavigationHandler() {
   const previewTabsEnabled = merged?.editor?.previewTabs ?? true;
   const lastSyncedTargetsSignatureRef = useRef<string | null>(null);
   const historyTraversalUrlRef = useRef<string | null>(null);
+  const initialDocumentNavigationRef = useRef(isExplicitInitialDocumentNavigation());
   const lastResolvedSurfaceHashRef = useRef<string | null>(null);
   const targetsSignature = knownTargetsSignature(pages, folderPaths, assetPaths, filePaths);
+
+  useEffect(() => {
+    function revealEditorForDocumentLink(event: MouseEvent) {
+      if (event.defaultPrevented || event.button !== 0) return;
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      if (!(event.target instanceof Element)) return;
+      if (event.target.closest('a[href^="#/"]') != null) revealEditor();
+    }
+    document.addEventListener('click', revealEditorForDocumentLink);
+    return () => document.removeEventListener('click', revealEditorForDocumentLink);
+  }, []);
 
   useEffect(
     () =>
@@ -198,13 +225,17 @@ function NavigationHandler() {
       window.location.hash !== '' &&
       !isAuxiliaryDialogHash(window.location.hash)
     ) {
-      replaceHashWithoutNavigation('');
+      clearHashWithoutNavigation();
     }
   }, []);
 
   useEffect(() => {
     if (!tabSessionLoaded && window.okDesktop?.config.mode === 'editor') return;
-    syncTargetFromHash(historyTraversalUrlRef.current);
+    if (initialDocumentNavigationRef.current) {
+      initialDocumentNavigationRef.current = false;
+      revealEditor();
+    }
+    syncTargetFromHash(historyTraversalUrlRef.current, false);
 
     function onPopState(event: PopStateEvent) {
       historyTraversalUrlRef.current = isManagedHashHistoryState(event.state)
@@ -212,13 +243,16 @@ function NavigationHandler() {
         : null;
     }
 
-    function onHashChange() {
+    function onHashChange(event: HashChangeEvent) {
       const traversedUrl = historyTraversalUrlRef.current;
-      historyTraversalUrlRef.current = null;
-      syncTargetFromHash(traversedUrl);
+      const previousHash = event.oldURL === '' ? '' : new URL(event.oldURL).hash;
+      const workspaceWrote = consumeWorkspaceHashWrite(window.location.hash);
+      const returnedFromDialog =
+        isAuxiliaryDialogHash(previousHash) && traversedUrl === window.location.href;
+      syncTargetFromHash(traversedUrl, !workspaceWrote && !returnedFromDialog);
     }
 
-    function syncTargetFromHash(traversedUrl: string | null) {
+    function syncTargetFromHash(traversedUrl: string | null, deliberate: boolean) {
       const isHistoryTraversal = traversedUrl === window.location.href;
       markCurrentHashHistoryEntry();
       const isSurfaceHashRepeat = lastResolvedSurfaceHashRef.current === window.location.hash;
@@ -236,12 +270,15 @@ function NavigationHandler() {
           activeTarget.target === target.target &&
           selectedPathForNavigationTarget(activeTarget) === selectedPathForNavigationTarget(target)
         ) {
+          if (deliberate) revealEditor();
           return;
         }
         openTargetTransition(target, {
-          disposition: isHistoryTraversal
-            ? previewOpenDisposition(previewTabsEnabled)
-            : 'permanent',
+          deliberate,
+          disposition:
+            isHistoryTraversal || !previewTabsEnabled
+              ? previewOpenDisposition(previewTabsEnabled)
+              : (readManagedHashHistoryEntry(window.history.state)?.disposition ?? 'permanent'),
           consumeActiveNewTab: true,
         });
       };
@@ -286,7 +323,7 @@ function NavigationHandler() {
         }
         if (isSurfaceHashRepeat) return;
         mark('ok/nav/hash-change', { docName: null, kind: 'skills' });
-        openTargetTransition({ kind: 'skills', target: 'skills' });
+        openTargetTransition({ kind: 'skills', target: 'skills' }, { deliberate });
         return;
       }
       const skillPreview = skillPreviewFromHash(window.location.hash);
@@ -382,7 +419,7 @@ function InstallInClaudeDesktopTrigger() {
   function handleOpenChange(next: boolean) {
     setOpen(next);
     if (!next && window.location.hash === INSTALL_DIALOG_HASH) {
-      replaceHashWithoutNavigation('');
+      clearHashWithoutNavigation();
     }
   }
 
@@ -404,9 +441,7 @@ function SettingsShortcutHandler() {
         })
       ) {
         e.preventDefault();
-        if (window.location.hash !== SETTINGS_OPEN_HASH) {
-          window.location.hash = SETTINGS_OPEN_HASH;
-        }
+        openSettings();
       }
     }
 
@@ -526,6 +561,7 @@ function ConfigProviderHost({ children }: { children: ReactNode }) {
     <ConfigProvider collabUrl={collabUrl} collabTerminal={collabTerminal}>
       <EditorLifecycleFlush />
       <BackgroundThrottleReporter />
+      <StaleTabReloadPrompt />
       <ExternalHandoffGateProvider>{children}</ExternalHandoffGateProvider>
     </ConfigProvider>
   );
@@ -548,11 +584,13 @@ export function App() {
       <DocumentProvider>
         <ConfigProviderHost>
           <ConflictsProvider>
-            <PreviewTabsSettingsBridge>
-              <SingleFileModeProvider>
-                <AppBody />
-              </SingleFileModeProvider>
-            </PreviewTabsSettingsBridge>
+            <DocNoticesProvider>
+              <PreviewTabsSettingsBridge>
+                <SingleFileModeProvider>
+                  <AppBody />
+                </SingleFileModeProvider>
+              </PreviewTabsSettingsBridge>
+            </DocNoticesProvider>
           </ConflictsProvider>
         </ConfigProviderHost>
       </DocumentProvider>
@@ -566,7 +604,11 @@ function AppBody() {
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const singleFile = useSingleFileMode();
   const noteWindow = isNoteWindow();
-  const showFileSidebar = !singleFile && !noteWindow;
+
+  const showAppHeader = !noteWindow;
+  const appHeaderStyle: CSSProperties | undefined = showAppHeader
+    ? ({ '--ok-app-header-height': APP_HEADER_HEIGHT } as CSSProperties)
+    : undefined;
 
   const installedClis = useInstalledClis();
   const terminalLaunch: TerminalLaunchContextValue | null =
@@ -580,38 +622,29 @@ function AppBody() {
       : null;
 
   return (
-    <>
+    <div data-app-shell="" className="contents" style={appHeaderStyle}>
       <ConnectingBanner />
       <BranchRecycleBanner />
       <PageListProvider>
         <NoteWindowMainActionReceiver />
-        {}
         {!noteWindow && <SystemDocSubscriber />}
         <ValidationFreshness />
-        {}
         <SkillTrackInGitDialog />
         <NavigationHandler />
         <ActiveTargetBridgePush />
         <NewItemShortcutHandler />
-        {}
         {!singleFile && !noteWindow && <SettingsShortcutHandler />}
         {SHOW_INSTALL_SKILL && <InstallInClaudeDesktopTrigger />}
-        {}
         {desktopBridge ? <CreateProjectMenuTrigger bridge={desktopBridge} /> : null}
-        {}
         {desktopBridge ? <ReportBugMenuTrigger /> : null}
-        {}
         {desktopBridge ? <FeedbackMenuTrigger /> : null}
-        {}
         <McpConsentDialog />
-        {}
         {desktopBridge ? (
           <Suspense fallback={null}>
             <ShareBranchSwitchDialog bridge={desktopBridge} />
             <ShareReceiveMissDialog />
           </Suspense>
         ) : null}
-        {}
         {!noteWindow && (
           <CommandPalette
             bridge={desktopBridge}
@@ -619,8 +652,7 @@ function AppBody() {
             onOpenChange={setCommandPaletteOpen}
           />
         )}
-        {}
-        {isElectronHost && (
+        {isElectronHost && !showAppHeader && (
           <div
             aria-hidden="true"
             data-testid="editor-window-chrome-drag-strip"
@@ -628,25 +660,27 @@ function AppBody() {
             className="pointer-events-none fixed inset-x-0 top-0 z-50 h-2 [-webkit-app-region:drag]"
           />
         )}
-        {}
         <TerminalLaunchProvider value={terminalLaunch}>
-          {}
           <CommentQueueShortcut />
-          <SidebarProvider className="h-screen overflow-hidden">
-            {}
-            {showFileSidebar && <FileSidebar onOpenSearch={() => setCommandPaletteOpen(true)} />}
-            <SidebarInset
-              className={
-                showFileSidebar
-                  ? 'h-[calc(100vh-var(--layout-inset-offset))] overflow-hidden'
-                  : 'h-screen overflow-hidden'
-              }
-            >
-              <EditorPane onOpenSearch={() => setCommandPaletteOpen(true)} />
-            </SidebarInset>
+          {showAppHeader && <AppHeader onOpenSearch={() => setCommandPaletteOpen(true)} />}
+          <SidebarProvider className="h-[calc(100vh-var(--ok-app-header-height,0px))] min-h-[calc(100svh-var(--ok-app-header-height,0px))]">
+            <FileListHostProvider enabled={showAppHeader && !singleFile} fileList={<FileSidebar />}>
+              <div
+                data-app-main=""
+                className={cn(
+                  'relative flex w-full flex-1 flex-col',
+                  showAppHeader
+                    ? 'ps-2 pe-2 pb-2 h-[calc(100vh-var(--ok-app-header-height,0px))]'
+                    : 'h-screen overflow-hidden bg-background',
+                )}
+              >
+                <EditorPane />
+              </div>
+            </FileListHostProvider>
           </SidebarProvider>
         </TerminalLaunchProvider>
+        {showAppHeader && !singleFile && <CornerCardStack />}
       </PageListProvider>
-    </>
+    </div>
   );
 }

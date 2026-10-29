@@ -15,6 +15,7 @@ import { ProseFindBar } from '@/components/ProseFindBar';
 import { SkillCostValue } from '@/components/SkillCostValue';
 import { SkillMarkdownViewer } from '@/components/SkillMarkdownViewer';
 import { SkillModeBanner } from '@/components/SkillModeBanner';
+import { Skeleton } from '@/components/ui/skeleton';
 import { useFindInViewer } from '@/hooks/use-find-in-viewer';
 import { subscribeToSkillsChanged } from '@/lib/documents-events';
 import { skillTint } from '@/lib/skill-tint';
@@ -38,7 +39,6 @@ interface Props {
   headerActions: ReactNode;
   headerLine: ReactNode;
   noPreviewFallback?: ReactNode;
-  reserveRightGutter?: boolean;
   selectedPath?: string;
   scope?: SkillScope;
   onPreviewMeta?: (preview: SkillPreviewData) => void;
@@ -55,7 +55,6 @@ export function SkillBundlePreview({
   headerLine,
   noPreviewFallback,
   banner,
-  reserveRightGutter = false,
   selectedPath: selectedPathProp,
   scope,
   onBundlePathClick,
@@ -119,12 +118,7 @@ export function SkillBundlePreview({
       {findOpen ? (
         <ProseFindBar containerRef={scrollRef} onClose={() => setFindOpen(false)} />
       ) : null}
-      {}
-      <SkillModeBanner
-        icon={<Eye className="size-4" aria-hidden />}
-        actions={headerActions}
-        reserveRightGutter={reserveRightGutter}
-      >
+      <SkillModeBanner icon={<Eye className="size-4" aria-hidden />} actions={headerActions}>
         {headerLine}
       </SkillModeBanner>
 
@@ -133,9 +127,7 @@ export function SkillBundlePreview({
           ref={scrollRef}
           className="editor-doc-scroll min-h-0 flex-1 overflow-auto subtle-scrollbar scroll-fade-mask"
         >
-          {}
           {selectedPath === SKILL_MD ? banner : null}
-          {}
           {selectedPath === SKILL_MD ? (
             <div className="editor-content-aligned pt-6">
               <div className="space-y-0.5">
@@ -206,9 +198,9 @@ export function SkillBundlePreview({
         <div className="editor-doc-scroll min-h-0 flex-1 overflow-auto subtle-scrollbar scroll-fade-mask">
           <div className="editor-content-aligned pt-6">
             <div className="space-y-3">
-              <div className="h-6 w-2/3 animate-pulse rounded bg-muted" />
+              <Skeleton className="h-6 w-2/3 rounded" />
               {['a', 'b', 'c', 'd', 'e'].map((id) => (
-                <div key={id} className="h-4 w-11/12 animate-pulse rounded bg-muted" />
+                <Skeleton key={id} className="h-4 w-11/12 rounded" />
               ))}
             </div>
           </div>

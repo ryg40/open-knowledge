@@ -7,6 +7,7 @@ import { basename, dirname, resolve as pathResolve } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
 import {
   applyConfigOverlay,
+  currentCliCommandName,
   DEFAULT_SERVER_HOST,
   type EnvConfigLayer,
   EnvVarError,
@@ -26,6 +27,7 @@ import {
   lockAdvertisesUi,
   type PinoLogger,
   prepareSingleFileOpen,
+  type ServerExitDetail,
   type ServerExitReason,
 } from '@inkeep/open-knowledge-server';
 import { Command, InvalidArgumentError, Option } from 'commander';
@@ -66,13 +68,17 @@ export function parseOnlyModule(value: string): OnlyModule {
 
 export function resolveBundledReactShellDir(
   existsFn: (path: string) => boolean = fsExistsSync,
+  cliDir: string = import.meta.dirname ?? new URL('.', import.meta.url).pathname,
 ): string | undefined {
-  const cliDir = import.meta.dirname ?? new URL('.', import.meta.url).pathname;
-  return [
+  const candidates = [
     pathResolve(cliDir, 'public'),
     pathResolve(cliDir, '../../app/dist'),
     pathResolve(cliDir, '../../../app/dist'),
-  ].find((p) => existsFn(p));
+  ];
+  if (existsFn(pathResolve(cliDir, '../../app.asar'))) {
+    candidates.push(pathResolve(cliDir, '../../app'));
+  }
+  return candidates.find((p) => existsFn(p));
 }
 
 export function resolveStartShellDir(input: {
@@ -154,7 +160,9 @@ export function deriveServerProcessTitle(cwd: string): string {
 export class OkDirMissingError extends Error {
   readonly cwd: string;
   constructor(cwd: string) {
-    super("This directory isn't set up yet. Run `ok init` first, then `ok start` again.");
+    super(
+      `This directory isn't set up yet. Run \`${currentCliCommandName()} init\` first, then \`${currentCliCommandName()} start\` again.`,
+    );
     this.name = 'OkDirMissingError';
     this.cwd = cwd;
   }
@@ -166,7 +174,7 @@ export class EphemeralProjectDirNotThrowawayError extends Error {
     super(
       `--project-dir must be a throwaway ${EPHEMERAL_PROJECT_DIR_PREFIX}* directory under the OS temp dir. ` +
         `Refusing to write ephemeral session state into ${projectDir}. ` +
-        'Omit --project-dir to let ok start create (and clean up) its own.',
+        `Omit --project-dir to let ${currentCliCommandName()} start create (and clean up) its own.`,
     );
     this.name = 'EphemeralProjectDirNotThrowawayError';
     this.projectDir = projectDir;
@@ -313,7 +321,7 @@ interface BootStartServerOptions {
 
 export interface BootedStartServer {
   httpServer: HttpServer;
-  destroy: (reason?: ServerExitReason) => Promise<void>;
+  destroy: (reason?: ServerExitReason, detail?: ServerExitDetail) => Promise<void>;
   lockDir: string;
   contentDir: string;
   port: number;
@@ -517,9 +525,9 @@ export async function bootStartServer(opts: BootStartServerOptions): Promise<Boo
 
   const innerDestroy = booted.destroy;
   const destroy = ownsEphemeralProjectDir
-    ? async (): Promise<void> => {
+    ? async (...args: Parameters<typeof innerDestroy>): Promise<void> => {
         try {
-          await innerDestroy();
+          await innerDestroy(...args);
         } finally {
           await reapOwnedEphemeralDir();
         }
@@ -721,6 +729,7 @@ export async function runStartCommand(configArg: Config, opts: StartCommandOptio
     const serverModule = await import('@inkeep/open-knowledge-server');
     if (
       err instanceof serverModule.GitNotAvailableError ||
+      err instanceof serverModule.GitProbeTimeoutError ||
       err instanceof serverModule.GitTooOldError
     ) {
       process.exit(78);
@@ -796,7 +805,7 @@ export async function runStartCommand(configArg: Config, opts: StartCommandOptio
       console.log(dim(`  ${line}`));
     }
     try {
-      await booted.destroy('external-signal');
+      await booted.destroy('external-signal', { signal });
     } catch (err) {
       console.error(
         `${error('destroy() failed:')} ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
@@ -920,7 +929,7 @@ export function formatServerReuseNotice(info: ServerReuseInfo): string[] {
   return [
     `${holder} (pid ${info.pid}).`,
     `  ${info.url}`,
-    'Leaving it running — run `ok stop` first if you want a fresh server.',
+    `Leaving it running — run \`${currentCliCommandName()} stop\` first if you want a fresh server.`,
   ];
 }
 
@@ -951,18 +960,18 @@ export function tryDescribeLockCollision(
   if (authorityErr !== undefined && err instanceof authorityErr) return err.message;
   const registryErr = serverModule.ServerAuthorityRegistryError;
   if (registryErr !== undefined && err instanceof registryErr) return err.message;
+  const lockFileErr = serverModule.ProcessLockFileError;
+  if (lockFileErr !== undefined && err instanceof lockFileErr) return err.message;
   const lockErr = serverModule.ServerLockCollisionError;
   if (lockErr === undefined || !(err instanceof lockErr)) return null;
 
   try {
     const meta = serverModule.readServerLock(serverModule.resolveLockDir(cwd));
-    if (!meta) {
-      return 'OpenKnowledge server is already running on this project — check `ok status` or `ok stop`.';
+    const command = currentCliCommandName();
+    if (meta?.kind === 'mcp-spawned') {
+      return `An MCP-spawned server holds this lock; it should release on idle-shutdown (~30 min). Or run \`${command} stop\`.`;
     }
-    if (meta.kind === 'mcp-spawned') {
-      return 'An MCP-spawned server holds this lock; it should release on idle-shutdown (~30 min). Or run `ok stop`.';
-    }
-    return 'OpenKnowledge server is already running on this project — check `ok status` or `ok stop`.';
+    return `OpenKnowledge server is already running on this project — check \`${command} status\` or \`${command} stop\`.`;
   } catch {
     return null;
   }

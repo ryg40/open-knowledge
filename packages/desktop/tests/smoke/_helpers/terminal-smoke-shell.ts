@@ -32,6 +32,12 @@ export interface TerminalSmokeShellCommands {
   readEnvironment(name: string, label: string): string;
   scroll(sentinel: string, start: string, prefix: string, count: number): string;
   setEnvironment(name: string, value: string): string;
+  waitForFileThenOutput(
+    releasePath: string,
+    waitingPath: string,
+    acknowledgementPath: string,
+    waitingMarker: string,
+  ): string;
   workingDirectory(marker: string): string;
 }
 
@@ -47,7 +53,7 @@ export function terminalSmokeShellCommands(
       oscTitle: (title, marker) =>
         `[Console]::Write("$([char]27)]0;${title}$([char]7)"); Write-Output ${psQuoteArg(marker)}`,
       output: (value) => `Write-Output ${psQuoteArg(value)}`,
-      processId: (marker) => `Write-Output "${marker}=$PID"`,
+      processId: (marker) => `Write-Output "${marker}=$PID;"`,
       readEnvironment: (name, label) => {
         validateEnvironmentName(name);
         return `Write-Output "${label}=[$env:${name}]"`;
@@ -58,6 +64,8 @@ export function terminalSmokeShellCommands(
         validateEnvironmentName(name);
         return `$env:${name}=${psQuoteArg(value)}`;
       },
+      waitForFileThenOutput: (releasePath, waitingPath, acknowledgementPath, waitingMarker) =>
+        `Write-Output ${psQuoteArg(waitingMarker)}; Set-Content -LiteralPath ${psQuoteArg(waitingPath)} -Value ${psQuoteArg(waitingMarker)}; $okWait=0; while (-not (Test-Path -LiteralPath ${psQuoteArg(releasePath)}) -and $okWait -lt 300) { Start-Sleep -Milliseconds 100; $okWait++ }; if (Test-Path -LiteralPath ${psQuoteArg(releasePath)}) { $okResult=Get-Content -LiteralPath ${psQuoteArg(releasePath)}; Write-Output $okResult; Set-Content -LiteralPath ${psQuoteArg(acknowledgementPath)} -Value $okResult }`,
       workingDirectory: (marker) =>
         `Write-Output (${psQuoteArg(marker)} + '=[' + (Get-Location).Path + ']')`,
     };
@@ -70,7 +78,7 @@ export function terminalSmokeShellCommands(
     oscTitle: (title, marker) =>
       `printf '\\033]0;${title}\\007'; printf '%s\\n' ${quotePosix(marker)}`,
     output: (value) => `printf '%s\\n' ${quotePosix(value)}`,
-    processId: (marker) => `printf '${marker}=%s\\n' "$$"`,
+    processId: (marker) => `printf '${marker}=%s;\\n' "$$"`,
     readEnvironment: (name, label) => {
       validateEnvironmentName(name);
       return `echo "${label}=[$${name}]"`;
@@ -81,6 +89,8 @@ export function terminalSmokeShellCommands(
       validateEnvironmentName(name);
       return `export ${name}=${quotePosix(value)}`;
     },
+    waitForFileThenOutput: (releasePath, waitingPath, acknowledgementPath, waitingMarker) =>
+      `printf '%s\\n' ${quotePosix(waitingMarker)}; printf '%s\\n' ${quotePosix(waitingMarker)} > ${quotePosix(waitingPath)}; ok_wait=0; while [ ! -f ${quotePosix(releasePath)} ] && [ "$ok_wait" -lt 300 ]; do sleep 0.1; ok_wait=$((ok_wait+1)); done; if [ -f ${quotePosix(releasePath)} ]; then cat ${quotePosix(releasePath)}; cp ${quotePosix(releasePath)} ${quotePosix(acknowledgementPath)}; fi`,
     workingDirectory: (marker) => `printf '%s=[%s]\\n' ${quotePosix(marker)} "$PWD"`,
   };
 }
@@ -100,6 +110,22 @@ export function buildInputReadyProbe(
   };
 }
 
+export interface ProcessIdProbe {
+  marker: string;
+  command: string;
+}
+
+export function buildProcessIdProbe(
+  marker: string,
+  platform: NodeJS.Platform = process.platform,
+): ProcessIdProbe {
+  const probeMarker = `${marker}_${randomUUID().replaceAll('-', '')}`;
+  return {
+    marker: probeMarker,
+    command: terminalSmokeShellCommands(platform).processId(probeMarker),
+  };
+}
+
 export const WINDOWS_PRIMARY_PROMPT_AT_END = /PS [^>]*>\s*$/u;
 
 export function windowsPrimaryPromptAfter(marker: string): RegExp {
@@ -116,6 +142,14 @@ export function reportedWorkingDirectory(marker: string, text: string): string |
   const match = /^([^\]\n]*)\]/u.exec(text.slice(start + opening.length));
   if (!match) return null;
   return match[1];
+}
+
+export function readTerminalProcessId(marker: string, text: string): number {
+  const opening = `${marker}=`;
+  const start = text.lastIndexOf(opening);
+  if (start === -1) return 0;
+  const match = /^(\d+);/u.exec(text.slice(start + opening.length));
+  return match ? Number(match[1]) : 0;
 }
 
 interface TerminalSmokeEnvironmentOptions {

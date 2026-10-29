@@ -67,6 +67,7 @@ export interface OkTerminalRestartSnapshot {
 export interface OkTerminalDockState {
   terminalVisible: boolean;
   agentPanelVisible: boolean;
+  editorVisible?: boolean;
   terminal?: { order: string[]; activeKey: string | null };
   terminalSnapshot?: OkTerminalRestartSnapshot;
   agents?: { order: string[]; activeKey: string | null };
@@ -177,6 +178,7 @@ export type OkMenuAction =
   | 'toggle-terminal'
   | 'move-terminal'
   | 'toggle-agent-panel'
+  | 'toggle-editor'
   | 'new-terminal'
   | 'kill-terminal'
   | 'new-worktree'
@@ -247,7 +249,7 @@ export interface OkHeadBranchInfo {
 }
 
 export interface OkUpdateDownloadedInfo {
-  readonly version: string;
+  readonly version: string | null;
 }
 
 export interface OkUpdateRelaunchingInfo {
@@ -333,6 +335,8 @@ export type ShareFolderValidationResult =
 
 export type OkUpdateChannel = 'latest' | 'beta';
 
+export type OkUpdateMode = 'auto' | 'off';
+
 export type OkThemeSource = 'system' | 'light' | 'dark';
 
 export interface OkUserConfigSnapshot {
@@ -362,6 +366,7 @@ export interface OkStateSnapshot {
     readonly maxSupported: number;
   } | null;
   readonly about?: OkAboutInfo;
+  readonly updateMode?: OkUpdateMode;
 }
 
 export type OkMcpWiringEditorId = EditorId;
@@ -751,9 +756,36 @@ export interface OkEditorViewMenuStateSnapshot {
   readonly terminalPlacement?: TerminalPlacement;
   readonly terminalLive?: boolean;
   readonly agentPanelVisible?: boolean;
+  readonly editorVisible?: boolean;
   readonly canViewInSource?: boolean;
   readonly hasEditorSelection?: boolean;
 }
+
+export interface OkEditorWideVisibility {
+  readonly editorVisible?: boolean;
+  readonly terminalVisible?: boolean;
+  readonly agentPanelVisible?: boolean;
+}
+
+type OkEditorDockVisibilityKey = keyof OkEditorWideVisibility;
+
+type OkEditorOnlyPane<K extends OkEditorDockVisibilityKey> = { readonly [P in K]: boolean } & {
+  readonly [P in Exclude<OkEditorDockVisibilityKey, K>]?: never;
+};
+
+type OkEditorDockVisibilityChange = {
+  [K in OkEditorDockVisibilityKey]: OkEditorOnlyPane<K> & {
+    readonly wideIntent: OkEditorOnlyPane<K>;
+  };
+}[OkEditorDockVisibilityKey];
+
+export type OkEditorViewMenuStateChange = Partial<
+  Omit<OkEditorViewMenuStateSnapshot, OkEditorDockVisibilityKey>
+> &
+  (
+    | OkEditorDockVisibilityChange
+    | ({ readonly [K in OkEditorDockVisibilityKey]?: never } & { readonly wideIntent?: never })
+  );
 
 export type OkMenuDispatchRole =
   | 'undo'
@@ -949,11 +981,39 @@ export interface OkRecentRemovedMissingInfo {
 
 export type OkServerRestartFailure =
   | { readonly ok: false; readonly reason: 'eperm' | 'other' }
-  | { readonly ok: false; readonly reason: 'other-channel'; readonly holderChannel: string };
+  | { readonly ok: false; readonly reason: 'other-channel'; readonly holderChannel: string }
+  | { readonly ok: false; readonly reason: 'unverified'; readonly sigtermSent: boolean };
 
 export type OkServerRestartOutcome = { readonly ok: true } | OkServerRestartFailure;
 
 export type OkPtyCreateReason = 'no-project' | 'not-consented';
+
+export type OkAssetOpenRefusalReason =
+  | 'extension-blocked'
+  | 'not-a-file'
+  | 'path-escape'
+  | 'not-found'
+  | 'resolve-error';
+
+export type OkAssetOpenResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: OkAssetOpenRefusalReason };
+
+export function assetOpenRefusalRevealsInstead(reason: OkAssetOpenRefusalReason): boolean {
+  switch (reason) {
+    case 'extension-blocked':
+    case 'not-a-file':
+      return true;
+    case 'path-escape':
+    case 'not-found':
+    case 'resolve-error':
+      return false;
+    default: {
+      const _unknownFromNewerDesktop: never = reason;
+      return false;
+    }
+  }
+}
 
 export function assertNeverPtyCreateReason(value: never): never {
   throw new Error(`unhandled pty create reason: ${String(value)}`);
@@ -1150,12 +1210,7 @@ export interface OkDesktopBridge {
       readonly scope?: HandoffScope;
     }): Promise<void>;
 
-    openAsset(
-      relPath: string,
-    ): Promise<
-      | { ok: true }
-      | { ok: false; reason: 'extension-blocked' | 'path-escape' | 'not-found' | 'resolve-error' }
-    >;
+    openAsset(relPath: string): Promise<OkAssetOpenResult>;
 
     revealAsset(
       relPath: string,
@@ -1332,6 +1387,8 @@ export interface OkDesktopBridge {
     relaunchNow(): Promise<void>;
     checkNow(): Promise<void>;
     dismissWhatsNew(version: string): Promise<void>;
+    dismissDownloaded(version: string): Promise<void>;
+    setMode(mode: OkUpdateMode): Promise<void>;
   };
 
   state: {
@@ -1407,7 +1464,7 @@ export interface OkDesktopBridge {
 
   editor: {
     notifyActiveTargetChanged(target: OkEditorActiveTargetSnapshot): void;
-    notifyViewMenuStateChanged(state: Partial<OkEditorViewMenuStateSnapshot>): void;
+    notifyViewMenuStateChanged(state: OkEditorViewMenuStateChange): void;
     notifyBackgroundThrottle(signal: { hasPendingWork: boolean; enabled: boolean }): void;
   };
 
@@ -1460,6 +1517,7 @@ export interface OkDesktopBridge {
   readonly appVersion: string;
   readonly instanceLabel: string | null;
   readonly mcpServerName: string | null;
+  readonly cliCommandName: string | null;
 
   getPathForFile(file: File): string | null;
 

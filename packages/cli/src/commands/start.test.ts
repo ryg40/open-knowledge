@@ -1,5 +1,6 @@
 import type { spawn as NativeSpawn } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -45,6 +46,14 @@ import {
   withEphemeralTempDirReap,
   withIdleShutdownProcessExit,
 } from './start.ts';
+
+beforeEach(() => {
+  vi.stubEnv('OK_CHANNEL', 'stable');
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe('resolveHost', () => {
   test('falls back to HOST env when --bind is absent', () => {
@@ -938,6 +947,44 @@ describe('bootStartServer (integration)', () => {
     }
   });
 
+  test('--single-file ephemeral teardown records the signal that stopped it', async () => {
+    const looseDir = await mkdtemp(resolve(tmpdir(), 'ok-start-loose-'));
+    const shutdownRecords: Array<Record<string, unknown>> = [];
+    const record = (data: unknown, message?: string): void => {
+      if (message?.includes('shutdown initiated') === true) {
+        shutdownRecords.push(data as Record<string, unknown>);
+      }
+    };
+    const log = {
+      info: record,
+      warn: record,
+      error: record,
+      debug: record,
+      trace: record,
+      fatal: record,
+    } as unknown as NonNullable<Parameters<typeof bootStartServer>[0]['log']>;
+    try {
+      writeFileSync(join(looseDir, 'note.md'), '# loose note\n', 'utf-8');
+      booted = await bootStartServer({
+        config: makeTestConfig(),
+        cwd: tmpDir,
+        host: TEST_HOST,
+        skipAutoInit: true,
+        singleFile: join(looseDir, 'note.md'),
+        log,
+      });
+      await booted.ready;
+
+      await booted.destroy('external-signal', { signal: 'SIGINT' });
+      booted = null;
+      expect(shutdownRecords).toEqual([
+        expect.objectContaining({ reason: 'external-signal', signal: 'SIGINT' }),
+      ]);
+    } finally {
+      await rm(looseDir, { recursive: true, force: true });
+    }
+  });
+
   test('--single-file with a provided empty --project-dir seeds the synthesized config and boots', async () => {
     const looseDir = await mkdtemp(resolve(tmpdir(), 'ok-start-loose-'));
     const providedDir = await mkdtemp(resolve(tmpdir(), 'ok-ephemeral-'));
@@ -1309,6 +1356,40 @@ describe('tryDescribeLockCollision', () => {
     expect(tryDescribeLockCollision(err, '/other', serverModule)).toBe(err.message);
     expect(err.message).toContain('Close that session');
   });
+
+  test.runIf(process.platform !== 'win32' && process.getuid?.() !== 0)(
+    'a lock acquisition cannot read has its remedy as the message, without a stack',
+    async () => {
+      const serverModule = await import('@inkeep/open-knowledge-server');
+      const projectDir = await mkdtemp(join(tmpdir(), 'ok-start-unreadable-lock-'));
+      const lockDir = join(projectDir, '.ok', 'local');
+      const lockPath = join(lockDir, 'server.lock');
+      try {
+        mkdirSync(lockDir, { recursive: true });
+        writeFileSync(lockPath, '{}');
+        chmodSync(lockPath, 0o000);
+        const err = (() => {
+          try {
+            serverModule.acquireProcessLock({
+              lockName: 'server',
+              lockDir,
+              metadata: { port: 0, worktreeRoot: projectDir },
+            });
+          } catch (thrown) {
+            return thrown;
+          }
+          return undefined;
+        })();
+
+        expect(tryDescribeLockCollision(err, projectDir, serverModule)).toBe(
+          `[server-lock] Could not read the lock at ${lockPath}: EACCES: permission denied, open '${lockPath}'. Restore file and parent-directory access, then retry.`,
+        );
+      } finally {
+        chmodSync(lockPath, 0o600);
+        await rm(projectDir, { recursive: true, force: true });
+      }
+    },
+  );
   function fakeServerModule(opts: {
     meta?: { kind?: string; pid?: number; port?: number; hostname?: string } | null;
     throwOnRead?: boolean;
@@ -1545,6 +1626,23 @@ describe('resolveBundledReactShellDir (candidate-path probe)', () => {
 
   test('returns undefined when no candidate exists (→ API/MCP-only degrade)', () => {
     expect(resolveBundledReactShellDir(() => false)).toBeUndefined();
+  });
+
+  test('inside a packaged desktop app, serves the app window bundle beside app.asar', () => {
+    const present = new Set([
+      '/OK.app/Contents/Resources/app.asar',
+      '/OK.app/Contents/Resources/app',
+    ]);
+    expect(
+      resolveBundledReactShellDir((p) => present.has(p), '/OK.app/Contents/Resources/cli/dist'),
+    ).toBe('/OK.app/Contents/Resources/app');
+  });
+
+  test('outside a packaged desktop app, never serves a sibling app source dir', () => {
+    const present = new Set(['/repo/packages/app']);
+    expect(
+      resolveBundledReactShellDir((p) => present.has(p), '/repo/packages/cli/dist'),
+    ).toBeUndefined();
   });
 });
 
@@ -1895,5 +1993,31 @@ describe('startCommand — flag-conflict guards (exit 2)', () => {
     ]);
     expect(code).toBe(2);
     expect(stderr).toContain('--react-shell-dist-dir');
+  });
+});
+
+describe('start messages name the running channel command', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  test('Stable keeps ok in the missing-setup error and the reuse notice', () => {
+    vi.stubEnv('OK_CHANNEL', 'stable');
+    expect(new OkDirMissingError('/p').message).toBe(
+      "This directory isn't set up yet. Run `ok init` first, then `ok start` again.",
+    );
+    expect(formatServerReuseNotice({ url: 'u', pid: 7, servesUi: true })[2]).toBe(
+      'Leaving it running — run `ok stop` first if you want a fresh server.',
+    );
+  });
+
+  test('Beta names ok-beta in the missing-setup error and the reuse notice', () => {
+    vi.stubEnv('OK_CHANNEL', 'beta');
+    expect(new OkDirMissingError('/p').message).toBe(
+      "This directory isn't set up yet. Run `ok-beta init` first, then `ok-beta start` again.",
+    );
+    expect(formatServerReuseNotice({ url: 'u', pid: 7, servesUi: true })[2]).toBe(
+      'Leaving it running — run `ok-beta stop` first if you want a fresh server.',
+    );
   });
 });

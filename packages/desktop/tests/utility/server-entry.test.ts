@@ -1,10 +1,16 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
 import { resolveServerRuntimeConfig } from '@inkeep/open-knowledge-core';
-import { ConfigSchema } from '@inkeep/open-knowledge-server';
+import {
+  ConfigSchema,
+  type ProcessStart,
+  readProcessStart,
+  registerNativeProcessStartReader,
+} from '@inkeep/open-knowledge-server';
 import { beforeEach, describe, expect, type Mock, test, vi } from 'vitest';
 import { configureTestGitRepository } from '../../../../test-support/configure-git-fixture.test-helper.ts';
 import { UTILITY_INIT_PHASES } from '../../src/shared/boot-narration.ts';
@@ -666,6 +672,68 @@ describe('handleInit boot prelude (FR-16/17/18/19/22/24)', () => {
     expect(ipcArgs?.didEnsureGit).toBe(true);
     expect(ipcArgs?.consentVersion).toBe(1);
     expect(ipcArgs?.projectDir).toBe('/projects/myrepo');
+  });
+
+  test('lets the server read Windows process starts before it prepares the boot environment', async () => {
+    const builtCliEntry = createRequire(import.meta.url).resolve('@inkeep/open-knowledge');
+    const nativeConfig: { readProcessStart: (pid: number) => number | null } =
+      createRequire(builtCliEntry)('./native/index.js');
+    const nativeRead = vi
+      .spyOn(nativeConfig, 'readProcessStart')
+      .mockReturnValue(1_789_000_000_456);
+    registerNativeProcessStartReader(() => null)();
+    await import('@inkeep/open-knowledge');
+    const readingBeforeInit = readProcessStart(4242, { platform: 'win32' });
+    let readingWhilePreparing: ProcessStart | null = null;
+    const prepare = vi.fn(() => {
+      readingWhilePreparing = readProcessStart(4242, { platform: 'win32' });
+      return Promise.resolve(makeFakePrepared());
+    });
+    const bootServer = vi.fn(() =>
+      Promise.resolve({
+        port: 4242,
+        destroy: vi.fn(() => Promise.resolve()),
+        degraded: [] as readonly string[],
+      }),
+    );
+
+    try {
+      const handle = setupUtility({
+        parentPort: env.parentPort,
+        importServer: () =>
+          Promise.resolve({
+            bootServer,
+          } as unknown as typeof import('@inkeep/open-knowledge-server')),
+        exit: env.exit,
+        parentPid: 99999,
+        killProbe: env.killProbe,
+        onSignal: (sig, h) => env.signalHandlers.set(sig, h),
+        setInterval: (cb, ms) => {
+          env.intervals.push({ cb, ms });
+          return { unref: vi.fn(() => {}), clear: env.intervalCancel };
+        },
+        prepareBootEnvironment: prepare,
+      });
+
+      env.parentPort.fire({
+        type: 'init',
+        opts: {
+          contentDir: '/projects/myrepo',
+          projectDir: '/projects/myrepo',
+          port: 0,
+          host: 'localhost',
+        },
+      });
+      await handle.readyPromise;
+
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(readingBeforeInit).toBeNull();
+      expect(readingWhilePreparing).toEqual({ startedAtMs: 1_789_000_000_456, clock: 'creation' });
+      expect(nativeRead).toHaveBeenCalledWith(4242);
+    } finally {
+      nativeRead.mockRestore();
+      registerNativeProcessStartReader(() => null)();
+    }
   });
 
   test('OK_DEBUG_DESKTOP_BOOT_TRACE=1 logs the resolved config trace', async () => {
@@ -1336,14 +1404,8 @@ function startUtilityWhoseBootPreparationWaits(env: MockEnv): {
   reachedBootPreparation: Promise<void>;
   finishBootPreparation: () => void;
 } {
-  let enterBootPreparation!: () => void;
-  let finishBootPreparation!: () => void;
-  const entered = new Promise<void>((resolve) => {
-    enterBootPreparation = resolve;
-  });
-  const finished = new Promise<void>((resolve) => {
-    finishBootPreparation = resolve;
-  });
+  const { promise: entered, resolve: enterBootPreparation } = Promise.withResolvers<void>();
+  const { promise: finished, resolve: finishBootPreparation } = Promise.withResolvers<void>();
   const bootServer = vi.fn(() =>
     Promise.resolve({
       port: 51289,
@@ -1404,6 +1466,127 @@ describe('setupUtility honours a shutdown that arrives before its init reaches b
     await finishBootPreparationAndLetInitContinue(utility.finishBootPreparation);
 
     expect(utility.bootServer).not.toHaveBeenCalled();
+    expect(env.exit.mock.calls).toEqual([[0]]);
+  });
+});
+
+function startUtilityWhoseServerStartWaits(env: MockEnv) {
+  const destroy = vi.fn(() => Promise.resolve());
+  const { promise: reachedServerStart, resolve: enterServerStart } = Promise.withResolvers<void>();
+  let settleServerStart!: (failure?: Error) => void;
+  const serverStarted = new Promise<void>((resolve, reject) => {
+    settleServerStart = (failure) => (failure === undefined ? resolve() : reject(failure));
+  });
+  const bootServer = vi.fn(async () => {
+    enterServerStart();
+    await serverStarted;
+    return { port: 51290, destroy, degraded: [] as readonly string[] };
+  });
+  setupUtility({
+    parentPort: env.parentPort,
+    importServer: () =>
+      Promise.resolve({
+        bootServer,
+      } as unknown as typeof import('@inkeep/open-knowledge-server')),
+    exit: env.exit,
+    parentPid: 99999,
+    killProbe: env.killProbe,
+    onSignal: (sig, h) => env.signalHandlers.set(sig, h),
+    setInterval: (cb, ms) => {
+      env.intervals.push({ cb, ms });
+      return { unref: vi.fn(() => {}), clear: env.intervalCancel };
+    },
+    prepareBootEnvironment: fakePrepare(),
+  });
+  env.parentPort.fire({
+    type: 'init',
+    opts: { contentDir: '/tmp/x', projectDir: '/tmp/x', port: 0, host: 'localhost' },
+  });
+  return { destroy, reachedServerStart, settleServerStart };
+}
+
+async function nextTurn(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+function postedTypes(env: MockEnv): unknown[] {
+  return env.parentPort.postMessage.mock.calls.map(([msg]) => (msg as { type?: unknown }).type);
+}
+
+describe('setupUtility joins a server start still in progress when shutdown arrives', () => {
+  test('waits for the server it is starting, shuts that server down, then exits 0 without announcing it ready', async () => {
+    const env = buildEnv();
+    const utility = startUtilityWhoseServerStartWaits(env);
+    await utility.reachedServerStart;
+
+    env.parentPort.fire({ type: 'shutdown' });
+    await nextTurn();
+    expect(env.exit).not.toHaveBeenCalled();
+
+    utility.settleServerStart();
+    await nextTurn();
+
+    expect(utility.destroy).toHaveBeenCalledTimes(1);
+    expect(env.exit.mock.calls).toEqual([[0]]);
+    expect(postedTypes(env)).not.toContain('ready');
+  });
+
+  test('exits once when the server it is starting fails after shutdown arrived', async () => {
+    const env = buildEnv();
+    const utility = startUtilityWhoseServerStartWaits(env);
+    await utility.reachedServerStart;
+
+    env.parentPort.fire({ type: 'shutdown' });
+    utility.settleServerStart(new Error('server start failed'));
+    await nextTurn();
+
+    expect(utility.destroy).not.toHaveBeenCalled();
+    expect(env.exit.mock.calls).toEqual([[0]]);
+  });
+});
+
+describe('setupUtility repeated shutdown', () => {
+  test('a second shutdown resolves only after the first has finished draining the server', async () => {
+    const env = buildEnv();
+    let finishDestroy!: () => void;
+    const destroy = vi.fn(() => {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      finishDestroy = resolve;
+      return promise;
+    });
+    const handle = setupUtility({
+      parentPort: env.parentPort,
+      importServer: () =>
+        Promise.resolve({
+          bootServer: () => Promise.resolve({ port: 51291, destroy, degraded: [] }),
+        } as unknown as typeof import('@inkeep/open-knowledge-server')),
+      exit: env.exit,
+      parentPid: 99999,
+      killProbe: env.killProbe,
+      onSignal: (sig, h) => env.signalHandlers.set(sig, h),
+      setInterval: (cb, ms) => {
+        env.intervals.push({ cb, ms });
+        return { unref: vi.fn(() => {}), clear: env.intervalCancel };
+      },
+      prepareBootEnvironment: fakePrepare(),
+    });
+    env.parentPort.fire({
+      type: 'init',
+      opts: { contentDir: '/tmp/x', projectDir: '/tmp/x', port: 0, host: 'localhost' },
+    });
+    await handle.readyPromise;
+
+    const first = handle.shutdown('shutdown-ipc');
+    let secondSettled = false;
+    const second = handle.shutdown('SIGTERM').then(() => {
+      secondSettled = true;
+    });
+    await nextTurn();
+
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(secondSettled).toBe(false);
+    finishDestroy();
+    await Promise.all([first, second]);
     expect(env.exit.mock.calls).toEqual([[0]]);
   });
 });

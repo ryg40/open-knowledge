@@ -1,6 +1,9 @@
 import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { OkTerminalRestartSnapshot } from '@inkeep/open-knowledge-core/desktop-bridge';
+import type {
+  OkTerminalRestartSnapshot,
+  OkUpdateMode,
+} from '@inkeep/open-knowledge-core/desktop-bridge';
 import { canonicalizeGitHubRemoteUrl } from './git-remote.ts';
 
 interface RecentProject {
@@ -65,9 +68,33 @@ export interface PersistedTerminalDockState {
   terminalVisible: boolean;
   terminalSnapshot: OkTerminalRestartSnapshot;
   agentPanelVisible: boolean;
+  editorVisible: boolean;
 }
 
 export type UpdateChannel = 'latest' | 'beta';
+
+export type { OkUpdateMode };
+
+const DEFAULT_UPDATE_MODE: OkUpdateMode = 'auto';
+
+export interface UpdateModeResolution {
+  mode: OkUpdateMode;
+  source: 'user' | 'default';
+}
+
+export function resolveUpdateMode(raw: unknown): UpdateModeResolution {
+  if (raw === 'auto' || raw === 'off') return { mode: raw, source: 'user' };
+  return { mode: DEFAULT_UPDATE_MODE, source: 'default' };
+}
+
+export function unrecognizedUpdateModeIn(rawState: unknown): string | null {
+  if (typeof rawState !== 'object' || rawState === null || !('updateMode' in rawState)) {
+    return null;
+  }
+  const persisted = rawState.updateMode;
+  if (persisted === null || resolveUpdateMode(persisted).source === 'user') return null;
+  return typeof persisted === 'string' ? persisted.slice(0, 64) : typeof persisted;
+}
 
 export const CURRENT_SCHEMA_VERSION = 1;
 
@@ -97,6 +124,9 @@ export interface AppState {
   lastUsedProjectParent: string | null;
   pendingWindowRestore: RestoredWindow[] | null;
   spellCheckEnabled: boolean;
+  updateMode: OkUpdateMode | null;
+  gaveUpOnVersion: string | null;
+  dismissedUpdateVersion: string | null;
 }
 
 const RECENT_CAP = 20;
@@ -135,6 +165,9 @@ export function emptyState(): AppState {
     lastUsedProjectParent: null,
     pendingWindowRestore: null,
     spellCheckEnabled: true,
+    updateMode: null,
+    gaveUpOnVersion: null,
+    dismissedUpdateVersion: null,
   };
 }
 
@@ -440,6 +473,7 @@ function emptyTerminalDockState(): PersistedTerminalDockState {
     terminalVisible: false,
     terminalSnapshot: { tabs: [], activeOrdinal: null },
     agentPanelVisible: false,
+    editorVisible: true,
   };
 }
 
@@ -488,6 +522,7 @@ function parsePersistedTerminalDockState(raw: unknown): PersistedTerminalDockSta
     terminalVisible: obj.terminalVisible === true,
     terminalSnapshot: normalizeTerminalRestartSnapshot(obj.terminalSnapshot),
     agentPanelVisible: obj.agentPanelVisible === true,
+    editorVisible: obj.editorVisible !== false,
   };
 }
 
@@ -672,6 +707,11 @@ export function parseAppState(raw: unknown): AppState | null {
   const recentFiles = parseRecentFiles(obj.recentFiles);
   const spellCheckEnabled =
     typeof obj.spellCheckEnabled === 'boolean' ? obj.spellCheckEnabled : true;
+  const updateModeResolution = resolveUpdateMode(obj.updateMode);
+  const updateMode = updateModeResolution.source === 'user' ? updateModeResolution.mode : null;
+  const gaveUpOnVersion = typeof obj.gaveUpOnVersion === 'string' ? obj.gaveUpOnVersion : null;
+  const dismissedUpdateVersion =
+    typeof obj.dismissedUpdateVersion === 'string' ? obj.dismissedUpdateVersion : null;
   return {
     recentProjects,
     recentFiles,
@@ -696,5 +736,8 @@ export function parseAppState(raw: unknown): AppState | null {
     lastUsedProjectParent,
     pendingWindowRestore,
     spellCheckEnabled,
+    updateMode,
+    gaveUpOnVersion,
+    dismissedUpdateVersion,
   };
 }

@@ -5,6 +5,7 @@ import { AlertTriangle, ExternalLink } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
+import { Skeleton } from '@/components/ui/skeleton';
 import { hashFromDocName } from '@/lib/doc-hash';
 import '@/lib/excalidraw-env';
 import { type ExcalidrawScene, restoreScene } from '@/lib/excalidraw-scene.ts';
@@ -55,6 +56,10 @@ export function boardDocNameFromSrc(
   } catch {
     return null;
   }
+}
+
+export function isLiveBoardSrc(src: unknown): boolean {
+  return typeof src === 'string' && boardDocNameFromSrc(src) !== null;
 }
 
 interface ExcalidrawEmbedProps {
@@ -294,7 +299,6 @@ export function ExcalidrawEmbed({
             <div className="font-medium">
               <Trans>Excalidraw board failed to load.</Trans>
             </div>
-            {}
             <div className="mt-1">{errorDetail}</div>
             <div className="mt-1 break-words font-mono text-[11px] opacity-90">
               {boardDocName ?? src}
@@ -344,9 +348,7 @@ export function ExcalidrawEmbed({
           />
         </div>
       ) : null}
-      {isLoading ? (
-        <div className="m-3 min-h-16 animate-pulse rounded-md bg-muted/40" aria-hidden="true" />
-      ) : null}
+      {isLoading ? <Skeleton className="m-3 min-h-16" aria-hidden="true" /> : null}
       {boardDocName && !showError ? (
         <Button
           asChild
@@ -356,7 +358,6 @@ export function ExcalidrawEmbed({
           title={t`Open board`}
           data-testid="excalidraw-embed-open"
         >
-          {}
           <a href={hashFromDocName(boardDocName)} aria-label={t`Open board`}>
             <ExternalLink className="size-4" aria-hidden="true" />
           </a>

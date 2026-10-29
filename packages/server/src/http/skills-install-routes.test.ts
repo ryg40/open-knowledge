@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, describe, expect, test } from 'vitest';
 import { makeCaptureRes } from '../composition-rig.test-helper.ts';
-import { OK_DOC_REMOVED } from '../document-durability-state.ts';
+import { OK_DOC_REMOVED, OK_STORE_HELD, OK_WRITE_REPLACED } from '../document-durability-state.ts';
 import { loggerFactory } from '../logger.ts';
 import { createSkillsInstallRoutes, type SkillsInstallRouteDeps } from './skills-install-routes.ts';
 
@@ -27,7 +27,6 @@ function buildGroup(overrides: Partial<SkillsInstallRouteDeps> = {}) {
     flushDiskAndDetectOutcome: () => Promise.resolve(null),
     respondStaleExternalWrite: unexpectedCall,
     respondPersistenceFailure: unexpectedCall,
-    respondDiskDivergence: unexpectedCall,
     skillInstallOps: {
       resolveFork: unexpectedCall,
       applyAddRemove: unexpectedCall,
@@ -127,19 +126,25 @@ describe('skill-install surfaces every flush outcome instead of installing over 
     expect(captured.body).not.toContain('INVALID_SKILL_SOURCE');
   });
 
-  test('a diverged disk write answers with the divergence rather than validating and installing', async () => {
-    const seen: string[] = [];
-    const captured = await dispatchInstall({
-      flushDiskAndDetectOutcome: () => Promise.resolve({ kind: 'divergence' }),
-      respondDiskDivergence: (res, handler) => {
-        seen.push(handler);
-        res.writeHead(409, { 'Content-Type': 'application/problem+json' });
-        res.end(JSON.stringify({ type: 'urn:ok:error:disk-divergence' }));
+  test.each([
+    {
+      name: 'a write the file replaced',
+      failure: { code: OK_WRITE_REPLACED, message: 'replaced' },
+    },
+    {
+      name: 'a save still running when the wait ended',
+      failure: {
+        code: OK_STORE_HELD,
+        message: 'still saving',
+        held: { reason: 'pending-unsettled' as const },
       },
+    },
+  ])('$name does not stop the install, as on the other app routes', async ({ failure }) => {
+    const captured = await dispatchInstall({
+      flushDiskAndDetectOutcome: () => Promise.resolve({ kind: 'failure', failure }),
     });
-    expect(seen).toEqual(['skill-install']);
-    expect(captured.status).toBe(409);
-    expect(captured.body).not.toContain('INVALID_SKILL_SOURCE');
+    expect(captured.status).toBe(400);
+    expect(captured.body).toContain('INVALID_SKILL_SOURCE');
   });
 
   test('a clean flush falls through to validation, which rejects a SKILL.md-less source', async () => {

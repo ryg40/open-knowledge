@@ -46,6 +46,8 @@ import {
 function fakeChildProcess(pid: number | undefined): ChildProcess {
   return Object.assign(new EventEmitter(), {
     pid,
+    exitCode: null,
+    signalCode: null,
     kill: vi.fn(() => true),
   }) as unknown as ChildProcess;
 }
@@ -576,7 +578,7 @@ describe('signalSlidevChild', () => {
   function fakeChild() {
     const kill = vi.fn(() => true);
     return {
-      child: { pid: 4321, kill } as unknown as ChildProcess,
+      child: { pid: 4321, exitCode: null, signalCode: null, kill } as unknown as ChildProcess,
       kill,
     };
   }
@@ -617,12 +619,11 @@ describe('signalSlidevChild', () => {
   it('waits for the Windows tree kill to settle', async () => {
     const { child } = fakeChild();
     let release: (() => void) | undefined;
-    const killWindowsTree = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          release = resolve;
-        }),
-    );
+    const killWindowsTree = vi.fn(() => {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      release = resolve;
+      return promise;
+    });
     let settled = false;
 
     const signal = signalSlidevChild(child, 'SIGTERM', {

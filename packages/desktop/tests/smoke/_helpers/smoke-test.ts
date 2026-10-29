@@ -2,6 +2,7 @@ import type { ChildProcess } from 'node:child_process';
 import { rmSync } from 'node:fs';
 import { expect as baseExpect, test as baseTest, type ElectronApplication } from '@playwright/test';
 import { emitBootGapLines } from './boot-gap-emit';
+import { attachDomStateOnFailure } from './dom-state';
 import {
   captureAppProcess,
   cleanupIncompleteReport,
@@ -11,7 +12,6 @@ import {
   attachCapturedStderr,
   captureElectronStderr,
   type ElectronStderrCapture,
-  shouldAttachStderr,
 } from './electron-stderr';
 import { rememberLaunchHome } from './launch-readiness';
 
@@ -41,6 +41,7 @@ export const test = baseTest.extend<SmokeFixtures>({
       }
     });
     await emitBootGapLines(apps, testInfo);
+    await attachDomStateOnFailure(testInfo, apps);
     const { unclosed, survivors, closedAfterServerRelease } = await closeAppsThenAwaitServerRelease(
       procs,
       cleanupDirs,
@@ -71,7 +72,9 @@ export const test = baseTest.extend<SmokeFixtures>({
         console.warn(`[smoke-test] tmp-dir cleanup failed for ${dir}: ${reason}`);
       }
     }
-    if (shouldAttachStderr(testInfo) || unclosed.length > 0) {
+    const attemptFailed =
+      testInfo.status !== 'skipped' && testInfo.status !== testInfo.expectedStatus;
+    if (attemptFailed || unclosed.length > 0) {
       await attachCapturedStderr(testInfo, captures);
     }
     if (unclosed.length > 0) {

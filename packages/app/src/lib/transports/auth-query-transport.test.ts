@@ -1,3 +1,4 @@
+import { DEV_FALLBACK_CLI_REFUSAL } from '@inkeep/open-knowledge-core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { httpAuthQueryTransport } from './auth-query-transport';
 
@@ -74,10 +75,7 @@ describe('httpAuthQueryTransport().status', () => {
   });
 
   it('coalesces concurrent same-host checks across transport instances', async () => {
-    let resolveFetch: ((response: Response) => void) | undefined;
-    const pendingResponse = new Promise<Response>((resolve) => {
-      resolveFetch = resolve;
-    });
+    const { promise: pendingResponse, resolve: resolveFetch } = Promise.withResolvers<Response>();
     stubFetch(() => pendingResponse);
 
     const a = httpAuthQueryTransport().status();
@@ -86,7 +84,7 @@ describe('httpAuthQueryTransport().status', () => {
     expect(fetchCalls).toHaveLength(1);
     expect(fetchCalls[0]?.url).toBe('/api/local-op/auth/status');
 
-    resolveFetch?.(
+    resolveFetch(
       new Response(JSON.stringify({ authenticated: true, host: 'github.com', login: 'octocat' }), {
         status: 200,
       }),
@@ -103,16 +101,9 @@ describe('httpAuthQueryTransport().status', () => {
   });
 
   it('keeps concurrent different-host checks isolated', async () => {
-    let resolveGithub: ((response: Response) => void) | undefined;
-    let resolveGitlab: ((response: Response) => void) | undefined;
-    const pendingResponses = [
-      new Promise<Response>((resolve) => {
-        resolveGithub = resolve;
-      }),
-      new Promise<Response>((resolve) => {
-        resolveGitlab = resolve;
-      }),
-    ];
+    const { promise: githubResponse, resolve: resolveGithub } = Promise.withResolvers<Response>();
+    const { promise: gitlabResponse, resolve: resolveGitlab } = Promise.withResolvers<Response>();
+    const pendingResponses = [githubResponse, gitlabResponse];
     stubFetch(() => {
       const response = pendingResponses.shift();
       if (!response) throw new Error('unexpected extra fetch');
@@ -128,10 +119,10 @@ describe('httpAuthQueryTransport().status', () => {
       'gitlab.com',
     ]);
 
-    resolveGithub?.(
+    resolveGithub(
       new Response(JSON.stringify({ authenticated: true, host: 'github.com', login: 'octocat' })),
     );
-    resolveGitlab?.(new Response(JSON.stringify({ authenticated: false, host: 'gitlab.com' })));
+    resolveGitlab(new Response(JSON.stringify({ authenticated: false, host: 'gitlab.com' })));
 
     await expect(githubStatus).resolves.toEqual({
       authenticated: true,
@@ -219,6 +210,25 @@ describe('httpAuthQueryTransport().signout', () => {
     const result = await transport.signout();
 
     expect(result).toEqual({ ok: false, error: 'Auth signout failed.' });
+  });
+
+  it('surfaces the problem detail over the title, so a refusal keeps its remedy', async () => {
+    stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            type: 'urn:ok:error:auth-failed',
+            title: 'This dev build has no built CLI.',
+            status: 409,
+            detail: DEV_FALLBACK_CLI_REFUSAL,
+          }),
+          { status: 409, headers: { 'content-type': 'application/problem+json' } },
+        ),
+    );
+    const transport = httpAuthQueryTransport();
+    if (!transport.signout) throw new Error('http transport must implement signout');
+
+    expect(await transport.signout()).toEqual({ ok: false, error: DEV_FALLBACK_CLI_REFUSAL });
   });
 
   it('returns failure with no error title when the body is not problem+json', async () => {

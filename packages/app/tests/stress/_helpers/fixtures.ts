@@ -1,30 +1,45 @@
-import { type ChildProcess, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ProblemType } from '@inkeep/open-knowledge-core';
 import { test as base } from '@playwright/test';
-import { resetContentToFixtureBaseline } from './content-reset.ts';
+import { resetContentToFixtureBaseline, resetTemplateInventory } from './content-reset.ts';
+import { coverageFixture, type E2eCoverage } from './e2e-coverage/e2e-coverage.ts';
 import { gotoWhileLoadProgresses, requireDeadlineAt } from './load-progress.ts';
+import { type WorkerServing, workerServingFor } from './prebuilt/prebuilt-serving.ts';
 import {
-  APP_PACKAGE_ROOT,
+  type ProductionShellStartup,
+  waitForProductionShellReady,
+} from './production-shell-readiness.ts';
+import {
+  initProductionShellContent,
+  type ProductionShellLaunch,
+} from './production-shell-server.ts';
+import { checkServerLease, leaseWorkerServer, type ServerLease } from './reuse/lease-fixture.ts';
+import {
   type BoundViteEndpoint,
   beginViteStartup,
   checkCollabSync,
   closeServerLog,
   createViteStartupRequest,
-  killGracefully,
   openServerLog,
   type PendingViteStartup,
   prepareViteCacheDir,
   requireBoundMs,
   type ServerLog,
-  tailServerLog,
+  type ViteStartupRequest,
   waitForBoundViteEndpoint,
   waitForHttpReady,
 } from './server-process.ts';
 import { declareSetupNonResult } from './setup-non-result.ts';
 import { removeAllDuringTeardown, runTeardownPhases } from './teardown-fs.ts';
+import {
+  acquireWorkerServer,
+  completeWorkerServerRelease,
+  stopWorkerServer,
+  type WorkerServerProcess,
+  workerServerCommandPid,
+} from './worker-server-lifetime.ts';
 
 interface ProblemError extends Error {
   status?: number;
@@ -40,15 +55,21 @@ export function isConcurrentOverwriteRefusal(error: unknown): boolean {
 }
 
 async function problemError(res: Response, message: string): Promise<ProblemError> {
-  let body: { type?: unknown } | null = null;
+  let body: { type?: unknown; title?: unknown; detail?: unknown } | null = null;
   let parseFailure: unknown;
   try {
-    body = (await res.json()) as { type?: unknown };
+    body = (await res.json()) as { type?: unknown; title?: unknown; detail?: unknown };
   } catch (error) {
     parseFailure = error;
   }
+  const problem = [body?.type, body?.title, body?.detail].filter(
+    (part): part is string => typeof part === 'string' && part.length > 0,
+  );
+  const fullMessage = problem.length > 0 ? `${message} (${problem.join('; ')})` : message;
   const err: ProblemError =
-    parseFailure === undefined ? new Error(message) : new Error(message, { cause: parseFailure });
+    parseFailure === undefined
+      ? new Error(fullMessage)
+      : new Error(fullMessage, { cause: parseFailure });
   err.status = res.status;
   if (typeof body?.type === 'string') err.type = body.type;
   return err;
@@ -58,6 +79,7 @@ export interface WorkerServer {
   port: number;
   baseURL: string;
   contentDir: string;
+  launch?: ProductionShellLaunch;
 }
 
 export interface AgentIdentity {
@@ -78,13 +100,18 @@ export interface ApiHelpers {
 type WorkerFixtures = {
   workerServer: WorkerServer;
   workerServerEnv: Record<string, string>;
+  serverLease: ServerLease | undefined;
 };
 
 type TestFixtures = {
   api: ApiHelpers;
+  serverLeaseCheck: undefined;
+  e2eCoverage: E2eCoverage;
+  templateInventory: undefined;
 };
 
 export const WORKER_SERVER_BUDGET_TOTAL_MS = 240_000;
+const API_CALL_TIMEOUT_MS = 30_000;
 
 export const WORKER_SERVER_BUDGET_RESERVES = {
   apiConfig: 2_000,
@@ -260,21 +287,46 @@ export async function checkApiConfig(baseURL: string, timeoutMs: number): Promis
   }
 }
 
-async function waitForServerReady(started: StartedWorkerServer): Promise<BoundViteEndpoint> {
-  const { pending } = started;
-  const { baseURL, port } = await waitForBoundViteEndpoint(
-    pending,
-    WORKER_SERVER_READINESS_BUDGET_MS,
-  );
-  await waitForHttpReady(
-    baseURL,
-    WORKER_SERVER_READINESS_BUDGET_MS,
-    pending.proc,
-    pending.startedAt,
-  );
-  await checkApiConfig(baseURL, WORKER_SERVER_BUDGET_RESERVES.apiConfig);
-  await checkCollabSync(port, WORKER_SERVER_BUDGET_RESERVES.collabSync);
-  return { baseURL, port };
+function productionShellStartupOf(started: StartedWorkerServer): ProductionShellStartup {
+  const { pending, proc, contentDir } = started;
+  return {
+    host: pending.request.host,
+    port: pending.request.candidatePort,
+    contentDir,
+    proc,
+    commandPid: () => workerServerCommandPid(proc),
+    startedAt: pending.startedAt,
+  };
+}
+
+export async function waitForServerReady(started: StartedWorkerServer): Promise<BoundViteEndpoint> {
+  const { pending, serving } = started;
+  const probeServedEndpoint = async ({ baseURL, port }: BoundViteEndpoint): Promise<void> => {
+    await waitForHttpReady(
+      baseURL,
+      WORKER_SERVER_READINESS_BUDGET_MS,
+      pending.proc,
+      pending.startedAt,
+    );
+    await checkApiConfig(baseURL, WORKER_SERVER_BUDGET_RESERVES.apiConfig);
+    await checkCollabSync(port, WORKER_SERVER_BUDGET_RESERVES.collabSync, pending.request.host);
+  };
+  switch (serving.kind) {
+    case 'production-shell':
+      return waitForProductionShellReady(
+        productionShellStartupOf(started),
+        WORKER_SERVER_READINESS_BUDGET_MS,
+        probeServedEndpoint,
+      );
+    case 'dev-server':
+    case 'prebuilt': {
+      const endpoint = await waitForBoundViteEndpoint(pending, WORKER_SERVER_READINESS_BUDGET_MS);
+      await probeServedEndpoint(endpoint);
+      return endpoint;
+    }
+    default:
+      return serving satisfies never;
+  }
 }
 
 async function settleBeforeDeadline<T>(
@@ -370,7 +422,7 @@ export async function warmupAppFirstLoad(
 
 export const REQUIRED_FIXTURE_ENTRY_NAMES = ['test-doc.md', 'sidebar-folder'] as const;
 
-const REQUIRED_FIXTURE_DOC_NAMES = ['test-doc', 'sidebar-folder/nested-doc'] as const;
+export const REQUIRED_FIXTURE_DOC_NAMES = ['test-doc', 'sidebar-folder/nested-doc'] as const;
 
 async function waitForSeededPagesSettled(baseURL: string, seededNames: string[]): Promise<void> {
   const missingSet = new Set(seededNames);
@@ -430,19 +482,64 @@ async function waitForSeededPagesSettled(baseURL: string, seededNames: string[])
   );
 }
 
-function seedRequiredFixtureFiles(contentDir: string): void {
+export const SERVER_LOG_TAIL_LINES = 40;
+const WORKER_SERVER_LIFETIME_RECORD = '[worker-server-lifetime] ';
+
+export interface ServerLogTail {
+  readonly report: () => string;
+  readonly close: () => void;
+}
+
+export function holdServerLogTail(serverLog: ServerLog): ServerLogTail {
+  const fd = openSync(serverLog.path, 'r');
+  const chunks: Buffer[] = [];
+  return {
+    report: () => {
+      chunks.push(readFileSync(fd));
+      const lines = Buffer.concat(chunks).toString('utf-8').split('\n');
+      const tail = `--- dev server log tail (${serverLog.path}) ---\n${lines.slice(-SERVER_LOG_TAIL_LINES).join('\n')}`;
+      const records = lines.filter((line) => line.startsWith(WORKER_SERVER_LIFETIME_RECORD));
+      return records.length === 0
+        ? tail
+        : `--- worker server lifetime records ---\n${records.join('\n')}\n${tail}`;
+    },
+    close: () => closeSync(fd),
+  };
+}
+
+export function seedRequiredFixtureFiles(contentDir: string): void {
   writeFileSync(join(contentDir, 'test-doc.md'), '', 'utf-8');
   mkdirSync(join(contentDir, 'sidebar-folder'), { recursive: true });
   writeFileSync(join(contentDir, 'sidebar-folder', 'nested-doc.md'), '', 'utf-8');
   mkdirSync(join(contentDir, '.claude', 'skills'), { recursive: true });
 }
 
-interface StartedWorkerServer {
+export function spawnWorkerDevServer(
+  request: ViteStartupRequest,
+  workerServerEnv: Readonly<Record<string, string>>,
+  contentDir: string,
+  viteCacheDir: string,
+  serverLog: ServerLog,
+  serving: WorkerServing,
+): WorkerServerProcess {
+  return acquireWorkerServer(
+    request,
+    workerServerEnv,
+    contentDir,
+    viteCacheDir,
+    serverLog,
+    serving,
+    WORKER_SERVER_BUDGET_RESERVES.devServerReap,
+  );
+}
+
+export interface StartedWorkerServer {
   pending: PendingViteStartup;
   contentDir: string;
   viteCacheDir: string;
   serverLog: ServerLog;
-  proc: ChildProcess;
+  proc: WorkerServerProcess;
+  serving: WorkerServing;
 }
 
 function setupResidueOf(started: StartedWorkerServer): string {
@@ -451,16 +548,37 @@ function setupResidueOf(started: StartedWorkerServer): string {
 
 export const test = base.extend<TestFixtures, WorkerFixtures>({
   workerServerEnv: [{}, { scope: 'worker', option: true }],
+  serverLease: [leaseWorkerServer, { scope: 'worker', timeout: WORKER_SERVER_BUDGET_TOTAL_MS }],
+  serverLeaseCheck: [checkServerLease, { auto: true }],
+  e2eCoverage: [coverageFixture, { auto: true }],
+  templateInventory: [
+    async ({ workerServer }, use) => {
+      await resetTemplateInventory(workerServer.baseURL, API_CALL_TIMEOUT_MS);
+      await use(undefined);
+    },
+    { auto: true },
+  ],
+  page: async ({ page, e2eCoverage }, use) => {
+    e2eCoverage.watchContext(page.context());
+    await e2eCoverage.watchPage(page);
+    await use(page);
+    await e2eCoverage.collectPage(page);
+  },
   workerServer: [
-    async ({ workerServerEnv, browser }, use, workerInfo) => {
+    async ({ workerServerEnv, browser, serverLease }, use, workerInfo) => {
+      if (serverLease?.kind === 'leased') {
+        await use(serverLease.server);
+        return;
+      }
       const fixtureStartedAt = Date.now();
       const setupOverhead = openBudgetPhase(
         SETUP_OVERHEAD_PHASE_NAME,
         WORKER_SERVER_BUDGET_RESERVES.setupOverhead,
       );
       const releaseSetupResources: Array<() => void | Promise<void>> = [];
-      let openedServerLog: ServerLog | undefined;
+      let serverLogTail: ServerLogTail | undefined;
       let started: StartedWorkerServer | undefined;
+      let ownedProc: WorkerServerProcess | undefined;
       let endpoint: BoundViteEndpoint;
 
       try {
@@ -475,28 +593,26 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
           releaseSetupResources.push(() => removeAllDuringTeardown(viteCacheDir));
 
           seedRequiredFixtureFiles(contentDir);
+          const serving = workerServingFor(workerServerEnv, process.env, request);
+          if (serving.kind === 'production-shell') initProductionShellContent(contentDir);
 
           const serverLog = openServerLog(`w${workerInfo.workerIndex}`);
-          openedServerLog = serverLog;
           releaseSetupResources.push(() => closeServerLog(serverLog));
+          const heldTail = holdServerLogTail(serverLog);
+          serverLogTail = heldTail;
+          releaseSetupResources.push(heldTail.close);
 
-          const proc = spawn('pnpm', ['run', 'dev', '--host', request.host], {
-            cwd: APP_PACKAGE_ROOT,
-            detached: true,
-            env: {
-              ...process.env,
-              ...workerServerEnv,
-              ...request.environment,
-              OK_TEST_CONTENT_DIR: contentDir,
-              OK_TEST_VITE_CACHE_DIR: viteCacheDir,
-              OK_TEST_SKIP_I18N_COMPILE: '1',
-              OK_TEST_GIT_ENABLED: '1',
-              NO_COLOR: process.env.NO_COLOR ?? '1',
-            },
-            stdio: ['ignore', serverLog.fd, 'inherit'],
-          });
+          const proc = spawnWorkerDevServer(
+            request,
+            workerServerEnv,
+            contentDir,
+            viteCacheDir,
+            serverLog,
+            serving,
+          );
+          ownedProc = proc;
           releaseSetupResources.push(() =>
-            killGracefully(proc, WORKER_SERVER_BUDGET_RESERVES.devServerReap),
+            stopWorkerServer(proc, WORKER_SERVER_BUDGET_RESERVES.devServerReap),
           );
 
           proc.on('error', (err) => {
@@ -509,6 +625,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
             viteCacheDir,
             serverLog,
             proc,
+            serving,
           };
         });
 
@@ -526,6 +643,10 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         refuseStarvedBudgetSlot(setupOverhead, Date.now() - fixtureStartedAt, residue);
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
+        const tail =
+          serverLogTail === undefined
+            ? '--- no dev server log was open when this failure ended the setup ---'
+            : serverLogTail.report();
         const borrowed = budgetPhaseOverrunMessage(
           setupOverhead,
           'this failure reaps the dev server and removes the dirs the setup had created',
@@ -536,34 +657,46 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         } catch (cleanupErr) {
           drainFailure = `--- cleanup after this failure did not complete: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)} ---`;
         }
-        const tail =
-          openedServerLog === undefined
-            ? '--- no dev server log was open when this failure ended the setup ---'
-            : `--- dev server log tail (${openedServerLog.path}) ---\n${tailServerLog(openedServerLog)}`;
+        try {
+          if (ownedProc !== undefined) await completeWorkerServerRelease(ownedProc);
+        } catch (cleanupErr) {
+          const completionFailure = `--- cleanup after this failure did not complete: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)} ---`;
+          drainFailure =
+            drainFailure === undefined
+              ? completionFailure
+              : `${drainFailure}\n${completionFailure}`;
+        }
         declareSetupNonResult(base.info(), reason);
         throw new Error(
           `${reason}${borrowed === undefined ? '' : `\n${borrowed}`}${drainFailure === undefined ? '' : `\n${drainFailure}`}\n${tail}`,
         );
       }
 
-      const { contentDir, viteCacheDir, serverLog, proc, pending } = started;
+      serverLogTail?.close();
+      const { contentDir, viteCacheDir, serverLog, proc, pending, serving } = started;
 
-      await use({ ...endpoint, contentDir });
+      await use({
+        ...endpoint,
+        contentDir,
+        ...(serving.kind === 'production-shell' ? { launch: serving.launch } : {}),
+      });
 
       const teardown = openBudgetPhase(TEARDOWN_PHASE_NAME, WORKER_SERVER_BUDGET_RESERVES.teardown);
-      try {
-        await killGracefully(proc, WORKER_SERVER_BUDGET_RESERVES.devServerReap);
-      } finally {
-        await spendOnBudgetPhase(teardown, () => {
-          closeServerLog(serverLog);
-          removeAllDuringTeardown(
-            serverLog.path,
-            contentDir,
-            viteCacheDir,
-            pending.request.receiptDir,
-          );
-        });
-      }
+      await completeWorkerServerRelease(proc, async () => {
+        try {
+          await stopWorkerServer(proc, WORKER_SERVER_BUDGET_RESERVES.devServerReap);
+        } finally {
+          await spendOnBudgetPhase(teardown, () => {
+            closeServerLog(serverLog);
+            removeAllDuringTeardown(
+              serverLog.path,
+              contentDir,
+              viteCacheDir,
+              pending.request.receiptDir,
+            );
+          });
+        }
+      });
       reportBudgetOverrun(
         teardown,
         workerInfo.workerIndex,
@@ -579,7 +712,6 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
 
   api: async ({ workerServer }, use) => {
     const { baseURL } = workerServer;
-    const API_CALL_TIMEOUT_MS = 30_000;
     async function post(path: string, body?: unknown): Promise<Response> {
       try {
         return await fetch(`${baseURL}${path}`, {
@@ -598,6 +730,13 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         }
         throw err;
       }
+    }
+    async function postTestReset(
+      query: { scope: 'document'; docName?: string } | { scope: 'presence' },
+    ): Promise<void> {
+      const search = new URLSearchParams(query).toString();
+      const res = await post(`/api/test-reset?${search}`);
+      if (!res.ok) throw await problemError(res, `test-reset?${search} failed: ${res.status}`);
     }
     const helpers: ApiHelpers = {
       async createPage(path: string): Promise<void> {
@@ -631,12 +770,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         }
       },
       async testReset(docName?: string): Promise<void> {
-        const res = await post(
-          docName ? `/api/test-reset?docName=${encodeURIComponent(docName)}` : '/api/test-reset',
-        );
-        if (!res.ok) {
-          throw new Error(`test-reset failed${docName ? ` for ${docName}` : ''}: ${res.status}`);
-        }
+        await postTestReset({ scope: 'document', ...(docName !== undefined ? { docName } : {}) });
       },
       async seedDocs(docs: Array<{ name: string; markdown: string }>): Promise<void> {
         await resetContentToFixtureBaseline(baseURL, workerServer.contentDir);
@@ -646,6 +780,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
           await helpers.createPage(/\.(md|mdx)$/i.test(d.name) ? d.name : `${d.name}.md`);
         }
         for (const d of docs) await helpers.replaceDoc(docNameOf(d.name), d.markdown);
+        await postTestReset({ scope: 'presence' });
         await waitForSeededPagesSettled(
           baseURL,
           docs.map((d) => docNameOf(d.name)),

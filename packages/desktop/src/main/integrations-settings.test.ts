@@ -1,6 +1,7 @@
 import { EMPTY_DETECTION_SNAPSHOT, EMPTY_PROBE_SNAPSHOT } from '@inkeep/open-knowledge-core';
 import type { IpcMainInvokeEvent } from 'electron';
-import { describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { writeUserMcpConfigs } from '../../../cli/src/commands/init.ts';
 import type {
   AgentIntegrationsApplyRequest,
   AgentIntegrationsApplyResult,
@@ -17,6 +18,7 @@ import {
   type IntegrationsSkillsSurface,
   type RegisterIntegrationsSettingsOpts,
   registerIntegrationsSettings,
+  testPinnedSchemeHandlers,
 } from './integrations-settings.ts';
 import type { McpStatusMarker, McpWiringFsOps } from './mcp-wiring.ts';
 
@@ -212,6 +214,27 @@ describe('classifyEditorState', () => {
   });
 });
 
+describe('testPinnedSchemeHandlers', () => {
+  const smoke = { OK_DESKTOP_E2E_SMOKE: '1' };
+
+  test('an empty pin under smoke reports every scheme handler absent', () => {
+    expect(testPinnedSchemeHandlers({ ...smoke, OK_DESKTOP_TEST_SCHEME_HANDLERS: '' })).toEqual(
+      new Set(),
+    );
+  });
+
+  test('a pin lists the schemes reported present', () => {
+    expect(
+      testPinnedSchemeHandlers({ ...smoke, OK_DESKTOP_TEST_SCHEME_HANDLERS: ' codex, cursor ,' }),
+    ).toEqual(new Set(['codex', 'cursor']));
+  });
+
+  test('an unset pin, or one outside smoke, leaves the real probe in charge', () => {
+    expect(testPinnedSchemeHandlers(smoke)).toBeNull();
+    expect(testPinnedSchemeHandlers({ OK_DESKTOP_TEST_SCHEME_HANDLERS: '' })).toBeNull();
+  });
+});
+
 describe('detectedEditorsFromProbes', () => {
   const none = { cliOnPath: {}, schemeHandler: {} };
 
@@ -370,6 +393,14 @@ describe('ok:integrations:dispatch — status', () => {
 });
 
 describe('ok:integrations:dispatch — set editor', () => {
+  beforeEach(() => {
+    vi.stubEnv('OK_CHANNEL', 'stable');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   test('enable writes the one editor and returns ok with a fresh snapshot', async () => {
     const cli = makeCli();
     const { set } = setup({ cli });
@@ -420,6 +451,27 @@ describe('ok:integrations:dispatch — set editor', () => {
       expect(result.error).toContain("Cursor wasn't found on this machine");
       expect(result.error).not.toContain("Couldn't add OpenKnowledge");
       expect(result.error).not.toContain('()');
+    }
+  });
+
+  test('a dev build says why it adds nothing to user-level editor config', async () => {
+    vi.stubEnv('OK_CHANNEL', 'dev');
+    try {
+      const cli = {
+        ...makeCli(),
+        writeUserMcpConfigs: (opts: { editors: McpWiringEditorId[]; home?: string }) =>
+          writeUserMcpConfigs(opts),
+      };
+      const { set } = setup({ cli });
+      const result = await set({ component: { kind: 'editor', id: 'claude' }, enabled: true });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toBe(
+          "Couldn't add OpenKnowledge to Claude (A dev build registers OpenKnowledge MCP in project config only, never in user-level editor config. Run `node <checkout>/packages/cli/dist/cli.mjs init --dev-mcp` in the project, or set OK_CHANNEL=stable.).",
+        );
+      }
+    } finally {
+      vi.unstubAllEnvs();
     }
   });
 
@@ -510,9 +562,9 @@ describe('ok:integrations:dispatch — gates and serialization', () => {
     let releaseFirst: () => void = () => {};
     path.install = async () => {
       order.push('install-start');
-      await new Promise<void>((resolve) => {
-        releaseFirst = resolve;
-      });
+      const { promise, resolve } = Promise.withResolvers<void>();
+      releaseFirst = resolve;
+      await promise;
       order.push('install-end');
       return { ok: true };
     };
@@ -547,9 +599,9 @@ describe('ok:integrations:dispatch — gates and serialization', () => {
     let releaseInstall: () => void = () => {};
     path.install = async () => {
       order.push('toggle-start');
-      await new Promise<void>((resolve) => {
-        releaseInstall = resolve;
-      });
+      const { promise, resolve } = Promise.withResolvers<void>();
+      releaseInstall = resolve;
+      await promise;
       order.push('toggle-end');
       return { ok: true };
     };

@@ -2,20 +2,43 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import AxeBuilder from '@axe-core/playwright';
 import type { Locator, Page } from '@playwright/test';
-import { HISTORY_PANEL_WIDTH_PX } from '../../src/hooks/use-history-presentation-mode';
+import { PANE_CARD_GAP_PX } from '../../src/components/ui/pane-card';
+import {
+  HISTORY_DOCKED_MIN_PANE_WIDTH_PX,
+  HISTORY_PANEL_WIDTH_PX,
+} from '../../src/hooks/use-history-presentation-mode';
 import { AGENTS_PANEL_WIDTH_KEY } from '../../src/lib/agents-panel-width-store';
-import { expect, switchColorThemeAndSettleFade, test } from './_helpers';
+import {
+  contrastRatioOf,
+  DOCK_WORKSPACE,
+  dockSeam,
+  dockUnitRect,
+  expect,
+  readContrastPair,
+  servedModuleRoute,
+  stubAgentCatalog,
+  switchColorThemeAndSettleFade,
+  test,
+  threadRosterDelivered,
+} from './_helpers';
 
 const AGENTS_PANEL_MOUNT = '[data-agents-panel-mount]';
-const AGENTS_REVEAL_TAB = '[data-terminal-reveal="right"]';
-const COLLAPSE_AGENT_PANEL_BUTTON = 'Collapse agent panel';
-const SESSIONS_CHUNK_GLOB = '**/src/components/SessionsHost*';
+const SESSIONS_HOST_SOURCE = 'src/components/SessionsHost.tsx';
 const CONFIG_RESPONSE_GLOB = '**/api/config';
 const AGENTS_ORDER_STORAGE_KEY = 'ok-agent-session-order-v1';
 const SEED_AGENT_ID = 'panel-level-fixture-agent';
+const SEED_AGENT_NAME = 'Panel Level Fixture';
+const REGISTERED_AGENTS_KEY = 'ok-acp-registered-agents-v1';
 const BOOT_TIMEOUT_MS = 30_000;
 const ROSTER_TIMEOUT_MS = 30_000;
-const EMPTY_AGENT_CATALOG = { agents: [], stale: false, maxThreads: 8 };
+const AGENTS_HEADER_BUTTON = 'header-pane-button-agents';
+const STORED_AGENTS_PANEL_WIDTH_PX = 400;
+const AGENTS_MIN_WIDTH_PX = 290;
+const SEAM_KEYBOARD_STEP_PX = 16;
+const SEAM_LARGE_KEYBOARD_STEP_PX = 64;
+const THREAD_COMPOSER = '[data-testid="agent-thread-composer"]';
+const HEADER_DRAFT = 'Draft kept across a header hide';
+const SELECTION_DOC_TEXT = 'The quick brown fox jumps over the lazy dog.';
 
 interface ThreadFrame {
   op: string;
@@ -38,91 +61,16 @@ interface RouteMark {
   at: number;
 }
 
-function relativeLuminance(channels: readonly number[]): number {
-  const [red, green, blue] = channels.map((channel) => {
-    const normalized = channel / 255;
-    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-}
-
-interface ContrastPair {
-  foreground: readonly [number, number, number, number];
-  background: readonly [number, number, number, number];
-}
-
-async function readContrastPair(foreground: Locator, background: Locator): Promise<ContrastPair> {
-  const backgroundElement = await background.elementHandle();
-  if (!backgroundElement) throw new Error('the contrast background locator resolved to no element');
-  try {
-    return await foreground.evaluate((foregroundElement, backgroundNode) => {
-      const canvas = new OffscreenCanvas(1, 1);
-      const context = canvas.getContext('2d', { willReadFrequently: true });
-      if (!context) throw new Error('Could not create a color conversion context');
-      const toBytes = (color: string): [number, number, number, number] => {
-        context.clearRect(0, 0, 1, 1);
-        context.fillStyle = color;
-        context.fillRect(0, 0, 1, 1);
-        return Array.from(context.getImageData(0, 0, 1, 1).data) as [
-          number,
-          number,
-          number,
-          number,
-        ];
-      };
-      const foregroundColor = toBytes(getComputedStyle(foregroundElement).color);
-      const layers: Array<[number, number, number, number]> = [];
-      let current: Element | null = backgroundNode;
-      while (current !== null) {
-        const layer = toBytes(getComputedStyle(current).backgroundColor);
-        layers.push(layer);
-        if (layer[3] === 255) break;
-        current = current.parentElement;
-      }
-      const base = layers.at(-1);
-      if (base === undefined || base[3] !== 255) {
-        throw new Error('Contrast background has no opaque ancestor');
-      }
-      const composite = [...base] as [number, number, number, number];
-      for (let index = layers.length - 2; index >= 0; index -= 1) {
-        const layer = layers[index];
-        if (layer === undefined) continue;
-        const alpha = layer[3] / 255;
-        for (let channel = 0; channel < 3; channel += 1) {
-          composite[channel] = layer[channel] * alpha + composite[channel] * (1 - alpha);
-        }
-      }
-      return { foreground: foregroundColor, background: composite };
-    }, backgroundElement);
-  } finally {
-    await backgroundElement.dispose();
-  }
-}
-
 async function expectContrast(
   foreground: Locator,
   background: Locator,
   minimum: number,
 ): Promise<void> {
-  const { foreground: foregroundColor, background: backgroundColor } = await readContrastPair(
-    foreground,
-    background,
-  );
-  const foregroundAlpha = foregroundColor[3] / 255;
-  const composite = foregroundColor
-    .slice(0, 3)
-    .map(
-      (channel, index) =>
-        channel * foregroundAlpha + backgroundColor[index] * (1 - foregroundAlpha),
-    );
-  const foregroundLuminance = relativeLuminance(composite);
-  const backgroundLuminance = relativeLuminance(backgroundColor.slice(0, 3));
-  const ratio =
-    (Math.max(foregroundLuminance, backgroundLuminance) + 0.05) /
-    (Math.min(foregroundLuminance, backgroundLuminance) + 0.05);
+  const pair = await readContrastPair(foreground, background);
+  const ratio = contrastRatioOf(pair);
   expect(
     ratio,
-    `contrast ${ratio.toFixed(4)} is below the required ${minimum} for foreground rgba(${foregroundColor.join(', ')}) composited over background rgba(${backgroundColor.join(', ')})`,
+    `contrast ${ratio.toFixed(4)} is below the required ${minimum} for foreground rgba(${pair.foreground.join(', ')}) composited over background rgba(${pair.background.join(', ')})`,
   ).toBeGreaterThanOrEqual(minimum);
 }
 
@@ -200,41 +148,46 @@ async function latestRoster(
   );
 }
 
-async function purgeLiveThreads(port: number): Promise<void> {
-  const live = (await withThreadSocket(port, latestRoster)).filter(
-    (thread) => thread.archived !== true,
-  );
-  for (const thread of live) {
+async function purgeThreadRoster(port: number): Promise<void> {
+  const observed = await withThreadSocket(port, latestRoster);
+  for (const thread of observed) {
     await withThreadSocket(port, async (send, frames, recorder) => {
-      send({ op: 'close', threadId: thread.threadId });
-      const closeDeadline = Date.now() + 20_000;
-      let archived = false;
-      let discarded = false;
-      while (Date.now() < closeDeadline) {
-        const errored = recorder.frames.find((frame) => frame.op === 'error');
-        if (errored) {
+      let archived = thread.archived === true;
+      if (!archived) {
+        const closeFromIndex = frames.length;
+        send({ op: 'close', threadId: thread.threadId });
+        const closeDeadline = Date.now() + 20_000;
+        while (Date.now() < closeDeadline) {
+          const errored = recorder.frames.find((frame) => frame.op === 'error');
+          if (errored) {
+            throw new Error(
+              `purge close rejected for ${thread.threadId}: ${JSON.stringify(errored)}`,
+            );
+          }
+          const snapshot = frames
+            .slice(closeFromIndex)
+            .filter((frame) => frame.op === 'threads')
+            .at(-1);
+          if (!snapshot?.threads) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            continue;
+          }
+          const entry = snapshot.threads.find((t) => t.threadId === thread.threadId);
+          if (entry === undefined) return;
+          if (entry.archived === true) {
+            archived = true;
+            break;
+          }
+          send({ op: 'list' });
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        if (!archived) {
           throw new Error(
-            `purge close rejected for ${thread.threadId}: ${JSON.stringify(errored)}`,
+            `purge close confirmation never arrived for ${thread.threadId} (${recorder.unparseableCount} unparseable frame(s) observed)`,
           );
         }
-        const snapshot = frames.filter((frame) => frame.op === 'threads').at(-1);
-        const entry = snapshot?.threads?.find((t) => t.threadId === thread.threadId);
-        if (entry === undefined) {
-          discarded = true;
-          break;
-        }
-        if (entry.archived === true) {
-          archived = true;
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      if (!archived && !discarded) {
-        throw new Error(
-          `purge close confirmation never arrived for ${thread.threadId} (${recorder.unparseableCount} unparseable frame(s) observed)`,
-        );
-      }
-      if (discarded) return;
+      const deleteFromIndex = frames.length;
       send({ op: 'delete', threadId: thread.threadId });
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
@@ -244,7 +197,10 @@ async function purgeLiveThreads(port: number): Promise<void> {
             `purge delete rejected for ${thread.threadId}: ${JSON.stringify(errored)}`,
           );
         }
-        const snapshot = frames.filter((frame) => frame.op === 'threads').at(-1);
+        const snapshot = frames
+          .slice(deleteFromIndex)
+          .filter((frame) => frame.op === 'threads')
+          .at(-1);
         if (snapshot?.threads && !snapshot.threads.some((t) => t.threadId === thread.threadId)) {
           return;
         }
@@ -255,27 +211,49 @@ async function purgeLiveThreads(port: number): Promise<void> {
       );
     });
   }
-  const remaining = (await withThreadSocket(port, latestRoster)).filter(
-    (thread) => thread.archived !== true,
-  );
+  const remaining = await withThreadSocket(port, latestRoster);
   if (remaining.length > 0) {
     throw new Error(
-      `live threads survived the roster purge: ${remaining.map((t) => t.threadId).join(', ')}`,
+      `threads survived the roster purge: ${remaining.map((t) => t.threadId).join(', ')}`,
     );
   }
 }
 
-async function seedLiveThread(port: number, contentDir: string): Promise<void> {
+function writeSeedAgentFile(contentDir: string): void {
   const agentsFile = join(contentDir, '.ok', 'local', 'acp-agents.json');
   mkdirSync(dirname(agentsFile), { recursive: true });
   writeFileSync(
     agentsFile,
     `${JSON.stringify(
-      [{ id: SEED_AGENT_ID, name: 'Panel Level Fixture', command: '/bin/false' }],
+      [{ id: SEED_AGENT_ID, name: SEED_AGENT_NAME, command: '/bin/false' }],
       null,
       2,
     )}\n`,
   );
+}
+
+async function registerSeedAgentAsDefault(page: Page): Promise<void> {
+  await page.addInitScript(
+    ({ key, agent }) => {
+      window.localStorage.setItem(
+        key,
+        JSON.stringify({ agents: [agent], defaultKey: `${agent.source}:${agent.id}` }),
+      );
+    },
+    {
+      key: REGISTERED_AGENTS_KEY,
+      agent: { source: 'custom', id: SEED_AGENT_ID, name: SEED_AGENT_NAME },
+    },
+  );
+}
+
+async function liveThreadCount(port: number): Promise<number> {
+  const roster = await withThreadSocket(port, latestRoster);
+  return roster.filter((thread) => thread.archived !== true).length;
+}
+
+async function seedLiveThread(port: number, contentDir: string): Promise<void> {
+  writeSeedAgentFile(contentDir);
 
   await withThreadSocket(port, async (send, frames) => {
     send({ op: 'create', reqId: 'e2e-seed-1', agent: { source: 'custom', id: SEED_AGENT_ID } });
@@ -293,29 +271,6 @@ async function seedLiveThread(port: number, contentDir: string): Promise<void> {
   });
 }
 
-async function stubAgentCatalog(page: Page): Promise<void> {
-  await page.route('**/api/acp/catalog', (route) => route.fulfill({ json: EMPTY_AGENT_CATALOG }));
-}
-
-function nextRosterDelivery(page: Page, marks?: RouteMark[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error('thread socket never delivered its roster')),
-      ROSTER_TIMEOUT_MS,
-    );
-    page.on('websocket', (socket) => {
-      if (!socket.url().includes('/collab/thread')) return;
-      socket.on('framereceived', (frame) => {
-        if (typeof frame.payload !== 'string') return;
-        if (!frame.payload.includes('"op":"threads"')) return;
-        marks?.push({ route: 'roster-frame', at: Date.now() });
-        clearTimeout(timer);
-        resolve();
-      });
-    });
-  });
-}
-
 function settleAfterRoster(page: Page): Promise<void> {
   return page.evaluate(
     () =>
@@ -327,9 +282,9 @@ function settleAfterRoster(page: Page): Promise<void> {
   );
 }
 
-async function openAppWithRoster(page: Page): Promise<void> {
-  const roster = nextRosterDelivery(page);
-  await page.goto('/');
+async function openAppWithRoster(page: Page, path = '/'): Promise<void> {
+  const roster = threadRosterDelivered(page);
+  await page.goto(path);
   await page.waitForFunction(() => Boolean(window.__acpThreadHarness), null, {
     timeout: BOOT_TIMEOUT_MS,
   });
@@ -337,46 +292,92 @@ async function openAppWithRoster(page: Page): Promise<void> {
   await settleAfterRoster(page);
 }
 
+function agentsHeaderButton(page: Page): Locator {
+  return page.getByTestId(AGENTS_HEADER_BUTTON);
+}
+
+async function expectAgentsPanelShown(page: Page, shown: boolean): Promise<void> {
+  await expect(agentsHeaderButton(page)).toHaveAttribute('aria-pressed', String(shown), {
+    timeout: BOOT_TIMEOUT_MS,
+  });
+  if (shown) await expect(page.locator(AGENTS_PANEL_MOUNT)).toBeVisible();
+  else await expect(page.locator(AGENTS_PANEL_MOUNT)).not.toBeVisible();
+}
+
+async function expectFocusInsideAgentsPanel(page: Page): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          (mount) => document.activeElement?.closest(mount) != null,
+          AGENTS_PANEL_MOUNT,
+        ),
+      { timeout: 10_000 },
+    )
+    .toBe(true);
+}
+
+async function openInjectedThread(page: Page, title: string): Promise<void> {
+  await page.evaluate((threadTitle) => {
+    const harness = window.__acpThreadHarness;
+    if (harness === undefined) throw new Error('ACP thread harness is not installed');
+    harness.openThread({
+      agent: { id: 'header-agents-button', name: 'Header Agent', source: 'registry' },
+      title: threadTitle,
+    });
+  }, title);
+}
+
+async function showChatWithInjectedThread(page: Page, title: string): Promise<Locator> {
+  await agentsHeaderButton(page).click();
+  await expectAgentsPanelShown(page, true);
+  await waitForAgentsHostSettled(page);
+  await openInjectedThread(page, title);
+  const composer = page.locator(AGENTS_PANEL_MOUNT).locator(THREAD_COMPOSER);
+  await expect(composer).toBeVisible({ timeout: BOOT_TIMEOUT_MS });
+  return composer;
+}
+
+async function storeAgentsPanelWidth(page: Page, widthPx: number): Promise<void> {
+  await page.addInitScript(({ key, value }) => window.localStorage.setItem(key, value), {
+    key: AGENTS_PANEL_WIDTH_KEY,
+    value: String(widthPx),
+  });
+}
+
 async function openAgentsPanel(page: Page): Promise<void> {
   const mount = page.locator(AGENTS_PANEL_MOUNT);
-  const revealTab = page.locator(AGENTS_REVEAL_TAB);
-  await expect
-    .poll(async () => (await mount.isVisible()) || (await revealTab.isVisible()), {
-      timeout: BOOT_TIMEOUT_MS,
-    })
-    .toBe(true);
-  const revealed = await revealTab.isVisible();
-  if (revealed) {
-    await revealTab.click({ timeout: 5_000 }).catch(() => {});
-  }
+  const button = agentsHeaderButton(page);
+  await expect(button).toBeVisible({ timeout: BOOT_TIMEOUT_MS });
+  const revealed = (await button.getAttribute('aria-pressed')) !== 'true';
+  if (revealed) await button.click({ timeout: 5_000 });
   await expect(mount).toBeVisible({ timeout: BOOT_TIMEOUT_MS });
-  if (revealed) {
-    await expect
-      .poll(
-        () =>
-          page.evaluate(() => document.activeElement?.closest('[data-agents-panel-mount]') != null),
-        { timeout: 10_000 },
-      )
-      .toBe(true);
-  }
+  if (revealed) await expectFocusInsideAgentsPanel(page);
   await settleAfterRoster(page);
 }
 
+async function agentsPanelWidth(page: Page): Promise<number> {
+  return (await dockUnitRect(page, 'agents'))?.width ?? 0;
+}
+
+async function expectAgentsPanelWidth(page: Page, widthPx: number): Promise<void> {
+  await expect
+    .poll(async () => Math.abs((await agentsPanelWidth(page)) - widthPx))
+    .toBeLessThanOrEqual(1);
+}
+
 async function resizeAgentsPanel(page: Page, targetWidth: number): Promise<void> {
-  const mount = page.locator(AGENTS_PANEL_MOUNT);
-  const panel = mount.locator('xpath=ancestor::*[@data-slot="resizable-panel"][1]');
-  const handle = panel.locator('xpath=preceding-sibling::*[1]');
-  await expect(handle).toHaveAttribute('data-slot', 'resizable-handle');
-  await handle.focus();
-  const currentWidth = await mount.evaluate((element) => element.getBoundingClientRect().width);
-  const grows = currentWidth < targetWidth;
-  for (let index = 0; index < 20; index += 1) {
-    const width = await mount.evaluate((element) => element.getBoundingClientRect().width);
+  const seam = dockSeam(page, 'agents');
+  await seam.focus();
+  await expect(seam).toBeFocused();
+  const grows = (await agentsPanelWidth(page)) < targetWidth;
+  for (let index = 0; index < 40; index += 1) {
+    const width = await agentsPanelWidth(page);
     if (grows ? width >= targetWidth : width <= targetWidth) break;
     await page.keyboard.press(grows ? 'ArrowLeft' : 'ArrowRight');
     await settleAfterRoster(page);
   }
-  const observedWidth = await mount.evaluate((element) => element.getBoundingClientRect().width);
+  const observedWidth = await agentsPanelWidth(page);
   if (grows) expect(observedWidth).toBeGreaterThanOrEqual(targetWidth);
   else expect(observedWidth).toBeLessThanOrEqual(targetWidth);
 }
@@ -386,47 +387,41 @@ async function dragAgentsPanel(
   targetWidth: number,
   termination: 'pointerup' | 'pointercancel' = 'pointerup',
 ): Promise<number> {
-  const mount = page.locator(AGENTS_PANEL_MOUNT);
-  const panel = mount.locator('xpath=ancestor::*[@data-slot="resizable-panel"][1]');
-  const handle = panel.locator('xpath=preceding-sibling::*[1]');
-  const [handleBounds, startWidth] = await Promise.all([
-    handle.boundingBox(),
-    panel.evaluate((element) => element.getBoundingClientRect().width),
-  ]);
-  expect(handleBounds).not.toBeNull();
-  if (handleBounds === null) throw new Error('Agents panel handle has no bounds');
-  const startX = handleBounds.x + handleBounds.width / 2;
-  const y = handleBounds.y + handleBounds.height / 2;
+  const seam = dockSeam(page, 'agents');
+  const workspace = page.locator(DOCK_WORKSPACE);
+  const [seamBounds, startWidth] = await Promise.all([seam.boundingBox(), agentsPanelWidth(page)]);
+  expect(seamBounds).not.toBeNull();
+  if (seamBounds === null) throw new Error('the Agents seam has no bounds');
+  const startX = seamBounds.x + seamBounds.width / 2;
+  const y = seamBounds.y + seamBounds.height / 2;
   const targetX = startX + startWidth - targetWidth;
 
+  await seam.evaluate((element: HTMLElement) => {
+    element.addEventListener(
+      'pointerdown',
+      (event) => {
+        (window as Window & { __agentsSeamPointerId?: number }).__agentsSeamPointerId =
+          event.pointerId;
+      },
+      { once: true },
+    );
+  });
   await page.mouse.move(startX, y);
   await page.mouse.down();
-  await expect(page.locator('[data-dragging="true"]')).toHaveCount(1);
+  await expect(workspace).toHaveAttribute('data-dragging', '');
   await page.mouse.move(targetX, y, { steps: 8 });
-  const transientWidth = await panel.evaluate((element) => element.getBoundingClientRect().width);
+  const transientWidth = await agentsPanelWidth(page);
 
   if (termination === 'pointercancel') {
-    await page.evaluate(() => {
-      document.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerId: 1 }));
+    await seam.evaluate((element) => {
+      const pointerId =
+        (window as Window & { __agentsSeamPointerId?: number }).__agentsSeamPointerId ?? 1;
+      element.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerId }));
     });
   }
   await page.mouse.up();
-  await expect(page.locator('[data-dragging="true"]')).toHaveCount(0);
+  await expect(workspace).not.toHaveAttribute('data-dragging');
   return transientWidth;
-}
-
-async function agentsPanelWidth(page: Page): Promise<number> {
-  return page
-    .locator(AGENTS_PANEL_MOUNT)
-    .locator('xpath=ancestor::*[@data-slot="resizable-panel"][1]')
-    .evaluate((element) => element.getBoundingClientRect().width);
-}
-
-async function persistedAgentsPanelWidth(page: Page): Promise<number | null> {
-  return page.evaluate((key) => {
-    const raw = window.localStorage.getItem(key);
-    return raw === null ? null : Number.parseInt(raw, 10);
-  }, AGENTS_PANEL_WIDTH_KEY);
 }
 
 async function waitForAgentsHostSettled(page: Page): Promise<void> {
@@ -442,11 +437,12 @@ async function settleAgentsHostAfterReload(page: Page): Promise<void> {
   await waitForAgentsHostSettled(page);
 }
 
-async function collapseAgentsPanel(page: Page): Promise<void> {
-  await page
-    .getByRole('button', { name: COLLAPSE_AGENT_PANEL_BUTTON })
-    .click({ timeout: BOOT_TIMEOUT_MS });
-  await expect(page.locator(AGENTS_REVEAL_TAB)).toBeVisible({ timeout: BOOT_TIMEOUT_MS });
+async function closeAgentsPanel(page: Page): Promise<void> {
+  await expect(agentsHeaderButton(page)).toHaveAttribute('aria-pressed', 'true', {
+    timeout: BOOT_TIMEOUT_MS,
+  });
+  await agentsHeaderButton(page).click({ timeout: BOOT_TIMEOUT_MS });
+  await expectAgentsPanelShown(page, false);
   await settleAfterRoster(page);
 }
 
@@ -466,7 +462,9 @@ async function expectPersistedPanelLevel(page: Page, level: boolean): Promise<vo
 }
 
 async function reloadAndSettle(page: Page, marks?: RouteMark[]): Promise<void> {
-  const roster = nextRosterDelivery(page, marks);
+  const roster = threadRosterDelivered(page, () =>
+    marks?.push({ route: 'roster-frame', at: Date.now() }),
+  );
   await page.reload();
   await roster;
   await settleAfterRoster(page);
@@ -479,7 +477,7 @@ test.describe('agents panel resize', () => {
     await page.evaluate(() => window.__acpThreadHarness?.reset());
   });
 
-  test('the panel follows the pointer below its settled minimum and reverses before release', async ({
+  test('the panel follows a seam drag, stops at its minimum and reverses before release', async ({
     page,
   }) => {
     await page.setViewportSize({ width: 1600, height: 900 });
@@ -496,45 +494,40 @@ test.describe('agents panel resize', () => {
     await openAgentsPanel(page);
 
     const mount = page.locator(AGENTS_PANEL_MOUNT);
-    const panel = mount.locator('xpath=ancestor::*[@data-slot="resizable-panel"][1]');
-    const handle = panel.locator('xpath=preceding-sibling::*[1]');
-    const handleBounds = await handle.boundingBox();
-    expect(handleBounds).not.toBeNull();
-    if (handleBounds === null) return;
+    const workspace = page.locator(DOCK_WORKSPACE);
+    const seamBounds = await dockSeam(page, 'agents').boundingBox();
+    expect(seamBounds).not.toBeNull();
+    if (seamBounds === null) return;
 
-    const startWidth = await panel.evaluate((element) => element.getBoundingClientRect().width);
-    expect(startWidth).toBeGreaterThan(420);
-    expect(startWidth).toBeLessThan(540);
-    const handleX = handleBounds.x + handleBounds.width / 2;
-    const handleY = handleBounds.y + handleBounds.height / 2;
+    const startWidth = await agentsPanelWidth(page);
+    expect(startWidth).toBeGreaterThan(AGENTS_MIN_WIDTH_PX + 145);
+    const seamX = seamBounds.x + seamBounds.width / 2;
+    const seamY = seamBounds.y + seamBounds.height / 2;
 
-    await page.mouse.move(handleX, handleY);
+    await page.mouse.move(seamX, seamY);
     await page.mouse.down();
-    await expect(page.locator('[data-dragging="true"]')).toHaveCount(1);
+    await expect(workspace).toHaveAttribute('data-dragging', '');
 
-    await page.mouse.move(handleX + 145, handleY, { steps: 8 });
-    const firstShrinkWidth = await panel.evaluate(
-      (element) => element.getBoundingClientRect().width,
-    );
+    await page.mouse.move(seamX + 145, seamY, { steps: 8 });
+    const firstShrinkWidth = await agentsPanelWidth(page);
     expect(firstShrinkWidth).toBeLessThan(startWidth - 100);
 
-    await page.mouse.move(handleX + 190, handleY, { steps: 4 });
-    const belowMinimumWidth = await panel.evaluate(
-      (element) => element.getBoundingClientRect().width,
-    );
-    expect(belowMinimumWidth).toBeGreaterThan(200);
-    expect(belowMinimumWidth).toBeLessThan(320);
+    await page.mouse.move(seamX + startWidth, seamY, { steps: 4 });
+    const atMinimumWidth = await agentsPanelWidth(page);
+    expect(Math.abs(atMinimumWidth - AGENTS_MIN_WIDTH_PX)).toBeLessThanOrEqual(1);
 
-    await page.mouse.move(handleX + 110, handleY, { steps: 6 });
-    const reversedWidth = await panel.evaluate((element) => element.getBoundingClientRect().width);
-    expect(reversedWidth).toBeGreaterThan(belowMinimumWidth + 50);
+    await page.mouse.move(seamX + 100, seamY, { steps: 6 });
+    const reversedWidth = await agentsPanelWidth(page);
+    expect(reversedWidth).toBeGreaterThan(atMinimumWidth + 50);
     expect(reversedWidth).toBeLessThan(startWidth);
 
     await page.mouse.up();
-    await expect(page.locator('[data-dragging="true"]')).toHaveCount(0);
+    await expect(workspace).not.toHaveAttribute('data-dragging');
     await expect(mount).toBeVisible();
-    await expect.poll(() => agentsPanelWidth(page)).toBeCloseTo(reversedWidth, -1);
-    await expect.poll(() => persistedAgentsPanelWidth(page)).toBeCloseTo(reversedWidth, -1);
+    await expectAgentsPanelWidth(page, reversedWidth);
+    await reloadAndSettle(page);
+    await expect(mount).toBeVisible();
+    await expectAgentsPanelWidth(page, reversedWidth);
   });
 
   test('keyboard reveal of an empty agents panel keeps focus in the revealed surface', async ({
@@ -547,38 +540,21 @@ test.describe('agents panel resize', () => {
     await settleAfterRoster(page);
 
     const mount = page.locator(AGENTS_PANEL_MOUNT);
-    const revealTab = page.locator(AGENTS_REVEAL_TAB);
-    await expect
-      .poll(async () => (await mount.isVisible()) || (await revealTab.isVisible()), {
-        timeout: BOOT_TIMEOUT_MS,
-      })
-      .toBe(true);
-    if (await revealTab.isVisible()) await revealTab.click();
-    await expect(mount).toBeVisible({ timeout: BOOT_TIMEOUT_MS });
+    const button = agentsHeaderButton(page);
+    await expect(button).toBeVisible({ timeout: BOOT_TIMEOUT_MS });
+    if ((await button.getAttribute('aria-pressed')) === 'true') await button.click();
+    await expectAgentsPanelShown(page, false);
+
+    await button.focus();
+    await expect(button).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expectAgentsPanelShown(page, true);
     await waitForAgentsHostSettled(page);
     await expect(mount.getByRole('tab')).toHaveCount(0);
-
-    const panel = mount.locator('xpath=ancestor::*[@data-slot="resizable-panel"][1]');
-    const handle = panel.locator('xpath=preceding-sibling::*[1]');
-    await expect(handle).toHaveAttribute('data-slot', 'resizable-handle');
-    await handle.focus();
-    await page.keyboard.press('Home');
-    await expect(mount).not.toBeVisible();
-    await expect(revealTab).toBeVisible();
-
-    await revealTab.focus();
-    await expect(revealTab).toBeFocused();
-    await page.keyboard.press('Enter');
-    await expect(mount).toBeVisible();
-    await expect(revealTab).not.toBeVisible();
-    await expect
-      .poll(() =>
-        page.evaluate(() => document.activeElement?.closest('[data-agents-panel-mount]') != null),
-      )
-      .toBe(true);
+    await expectFocusInsideAgentsPanel(page);
   });
 
-  test('release bands, cancellation, keyboard resizing, reveal, and reload preserve the settled contract', async ({
+  test('a release past the minimum settles at it, cancellation keeps the prior width, and keyboard steps, reveal and reload keep the settled width', async ({
     page,
   }) => {
     await page.setViewportSize({ width: 1600, height: 900 });
@@ -594,47 +570,162 @@ test.describe('agents panel resize', () => {
     });
     await openAgentsPanel(page);
 
-    const middleTransientWidth = await dragAgentsPanel(page, 250);
-    expect(middleTransientWidth).toBeGreaterThan(200);
-    expect(middleTransientWidth).toBeLessThan(320);
-    await expect.poll(() => agentsPanelWidth(page)).toBeCloseTo(320, -1);
-    await expect.poll(() => persistedAgentsPanelWidth(page)).toBe(320);
+    const minimumTransientWidth = await dragAgentsPanel(page, 250);
+    expect(Math.abs(minimumTransientWidth - AGENTS_MIN_WIDTH_PX)).toBeLessThanOrEqual(1);
+    await expectAgentsPanelWidth(page, AGENTS_MIN_WIDTH_PX);
 
     await dragAgentsPanel(page, 520);
     const preferredWidth = await agentsPanelWidth(page);
-    expect(preferredWidth).toBeGreaterThan(500);
-    expect(preferredWidth).toBeLessThan(540);
-    await expect.poll(() => persistedAgentsPanelWidth(page)).toBeCloseTo(preferredWidth, -1);
+    expect(preferredWidth).toBeGreaterThan(510);
+    expect(preferredWidth).toBeLessThan(530);
 
     const cancelledTransientWidth = await dragAgentsPanel(page, 240, 'pointercancel');
-    expect(cancelledTransientWidth).toBeGreaterThan(200);
-    expect(cancelledTransientWidth).toBeLessThan(320);
-    await expect.poll(() => agentsPanelWidth(page)).toBeCloseTo(preferredWidth, -1);
-    await expect.poll(() => persistedAgentsPanelWidth(page)).toBeCloseTo(preferredWidth, -1);
+    expect(Math.abs(cancelledTransientWidth - AGENTS_MIN_WIDTH_PX)).toBeLessThanOrEqual(1);
+    await expectAgentsPanelWidth(page, preferredWidth);
 
-    const mount = page.locator(AGENTS_PANEL_MOUNT);
-    const panel = mount.locator('xpath=ancestor::*[@data-slot="resizable-panel"][1]');
-    const handle = panel.locator('xpath=preceding-sibling::*[1]');
-    await handle.focus();
-    for (let index = 0; index < 8; index += 1) {
-      await page.keyboard.press('ArrowRight');
+    const seam = dockSeam(page, 'agents');
+    await seam.focus();
+    for (const key of [
+      'ArrowRight',
+      'ArrowRight',
+      'ArrowRight',
+      'ArrowRight',
+      'Shift+ArrowRight',
+    ]) {
+      await page.keyboard.press(key);
       await settleAfterRoster(page);
     }
-    await expect(handle).toBeFocused();
-    await expect.poll(() => agentsPanelWidth(page)).toBeCloseTo(320, -1);
-    await expect.poll(() => persistedAgentsPanelWidth(page)).toBeCloseTo(preferredWidth, -1);
+    await expect(seam).toBeFocused();
+    const keyboardWidth = preferredWidth - 4 * SEAM_KEYBOARD_STEP_PX - SEAM_LARGE_KEYBOARD_STEP_PX;
+    await expectAgentsPanelWidth(page, keyboardWidth);
 
-    const closeTransientWidth = await dragAgentsPanel(page, 100);
-    expect(closeTransientWidth).toBeLessThan(160);
-    await expect(mount).not.toBeVisible();
-    await expect(page.locator(AGENTS_REVEAL_TAB)).toBeVisible();
-    await expect.poll(() => persistedAgentsPanelWidth(page)).toBeCloseTo(preferredWidth, -1);
-
+    await closeAgentsPanel(page);
     await openAgentsPanel(page);
-    await expect.poll(() => agentsPanelWidth(page)).toBeCloseTo(preferredWidth, -1);
+    await expectAgentsPanelWidth(page, keyboardWidth);
     await reloadAndSettle(page);
-    await expect(mount).toBeVisible();
-    await expect.poll(() => agentsPanelWidth(page)).toBeCloseTo(preferredWidth, -1);
+    await expect(page.locator(AGENTS_PANEL_MOUNT)).toBeVisible();
+    await expectAgentsPanelWidth(page, keyboardWidth);
+  });
+});
+
+test.describe('header Agents button', () => {
+  test.afterEach(async ({ page, workerServer }) => {
+    await page.evaluate(() => window.__acpThreadHarness?.reset());
+    await purgeThreadRoster(workerServer.port);
+  });
+
+  test('clicking Agents while chat is hidden shows it at the share seeded from its stored width, with focus inside it', async ({
+    page,
+  }) => {
+    const viewport = { width: 1600, height: 900 };
+    await page.setViewportSize(viewport);
+    await storeAgentsPanelWidth(page, STORED_AGENTS_PANEL_WIDTH_PX);
+    await stubAgentCatalog(page);
+    await openAppWithRoster(page);
+    await expectAgentsPanelShown(page, false);
+
+    await agentsHeaderButton(page).click();
+    await expectAgentsPanelShown(page, true);
+    const workspaceWidth = await page
+      .locator(DOCK_WORKSPACE)
+      .evaluate((element) => element.getBoundingClientRect().width);
+    const seededWidth =
+      (STORED_AGENTS_PANEL_WIDTH_PX / viewport.width) * (workspaceWidth - PANE_CARD_GAP_PX);
+    await expect.poll(() => agentsPanelWidth(page)).toBeCloseTo(seededWidth, -1);
+    await expectFocusInsideAgentsPanel(page);
+  });
+
+  test('an empty chat shown from Agents starts exactly one conversation', async ({
+    page,
+    workerServer,
+  }) => {
+    await purgeThreadRoster(workerServer.port);
+    writeSeedAgentFile(workerServer.contentDir);
+    await registerSeedAgentAsDefault(page);
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await stubAgentCatalog(page);
+    await openAppWithRoster(page);
+    await expectAgentsPanelShown(page, false);
+    const tabs = page.locator(AGENTS_PANEL_MOUNT).getByRole('tab');
+
+    await agentsHeaderButton(page).click();
+    await expectAgentsPanelShown(page, true);
+    await expect(tabs).toHaveCount(1, { timeout: ROSTER_TIMEOUT_MS });
+    await expect
+      .poll(() => liveThreadCount(workerServer.port), { timeout: ROSTER_TIMEOUT_MS })
+      .toBe(1);
+
+    await agentsHeaderButton(page).click();
+    await expectAgentsPanelShown(page, false);
+    await agentsHeaderButton(page).click();
+    await expectAgentsPanelShown(page, true);
+    await expect(tabs).toHaveCount(1);
+    expect(await liveThreadCount(workerServer.port)).toBe(1);
+  });
+
+  test('hiding from Agents keeps focus on the button and the chat draft, by click, Enter or Space', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await stubAgentCatalog(page);
+    await openAppWithRoster(page);
+    const button = agentsHeaderButton(page);
+    const composer = await showChatWithInjectedThread(page, 'Header draft conversation');
+    await composer.click();
+    await page.keyboard.type(HEADER_DRAFT);
+    await expect(composer).toHaveText(HEADER_DRAFT);
+
+    await button.click();
+    await expectAgentsPanelShown(page, false);
+    await expect(button).toBeFocused();
+    await button.click();
+    await expectAgentsPanelShown(page, true);
+    await expect(composer).toHaveText(HEADER_DRAFT);
+
+    for (const key of ['Enter', 'Space'] as const) {
+      await button.focus();
+      await page.keyboard.press(key);
+      await expectAgentsPanelShown(page, false);
+      await expect(button).toBeFocused();
+      await page.keyboard.press(key);
+      await expectAgentsPanelShown(page, true);
+      await expectFocusInsideAgentsPanel(page);
+      await expect(composer).toHaveText(HEADER_DRAFT);
+    }
+  });
+
+  test('with text selected, Agents only toggles chat while Cmd/Ctrl+L stages the selection', async ({
+    page,
+    api,
+  }) => {
+    const docName = `header-agents-selection-${test.info().workerIndex}`;
+    await api.seedDocs([{ name: docName, markdown: `# ${docName}\n\n${SELECTION_DOC_TEXT}\n` }]);
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await stubAgentCatalog(page);
+    await openAppWithRoster(page, `/#/${docName}`);
+    const button = agentsHeaderButton(page);
+    const composer = await showChatWithInjectedThread(page, 'Selection destination');
+    const paragraph = page
+      .locator('.ProseMirror:not(.composer-prosemirror) p')
+      .filter({ hasText: SELECTION_DOC_TEXT });
+    const selectionPublished = page.getByTestId('editor-footer-selected-label');
+    await expect(composer).toHaveText('');
+    await button.click();
+    await expectAgentsPanelShown(page, false);
+
+    await paragraph.selectText();
+    await expect(selectionPublished).toBeVisible();
+    await button.click();
+    await expectAgentsPanelShown(page, true);
+    await expect(composer).toHaveText('');
+    await button.click();
+    await expectAgentsPanelShown(page, false);
+
+    await paragraph.selectText();
+    await expect(selectionPublished).toBeVisible();
+    await page.keyboard.press('ControlOrMeta+l');
+    await expectAgentsPanelShown(page, true);
+    await expect(composer).toContainText(SELECTION_DOC_TEXT);
   });
 });
 
@@ -699,6 +790,11 @@ test.describe('chat history navigation', () => {
       .include('[data-testid="agent-thread-history-panel"]')
       .analyze();
     expect(solarizedAccessibility.violations).toEqual([]);
+    await switchColorThemeAndSettleFade(page, 'monokai');
+    const monokaiAccessibility = await new AxeBuilder({ page })
+      .include('[data-testid="agent-thread-history-panel"]')
+      .analyze();
+    expect(monokaiAccessibility.violations).toEqual([]);
 
     await alphaRow.click();
     await expect(panel.getByRole('tab', { name: /Alpha planning conversation/ })).toHaveAttribute(
@@ -870,7 +966,7 @@ test.describe('chat history navigation', () => {
     await page.addInitScript(() => window.localStorage.setItem('ok-theme-v1', 'dark'));
     await stubAgentCatalog(page);
 
-    const roster = nextRosterDelivery(page);
+    const roster = threadRosterDelivered(page);
     await page.goto('/?lang=pseudo');
     await page.waitForFunction(() => Boolean(window.__acpThreadHarness), null, {
       timeout: BOOT_TIMEOUT_MS,
@@ -906,10 +1002,7 @@ test.describe('chat history navigation', () => {
       });
     });
     const mount = page.locator(AGENTS_PANEL_MOUNT);
-    if (await page.locator(AGENTS_REVEAL_TAB).isVisible()) {
-      await page.locator(AGENTS_REVEAL_TAB).click();
-    }
-    await expect(mount).toBeVisible({ timeout: BOOT_TIMEOUT_MS });
+    await openAgentsPanel(page);
     await mount.getByTestId('agent-thread-history').click();
     const historyPanel = page.getByTestId('agent-thread-history-panel');
     await expect(historyPanel).toBeVisible();
@@ -1014,7 +1107,7 @@ test.describe('chat history navigation', () => {
     ).toHaveAttribute('aria-selected', 'true');
   });
 
-  test('dragging a covered agent pane closed leaves the reveal control available', async ({
+  test('a narrow agent pane keeps history in a cover, and hiding it from Agents brings it back at its width', async ({
     page,
   }) => {
     await page.setViewportSize({ width: 1600, height: 900 });
@@ -1024,13 +1117,14 @@ test.describe('chat history navigation', () => {
       const harness = window.__acpThreadHarness;
       if (harness === undefined) throw new Error('ACP thread harness is not installed');
       harness.openThread({
-        threadId: 'history-drag-close',
-        agent: { id: 'drag-close', name: 'First Agent', source: 'registry' },
-        title: 'Drag close conversation',
+        threadId: 'history-narrow-cover',
+        agent: { id: 'narrow-cover', name: 'First Agent', source: 'registry' },
+        title: 'Narrow cover conversation',
       });
     });
     await openAgentsPanel(page);
-    await resizeAgentsPanel(page, 500);
+    await dragAgentsPanel(page, 500);
+    expect(await agentsPanelWidth(page)).toBeLessThan(HISTORY_DOCKED_MIN_PANE_WIDTH_PX);
 
     const mount = page.locator(AGENTS_PANEL_MOUNT);
     await mount.getByRole('button', { name: 'Chat history' }).click();
@@ -1069,47 +1163,37 @@ test.describe('chat history navigation', () => {
     await mount.getByRole('button', { name: 'Chat history' }).click();
     await expect(history).toHaveAttribute('data-history-mode', 'cover');
 
-    const panel = mount.locator('xpath=ancestor::*[@data-slot="resizable-panel"][1]');
-    const handle = panel.locator('xpath=preceding-sibling::*[1]');
-    const handleBounds = await handle.boundingBox();
-    expect(handleBounds).not.toBeNull();
-    const handleX = (handleBounds?.x ?? 0) + (handleBounds?.width ?? 0) / 2;
-    const handleY = (handleBounds?.y ?? 0) + (handleBounds?.height ?? 0) / 2;
-    await page.mouse.move(handleX, handleY);
-    await page.mouse.down();
-    await page.mouse.move(1598, handleY, { steps: 10 });
-    await page.mouse.up();
-
-    await expect(page.locator('[data-dragging="true"]')).toHaveCount(0);
-    const reveal = page.locator(AGENTS_REVEAL_TAB);
-    await expect(reveal).toBeVisible({ timeout: BOOT_TIMEOUT_MS });
-    await reveal.click();
-    await expect(page.locator(AGENTS_PANEL_MOUNT)).toBeVisible({ timeout: BOOT_TIMEOUT_MS });
-    await expect(page.getByTestId('agent-thread-history-panel')).toBeVisible();
+    const widthBeforeHide = await agentsPanelWidth(page);
+    await agentsHeaderButton(page).click();
+    await expectAgentsPanelShown(page, false);
+    await agentsHeaderButton(page).click();
+    await expectAgentsPanelShown(page, true);
+    await expectAgentsPanelWidth(page, widthBeforeHide);
+    await expect(mount.getByRole('tab', { name: 'Narrow cover conversation' })).toBeVisible();
   });
 });
 
 test.describe('agents panel reload visibility level', () => {
   test.afterEach(async ({ workerServer }) => {
-    await purgeLiveThreads(workerServer.port);
+    await purgeThreadRoster(workerServer.port);
   });
 
-  test('a panel closed before a roster-delayed reload stays closed after it (level written by real open and collapse clicks and asserted in localStorage before reload; storage-coercion edge cases are pinned by the co-located DOM suites)', async ({
+  test('a panel closed before a roster-delayed reload stays closed after it (level written by real open and close clicks on the header Agents button and asserted in localStorage before reload; storage-coercion edge cases are pinned by the co-located DOM suites)', async ({
     page,
     workerServer,
   }) => {
-    await purgeLiveThreads(workerServer.port);
+    await purgeThreadRoster(workerServer.port);
     await seedLiveThread(workerServer.port, workerServer.contentDir);
     await stubAgentCatalog(page);
     await openAppWithRoster(page);
 
     await openAgentsPanel(page);
     await expectPersistedPanelLevel(page, true);
-    await collapseAgentsPanel(page);
+    await closeAgentsPanel(page);
     await expectPersistedPanelLevel(page, false);
 
     const marks: RouteMark[] = [];
-    await page.route(SESSIONS_CHUNK_GLOB, async (route) => {
+    await page.route(servedModuleRoute(SESSIONS_HOST_SOURCE), async (route) => {
       await route.continue();
       marks.push({ route: 'sessions-chunk-response', at: Date.now() });
     });
@@ -1131,26 +1215,25 @@ test.describe('agents panel reload visibility level', () => {
 
     await settleAgentsHostAfterReload(page);
 
-    await expect(page.locator(AGENTS_REVEAL_TAB)).toBeVisible();
-    await expect(page.locator(AGENTS_PANEL_MOUNT)).not.toBeVisible();
+    await expectAgentsPanelShown(page, false);
   });
 
-  test('a panel closed before a roster-first reload stays closed and a later thread still reveals (level written by real open and collapse clicks and asserted in localStorage before reload; storage-coercion edge cases are pinned by the co-located DOM suites)', async ({
+  test('a panel closed before a roster-first reload stays closed and a later thread still reveals (level written by real open and close clicks on the header Agents button and asserted in localStorage before reload; storage-coercion edge cases are pinned by the co-located DOM suites)', async ({
     page,
     workerServer,
   }) => {
-    await purgeLiveThreads(workerServer.port);
+    await purgeThreadRoster(workerServer.port);
     await seedLiveThread(workerServer.port, workerServer.contentDir);
     await stubAgentCatalog(page);
     await openAppWithRoster(page);
 
     await openAgentsPanel(page);
     await expectPersistedPanelLevel(page, true);
-    await collapseAgentsPanel(page);
+    await closeAgentsPanel(page);
     await expectPersistedPanelLevel(page, false);
 
     const marks: RouteMark[] = [];
-    await page.route(SESSIONS_CHUNK_GLOB, async (route) => {
+    await page.route(servedModuleRoute(SESSIONS_HOST_SOURCE), async (route) => {
       await waitForRouteMark(
         marks,
         'roster-frame',
@@ -1168,8 +1251,7 @@ test.describe('agents panel reload visibility level', () => {
 
     await settleAgentsHostAfterReload(page);
 
-    await expect(page.locator(AGENTS_REVEAL_TAB)).toBeVisible();
-    await expect(page.locator(AGENTS_PANEL_MOUNT)).not.toBeVisible();
+    await expectAgentsPanelShown(page, false);
 
     await page.evaluate(() => {
       const harness = window.__acpThreadHarness;
@@ -1187,7 +1269,7 @@ test.describe('agents panel reload visibility level', () => {
     page,
     workerServer,
   }) => {
-    await purgeLiveThreads(workerServer.port);
+    await purgeThreadRoster(workerServer.port);
     await seedLiveThread(workerServer.port, workerServer.contentDir);
     await stubAgentCatalog(page);
     await openAppWithRoster(page);
@@ -1197,15 +1279,57 @@ test.describe('agents panel reload visibility level', () => {
 
     await reloadAndSettle(page);
 
-    await expect(page.locator(AGENTS_PANEL_MOUNT)).toBeVisible();
-    await expect(page.locator(AGENTS_REVEAL_TAB)).not.toBeVisible();
+    await expectAgentsPanelShown(page, true);
+  });
+
+  test('a panel hidden with the header Agents button stays hidden after a reload, with the button not pressed', async ({
+    page,
+    workerServer,
+  }) => {
+    await purgeThreadRoster(workerServer.port);
+    await seedLiveThread(workerServer.port, workerServer.contentDir);
+    await stubAgentCatalog(page);
+    await openAppWithRoster(page);
+    await expectAgentsPanelShown(page, false);
+
+    await agentsHeaderButton(page).click();
+    await expectAgentsPanelShown(page, true);
+    await expectPersistedPanelLevel(page, true);
+    await agentsHeaderButton(page).click();
+    await expectAgentsPanelShown(page, false);
+    await expectPersistedPanelLevel(page, false);
+
+    await reloadAndSettle(page);
+    await settleAgentsHostAfterReload(page);
+
+    await expectAgentsPanelShown(page, false);
+  });
+
+  test('a panel shown with the header Agents button stays shown after a reload, with the button pressed', async ({
+    page,
+    workerServer,
+  }) => {
+    await purgeThreadRoster(workerServer.port);
+    await seedLiveThread(workerServer.port, workerServer.contentDir);
+    await stubAgentCatalog(page);
+    await openAppWithRoster(page);
+    await expectAgentsPanelShown(page, false);
+
+    await agentsHeaderButton(page).click();
+    await expectAgentsPanelShown(page, true);
+    await expectPersistedPanelLevel(page, true);
+
+    await reloadAndSettle(page);
+    await settleAgentsHostAfterReload(page);
+
+    await expectAgentsPanelShown(page, true);
   });
 
   test('a panel open before a roster-first reload stays open after it (level written by a real open click and asserted in localStorage before reload; storage-coercion edge cases are pinned by the co-located DOM suites)', async ({
     page,
     workerServer,
   }) => {
-    await purgeLiveThreads(workerServer.port);
+    await purgeThreadRoster(workerServer.port);
     await seedLiveThread(workerServer.port, workerServer.contentDir);
     await stubAgentCatalog(page);
     await openAppWithRoster(page);
@@ -1214,7 +1338,7 @@ test.describe('agents panel reload visibility level', () => {
     await expectPersistedPanelLevel(page, true);
 
     const marks: RouteMark[] = [];
-    await page.route(SESSIONS_CHUNK_GLOB, async (route) => {
+    await page.route(servedModuleRoute(SESSIONS_HOST_SOURCE), async (route) => {
       await waitForRouteMark(
         marks,
         'roster-frame',
@@ -1232,7 +1356,6 @@ test.describe('agents panel reload visibility level', () => {
 
     await settleAgentsHostAfterReload(page);
 
-    await expect(page.locator(AGENTS_PANEL_MOUNT)).toBeVisible();
-    await expect(page.locator(AGENTS_REVEAL_TAB)).not.toBeVisible();
+    await expectAgentsPanelShown(page, true);
   });
 });

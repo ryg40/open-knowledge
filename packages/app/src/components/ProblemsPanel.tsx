@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 // oxlint-disable ok/no-raw-html-interactive-element -- matches sibling OutlinePanel — positional list of <button> rows awaiting a shared shadcn list primitive; tracked at https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-html-interactive-element
 // oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — physical margin/padding/inset utilities predate the rule; drain by swapping ml/mr → ms/me, pl/pr → ps/pe, left/right → start/end, then deleting this line. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-physical-direction-utility
 
@@ -86,6 +87,7 @@ export interface LintNavDetail {
   column: number;
   source?: string;
   frontmatterScope?: FrontmatterScope;
+  onNavigated?: (target: HTMLElement) => void;
 }
 
 export const LINT_NAV_EVENT = 'open-knowledge:lint-nav';
@@ -159,7 +161,7 @@ function DiagnosticRowBody({
           aria-hidden="true"
           className={cn(
             'mt-0.5 size-3.5 shrink-0',
-            diagnostic.severity === 'error' ? 'text-destructive' : 'text-amber-500',
+            diagnostic.severity === 'error' ? 'text-destructive' : 'text-warning',
           )}
         />
         <span className="min-w-0 flex-1 text-foreground">
@@ -182,7 +184,6 @@ function DiagnosticRowBody({
         ) : null}
       </span>
       <span className="flex items-center gap-1.5 ps-5 font-mono text-xs text-muted-foreground">
-        {}
         <Badge
           variant="gray"
           data-testid="problems-source-tag"
@@ -195,7 +196,6 @@ function DiagnosticRowBody({
           {KindIcon !== null ? <KindIcon aria-hidden="true" className="size-2.5" /> : null}
           {diagnostic.source}
         </Badge>
-        {}
         <span className="min-w-0 truncate">
           {grouped ? diagnostic.code : `${diagnostic.code} · ${t`line ${displayLine}`}`}
         </span>
@@ -239,7 +239,6 @@ function DiagnosticGroupItem({
     const actions = renderActions(first);
     return (
       <li className="group relative rounded transition-colors hover:bg-muted">
-        {}
         <button
           type="button"
           onClick={() => onNavigate(first)}
@@ -260,7 +259,6 @@ function DiagnosticGroupItem({
   return (
     <li className="rounded" data-testid="problems-duplicate-group">
       <Collapsible>
-        {}
         <CollapsibleTrigger className="group flex w-full cursor-pointer flex-col gap-0.5 rounded px-2 py-1.5 text-left transition-colors hover:bg-muted">
           <DiagnosticRowBody diagnostic={first} instanceCount={group.instances.length} />
         </CollapsibleTrigger>
@@ -351,7 +349,6 @@ function ActionTooltip({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        {}
         <span className="inline-flex shrink-0">{children}</span>
       </TooltipTrigger>
       <TooltipContent data-testid={testId}>{tip}</TooltipContent>
@@ -462,6 +459,8 @@ export function ProblemsPanel({
   onAutoFix,
   onAskAi,
   onFixWithAi,
+  onDestinationComplete,
+  onDestinationRequested,
 }: {
   docName: string;
   diagnostics: DiagnosticLike[];
@@ -471,6 +470,13 @@ export function ProblemsPanel({
   onAutoFix?: () => void;
   onAskAi?: (diagnostic: DiagnosticLike) => void;
   onFixWithAi?: (scope: PanelScope) => void;
+  onDestinationComplete?: (target: HTMLElement) => void;
+  onDestinationRequested?: (
+    docName: string,
+    allowMissing?: boolean,
+    onReady?: () => void,
+    completion?: 'synced' | 'navigated',
+  ) => void;
 }) {
   const { t } = useLingui();
   const panelRef = useRef<HTMLElement>(null);
@@ -606,7 +612,7 @@ export function ProblemsPanel({
   useEffect(() => subscribeToProjectFixSweepSettled(() => onSweepSettledRef.current()), []);
 
   function handleNav(diagnostic: DiagnosticLike) {
-    const detail = lintNavDetailOf(docName, diagnostic);
+    const detail = { ...lintNavDetailOf(docName, diagnostic), onNavigated: onDestinationComplete };
     rememberPendingSourceNavigation(docName, { kind: 'lint', detail });
     window.dispatchEvent(new CustomEvent(LINT_NAV_EVENT, { detail }));
   }
@@ -617,10 +623,22 @@ export function ProblemsPanel({
       handleNav(diagnostic);
       return;
     }
+    const detail = {
+      ...lintNavDetailOf(targetDocName, diagnostic),
+      onNavigated: onDestinationComplete,
+    };
     rememberPendingSourceNavigation(targetDocName, {
       kind: 'lint',
-      detail: lintNavDetailOf(targetDocName, diagnostic),
+      detail,
     });
+    onDestinationRequested?.(
+      targetDocName,
+      false,
+      () => {
+        window.dispatchEvent(new CustomEvent(LINT_NAV_EVENT, { detail }));
+      },
+      'navigated',
+    );
     window.location.hash = hashFromDocName(targetDocName);
   }
 
@@ -679,7 +697,6 @@ export function ProblemsPanel({
           {scope === 'doc' && sorted.length > 0 && <PanelCount>{sorted.length}</PanelCount>}
           {showActivePluginsPill && (
             <Tooltip>
-              {}
               <TooltipTrigger
                 className="shrink-0 cursor-default rounded-md bg-muted-foreground/5 px-2 py-1 font-mono text-xs text-muted-foreground"
                 data-testid="problems-active-plugins"
@@ -857,7 +874,6 @@ function ProjectAuditBody({
   }
   return (
     <PanelBody className="px-2 py-2" data-testid="problems-project-scope">
-      {}
       <div className="flex flex-col gap-1 px-2 pb-1">
         <div className="flex items-center justify-between gap-2">
           <p
@@ -873,7 +889,6 @@ function ProjectAuditBody({
             )}
           </p>
           <div className="flex shrink-0 items-center gap-1">
-            {}
             {loadedFiles.length > 0 ? (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -903,7 +918,6 @@ function ProjectAuditBody({
                 </TooltipContent>
               </Tooltip>
             ) : null}
-            {}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -925,13 +939,11 @@ function ProjectAuditBody({
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-1">
-          {}
           {fixing !== null ? (
             <span className="sr-only" role="status">
               {t`Fixing ${fixing.done} of ${fixing.total} files`}
             </span>
           ) : null}
-          {}
           {fixing !== null ? (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -1059,10 +1071,7 @@ function ProjectAuditResults({
           {configWarnings.map((warning, index) => (
             // biome-ignore lint/suspicious/noArrayIndexKey: the warnings array is a static audit snapshot (no reorder/insert between renders), and identical config warnings can legitimately repeat — a text-only key would collide.
             <li key={`${index}-${warning}`} className="flex items-start gap-1.5 px-2 text-xs">
-              <AlertTriangle
-                aria-hidden="true"
-                className="mt-0.5 size-3.5 shrink-0 text-amber-500"
-              />
+              <AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-warning" />
               <span className="min-w-0 text-foreground">{warning}</span>
             </li>
           ))}

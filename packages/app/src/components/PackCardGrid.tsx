@@ -15,6 +15,7 @@ import {
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Spinner } from '@/components/ui/spinner';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { OkPackId, OkSeedPackInfo } from '@/lib/desktop-bridge-types';
@@ -132,7 +133,6 @@ export function PackCardGrid({
 
   return (
     <div className={cn('@container/packgrid w-full max-w-5xl', className)}>
-      {}
       <Collapsible open={expanded} onOpenChange={setExpanded}>
         <div className={gridClassName}>
           {visiblePacks.map((pack) => (
@@ -208,12 +208,10 @@ function PackCard({ pack, onSelect }: PackCardProps) {
         </p>
       </div>
 
-      {}
       <span
         data-slot="pack-card-reveal"
         className="pointer-events-none absolute inset-0 flex items-center justify-center gap-1.5 rounded-[inherit] bg-card/85 text-sm font-medium text-muted-foreground opacity-0 transition-opacity duration-200 ease-out-strong group-hover:opacity-100 group-focus-visible:opacity-100 supports-backdrop-filter:bg-card/35 supports-backdrop-filter:backdrop-blur-md reduced-transparency:bg-card"
       >
-        {}
         <span className="inline-flex items-center gap-1.5 motion-safe:translate-y-1 motion-safe:transition-[translate] motion-safe:duration-200 motion-safe:ease-out-strong motion-safe:group-hover:translate-y-0 motion-safe:group-focus-visible:translate-y-0">
           <Trans>See what's added</Trans>
           <ArrowRight aria-hidden="true" className="size-3.5" />
@@ -227,7 +225,6 @@ function PackCard({ pack, onSelect }: PackCardProps) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>{card}</TooltipTrigger>
-      {}
       <TooltipContent className="flex-col items-start gap-1.5">
         <ul className="flex flex-col gap-1.5 text-left">
           {pack.folders.map((folder) => (
@@ -245,13 +242,13 @@ function PackCard({ pack, onSelect }: PackCardProps) {
 function PackCardSkeleton() {
   return (
     <div className="flex h-full min-h-[200px] flex-col items-start gap-4 rounded-xl border border-border/60 bg-card p-6">
-      <span className="size-10 animate-pulse rounded-lg bg-muted" aria-hidden="true">
+      <Skeleton className="size-10 rounded-lg" aria-hidden="true">
         <Spinner aria-hidden="true" className="size-5 text-muted-foreground opacity-0" />
-      </span>
+      </Skeleton>
       <div className="flex w-full flex-col gap-2">
-        <div className="h-4 w-1/2 animate-pulse rounded bg-muted" />
-        <div className="h-3 w-full animate-pulse rounded bg-muted" />
-        <div className="h-3 w-4/5 animate-pulse rounded bg-muted" />
+        <Skeleton className="h-4 w-1/2 rounded" />
+        <Skeleton className="h-3 w-full rounded" />
+        <Skeleton className="h-3 w-4/5 rounded" />
       </div>
     </div>
   );

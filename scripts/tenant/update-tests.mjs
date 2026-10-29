@@ -45,7 +45,7 @@ function fixture(context, scenario = '') {
   git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'fork');
   const fork = git(repo, 'rev-parse', 'HEAD');
   git(repo, 'switch', 'main');
-  writeFileSync(join(repo, 'packages/cli/package.json'), JSON.stringify({ version: next }));
+  writeFileSync(join(repo, 'packages/cli/package.json'), JSON.stringify({ version: scenario.startsWith('tagged') ? scenario === 'tagged-wrong-version' ? '97.0.0' : '0.0.0-unknown' : next }));
   writeFileSync(join(repo, 'package.json'), JSON.stringify({ packageManager: 'pnpm@99.0.0' }, null, 2) + '\n');
   writeFileSync(join(repo, 'pnpm-workspace.yaml'), 'packages: [packages/*]\n');
   mkdirSync(join(repo, 'patches')); writeFileSync(join(repo, 'patches/new.patch'), 'new\n');
@@ -55,8 +55,10 @@ function fixture(context, scenario = '') {
   writeFileSync(join(repo, 'packages/core/src/config/schema.ts'), schema(true));
   writeFileSync(join(repo, 'packages/server/src/usage.ts'), "if (process.env.OK_USAGE_REPORT !== '0') fetch('https://collector.example.net/v1');\n");
   if (scenario === 'conflict') writeFileSync(join(repo, 'shared'), 'upstream edit\n');
-  git(repo, 'add', '.'); git(repo, 'commit', '-qm', `main reset: post-stable v${next}`);
+  git(repo, 'add', '.'); git(repo, 'commit', '-qm', scenario.startsWith('tagged') ? 'Upstream stable release' : `main reset: post-stable v${next}`);
   const release = git(repo, 'rev-parse', 'HEAD');
+  if (scenario.startsWith('tagged')) git(repo, 'tag', `v${next}`);
+  if (scenario === 'tagged-off-main') git(repo, 'switch', '-C', 'main', base);
   writeFileSync(join(repo, 'unreleased'), 'not part of the release\n');
   git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'unreleased change');
   const bare = join(tmp, 'upstream.git');
@@ -194,6 +196,28 @@ test('qualify: passing run selects the post-stable commit, not the latest main',
   assert.equal(result.branch, `sync/v${next}`);
   assert.ok(result.steps.every((record) => record.status === 'passed'));
   assert.equal(result.bundle, undefined);
+});
+test('qualify: tagged releases with unstamped manifests select the exact commit', (context) => {
+  const f = fixture(context, 'tagged');
+  const { result, code } = f.call('qualify', ['--version', next, '--workdir', f.work]);
+  assert.equal(code, 0, JSON.stringify(result));
+  assert.equal(result.upstream_commit, f.release);
+  assert.equal(result.steps.find((record) => record.name === 'public-check').exit_code, 0);
+});
+test('qualify: off-main tags and mismatched package versions fail closed', (context) => {
+  for (const scenario of ['tagged-off-main', 'tagged-wrong-version']) {
+    const f = fixture(context, scenario);
+    const { result, code } = f.call('qualify', ['--version', next, '--workdir', f.work]);
+    assert.equal(code, 1);
+    assert.equal(result.steps.find((record) => record.name === 'select-release').status, 'failed');
+    assert.equal(result.steps.find((record) => record.name === 'build').status, 'skipped');
+  }
+});
+test('notes: tagged releases use the exact stable release commit', (context) => {
+  const f = fixture(context, 'tagged');
+  const { result, code } = f.call('notes', ['--from', current, '--to', next, '--workdir', f.work]);
+  assert.equal(code, 0, JSON.stringify(result));
+  assert.equal(result.to_commit, f.release);
 });
 test('qualify: a bundle carries the tested branch only after a passing run', (context) => {
   const f = fixture(context);

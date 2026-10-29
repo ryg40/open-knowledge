@@ -4,6 +4,7 @@ initFrontendTelemetry();
 void import('./telemetry-startup').then((m) => m.initStartupTrace());
 
 import '@/lib/perf/scheduler-polyfill-shim';
+import '@/lib/promise-with-resolvers-polyfill';
 
 import { I18nProvider } from '@lingui/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -150,16 +151,13 @@ createRoot(root).render(
           storageKey="ok-theme-v1"
         >
           <RegisteredAgentHydrator />
-          {}
           <TooltipProvider>
             <AppErrorBoundary>{selectDesktopRootApp(desktopBridge)}</AppErrorBoundary>
-            {}
             {desktopBridge !== undefined && (
               <CrashReportingBoundary>
                 <ReportBugCrashInviteTrigger bridge={desktopBridge} />
               </CrashReportingBoundary>
             )}
-            {}
             <Toaster richColors closeButton />
           </TooltipProvider>
         </ThemeProvider>

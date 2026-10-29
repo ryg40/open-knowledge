@@ -269,7 +269,7 @@ function PartExceptionChip({
         <Button
           variant="ghost"
           size="icon-sm"
-          className="text-amber-700 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-400"
+          className="text-warning hover:text-warning"
           aria-label={t`Why this needs attention`}
         >
           <TriangleAlert aria-hidden />
@@ -335,7 +335,6 @@ function PartCheckbox({
       className="items-start gap-3"
       data-disabled={disabled || undefined}
     >
-      {}
       <div className="flex h-7 items-center">
         <Checkbox
           id={id}
@@ -350,12 +349,10 @@ function PartCheckbox({
           <Label htmlFor={id} className="cursor-pointer">
             <FieldTitle>{title}</FieldTitle>
           </Label>
-          {}
           {warning !== null ? (
             <PartExceptionChip message={warning} path={path} info={disabled ? null : info} />
           ) : (
             <PartInfo>
-              {}
               <span className="flex flex-col gap-1.5">
                 {info}
                 {path === null ? null : (
@@ -380,9 +377,8 @@ function PartCheckbox({
             ))}
           </div>
         )}
-        {}
         {alsoAffects === null ? null : (
-          <p id={sharedId} className="text-sm leading-relaxed text-amber-700 dark:text-amber-400">
+          <p id={sharedId} className="text-sm leading-relaxed text-warning">
             {t`This folder is also ${alsoAffects}'s.`}
           </p>
         )}
@@ -1089,9 +1085,7 @@ function RemovalGroup({ scope, rows }: { scope: 'project' | 'machine'; rows: Rem
                   <code className="block truncate text-xs text-muted-foreground">{row.path}</code>
                 )}
                 {alsoAffects === null ? null : (
-                  <p className="text-xs text-amber-700 dark:text-amber-400">
-                    {t`This folder is also ${alsoAffects}'s.`}
-                  </p>
+                  <p className="text-xs text-warning">{t`This folder is also ${alsoAffects}'s.`}</p>
                 )}
               </div>
             </li>

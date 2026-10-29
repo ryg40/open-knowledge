@@ -10,14 +10,13 @@ import {
 import plugin, { rules } from '../index.mjs';
 import { noAppCoreBarrelImport } from '../rules/no-app-core-barrel-import.mjs';
 import { isInScope, RULE_SCOPES, scoped, UNSCOPED_RULES } from '../scope.mjs';
+import { OK_RULES_FIXTURES_DIR, OK_RULES_TESTS_DIR } from './ok-rules-scope-partition.reads.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
-const TESTS_DIR = fileURLToPath(new URL('.', import.meta.url));
-const FIXTURES_DIR = fileURLToPath(new URL('../__fixtures__/', import.meta.url));
-const FIXTURE_CONFIG = fileURLToPath(
-  new URL('../__fixtures__/oxlint.fixtures.json', import.meta.url),
-);
-const TIER_TEST = /\.uncached\.test\.mjs$/;
+const TESTS_DIR = join(REPO_ROOT, OK_RULES_TESTS_DIR);
+const FIXTURES_DIR = join(REPO_ROOT, OK_RULES_FIXTURES_DIR);
+const FIXTURE_CONFIG = join(FIXTURES_DIR, 'oxlint.fixtures.json');
+const TIER_TEST = /\.uncached\.test\.(?:mjs|ts)$/;
 const CODE_FILE = /\.[cm]?[jt]sx?$/;
 const META_TESTS = ['ok-rules-scope-partition', 'ok-rules-vocabulary'];
 
@@ -40,8 +39,10 @@ describe('ok-rules scope table', () => {
   test('UNSCOPED_RULES holds exactly the rules that are deliberately global', () => {
     expect([...UNSCOPED_RULES].sort()).toEqual([
       'microcopy-ellipsis',
+      'no-empty-jsx-expression',
       'no-hand-rolled-spinner',
       'no-loosely-typed-webcontents-ipc',
+      'no-redundant-jsx-element-braces',
       'no-resolved-value-theme-source',
       'no-sentinel-signal-target',
       'no-split-suggestion-dispatch',
@@ -85,7 +86,7 @@ describe('ok-rules scope table', () => {
     let checked = 0;
     const outOfScope = [];
     for (const name of fixtures) {
-      const fixture = `lint-plugins/ok-rules/__fixtures__/${name}`;
+      const fixture = `${OK_RULES_FIXTURES_DIR}/${name}`;
       for (const fire of lintOkRulesFixture(fixture)) {
         const rule = /^ok\((.+)\)$/.exec(fire.code)?.[1];
         if (rule === undefined) continue;
@@ -154,13 +155,17 @@ describe('scoped() through a symlinked repository path', () => {
 });
 
 describe('ok-rules fixture tests', () => {
-  test('every file in the tests directory runs in the uncached tier or is a helper', () => {
+  test('every file in the tests directory runs in the uncached tier, or is a helper or a read declaration', () => {
     const misplaced = readdirSync(TESTS_DIR).filter(
-      (name) => CODE_FILE.test(name) && !TIER_TEST.test(name) && !name.endsWith('.test-helper.mjs'),
+      (name) =>
+        CODE_FILE.test(name) &&
+        !TIER_TEST.test(name) &&
+        !name.endsWith('.test-helper.mjs') &&
+        !name.endsWith('.reads.mjs'),
     );
     expect(
       misplaced,
-      'a fixture test here is named <rule>.uncached.test.mjs, so the uncached tier runs it',
+      'a fixture test here is named <rule>.uncached.test.mjs or <rule>.uncached.test.ts, so the uncached tier runs it',
     ).toEqual([]);
   });
 
@@ -168,7 +173,7 @@ describe('ok-rules fixture tests', () => {
     const stems = new Set(publicTestStems());
     expect(
       registered.filter((rule) => !stems.has(rule)),
-      'a rule ships with lint-plugins/ok-rules/tests/<rule>.uncached.test.mjs (precedent #42)',
+      'a rule ships with lint-plugins/ok-rules/tests/<rule>.uncached.test.mjs or .uncached.test.ts (precedent #42)',
     ).toEqual([]);
   });
 

@@ -340,18 +340,37 @@ upstream_version=$(awk -F= '/^ARG OK_VERSION=/ { print $2; exit }' "$tmp/dockerf
 printf '%s\n' "$upstream_version" | grep -aEqx '[0-9]+\.[0-9]+\.[0-9]+' || fail "OK_VERSION of $source is not a stable X.Y.Z version"
 git rev-parse -q --verify 'refs/remotes/upstream/main^{commit}' >/dev/null || fail "refs/remotes/upstream/main is absent: run scripts/tenant/setup-remotes.sh, then git fetch upstream"
 git log --first-parent --format='%H%x09%s' refs/remotes/upstream/main > "$tmp/upstream-log" || fail "cannot read the upstream history"
-upstream_sha=$(awk -v prefix="main reset: post-stable v$upstream_version" '
+awk -v prefix="main reset: post-stable v$upstream_version" '
   {
     subject = substr($0, index($0, "\t") + 1)
     if (index(subject, prefix) != 1) next
     rest = substr(subject, length(prefix) + 1)
-    if (rest == "" || rest ~ /^[ (]/) { print substr($0, 1, index($0, "\t") - 1); count++ }
+    if (rest == "" || rest ~ /^[ (]/) print substr($0, 1, index($0, "\t") - 1)
   }
-  END { if (count != 1) exit 1 }
-' "$tmp/upstream-log") || fail "upstream main needs exactly one post-stable commit for $upstream_version; run git fetch upstream, then compare ARG OK_VERSION of $source with the upstream releases"
+' "$tmp/upstream-log" > "$tmp/post-stable" || fail "cannot read the upstream history"
+post_stable_count=$(wc -l < "$tmp/post-stable" | tr -d ' ')
+[ "$post_stable_count" -le 1 ] || fail "upstream main has $post_stable_count post-stable commits for $upstream_version"
+tagged_release=0
+if [ "$post_stable_count" -eq 1 ]; then
+  upstream_sha=$(cat "$tmp/post-stable")
+else
+  git ls-remote --tags upstream "refs/tags/v$upstream_version" "refs/tags/v$upstream_version^{}" > "$tmp/upstream-tag" || fail "cannot read the upstream tag v$upstream_version"
+  upstream_sha=$(awk -v ref="refs/tags/v$upstream_version" '
+    $2 == ref { plain = $1 }
+    $2 == ref "^{}" { peeled = $1 }
+    END { if (peeled != "") print peeled; else if (plain != "") print plain }
+  ' "$tmp/upstream-tag")
+  [ -n "$upstream_sha" ] || fail "upstream has no post-stable commit and no tag v$upstream_version; compare ARG OK_VERSION of $source with the upstream releases"
+  awk -F '\t' -v sha="$upstream_sha" '$1 == sha { found = 1 } END { exit !found }' "$tmp/upstream-log" || fail "the upstream tag v$upstream_version is not on the first-parent history of refs/remotes/upstream/main; run git fetch upstream"
+  tagged_release=1
+fi
 git show "$upstream_sha:packages/cli/package.json" > "$tmp/manifest" 2>/dev/null || fail "the upstream release commit has no package manifest"
 manifest_version=$(awk -F '"' '/"version"[[:space:]]*:/ { print $4; exit }' "$tmp/manifest")
-[ "$manifest_version" = "$upstream_version" ] || fail "the package manifest of $upstream_sha has version $manifest_version, not $upstream_version"
+if [ "$manifest_version" != "$upstream_version" ]; then
+  if [ "$tagged_release" -ne 1 ] || [ "$manifest_version" != 0.0.0-unknown ]; then
+    fail "the package manifest of $upstream_sha has version $manifest_version, not $upstream_version"
+  fi
+fi
 git merge-base --is-ancestor "$upstream_sha" "$source_sha" || fail "$source does not contain the upstream release commit $upstream_sha; merge that upstream release into $source first"
 upstream_short=$(git rev-parse --short "$upstream_sha")
 history_base=$(git config --get ok.historyBase || true)

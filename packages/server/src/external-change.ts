@@ -3,8 +3,11 @@ import type { Hocuspocus } from '@hocuspocus/server';
 import {
   BridgeInvariantViolationError,
   BridgeMergeContentLossError,
+  type DiskEditReconciledWarning,
   normalizeBridge,
+  type ParsedCheckpoint,
   prependFrontmatter,
+  type ReconcileMergeOutcome,
   stripFrontmatter,
   toBridgeInvariantLog,
 } from '@inkeep/open-knowledge-core';
@@ -22,10 +25,11 @@ import {
   isEditableTextDoc,
   isExcalidrawDoc,
   isMermaidDoc,
+  isPersistenceExcludedDoc,
   isSystemDoc,
 } from './cc1-broadcast.ts';
 import { type ConflictAuthority, isDocInConflict } from './conflict-authority.ts';
-import type { ReconcileReason } from './conflict-kinds.ts';
+import { isRemovalLifecycleStatus, type ReconcileReason } from './conflict-kinds.ts';
 import { safeContentPath } from './content-path.ts';
 import { recordContributor } from './contributor-tracker.ts';
 import { applyDiskContentToDoc, FILE_WATCHER_ORIGIN } from './disk-content-intake.ts';
@@ -34,13 +38,24 @@ import { takeExternalChangeAttribution } from './external-change-attribution.ts'
 import { recordFrontmatterEditSurface } from './frontmatter-telemetry.ts';
 import { canonicalContentPathIsRefused } from './fs-safety.ts';
 import { getLogger } from './logger.ts';
+import type { MergeHistoryRecorder } from './merge-history.ts';
 import {
   incrementExternalChangeHandlerErrors,
+  incrementReconcileBothKept,
+  incrementReconcileCheckFailed,
   incrementReconcileInFlightFallthroughs,
   incrementReconcileInsertDedupSkipped,
+  incrementReconcileKeptLive,
   incrementReconcileOwnFlushSkips,
 } from './metrics.ts';
-import { type ReconcileRefusalReason, reconcile } from './reconciliation.ts';
+import {
+  countKeptBlocks,
+  type KeptBlockCounts,
+  type KeptBlockPair,
+  type ReconcileOutcome,
+  type ReconcileRefusalReason,
+  reconcile,
+} from './reconciliation.ts';
 import { FILE_SYSTEM_WRITER } from './shadow-repo.ts';
 
 export { FILE_WATCHER_ORIGIN } from './disk-content-intake.ts';
@@ -142,6 +157,51 @@ export function applyExternalChange(
   durabilityState.setReconciledBase(docName, content);
 }
 
+export type FrozenResidentRevival = 'not-frozen' | 'revived' | 'failed';
+
+export function reviveFrozenResidentDoc(
+  durabilityState: DocumentDurabilityState,
+  hocuspocus: Hocuspocus,
+  docName: string,
+  content: string,
+  resolveEmbed?: (basename: string, sourcePath: string) => string | null,
+  resolveSize?: (basename: string, sourcePath: string) => number | null,
+  bridgeLossReporter?: BridgeDeriveLossReporter,
+): FrozenResidentRevival {
+  if (isPersistenceExcludedDoc(docName)) return 'not-frozen';
+  const resident = hocuspocus.documents.get(docName);
+  if (!resident) return 'not-frozen';
+  const lifecycle = resident.getMap('lifecycle');
+  const status = lifecycle.get('status');
+  if (!isRemovalLifecycleStatus(status)) return 'not-frozen';
+  const replacedInMemoryContent = resident.getText('source').toString() !== content;
+  try {
+    applyExternalChange(
+      durabilityState,
+      hocuspocus,
+      docName,
+      content,
+      resolveEmbed,
+      resolveSize,
+      bridgeLossReporter,
+    );
+  } catch (err) {
+    getLogger('reconcile').error(
+      { err: redactedErrorSummary(err), docName, status },
+      `[reconcile] could not revive ${docName}: it stays ${status} and keeps refusing stores until the server reloads it`,
+    );
+    return 'failed';
+  }
+  lifecycle.delete('status');
+  lifecycle.delete('newPath');
+  durabilityState.endRenameCarry(docName);
+  getLogger('reconcile').info(
+    { docName, status, replacedInMemoryContent },
+    `[reconcile] revived ${docName}: its name is occupied on disk again, so the ${status} freeze no longer applies`,
+  );
+  return 'revived';
+}
+
 export function createExternalChangeHandler(
   durabilityState: DocumentDurabilityState,
   hocuspocus: Hocuspocus,
@@ -196,6 +256,51 @@ function clearStaleExternalWriteConflict(
   lifecycleMap.delete('detectedAt');
 }
 
+type ReconcileCheckSite =
+  | 'watcher'
+  | 'agent-write'
+  | 'branch-switch'
+  | 'skill-store'
+  | 'skill-intake';
+
+export function reportReconcileCheckFailed(
+  docName: string,
+  outcome: ReconcileOutcome,
+  site: ReconcileCheckSite,
+): void {
+  if (outcome.kind !== 'refused' || outcome.reason !== 'check-failed') return;
+  incrementReconcileCheckFailed();
+  getLogger('reconcile').warn(
+    { docName, site, failure: outcome.failure },
+    `[reconcile] ${site} ${docName} merge output failed the fidelity check (${outcome.failure.check})`,
+  );
+}
+
+export function reportReconcileBothKept(
+  docName: string,
+  kept: readonly KeptBlockPair[],
+  site: ReconcileCheckSite,
+): void {
+  const counts = countKeptBlocks(kept);
+  incrementReconcileBothKept(counts.duplicated);
+  getLogger('reconcile').info(
+    { docName, site, ...counts },
+    `[reconcile] ${site} ${docName} kept both versions of ${counts.duplicated} block(s), restored ${counts.restoredDeletedHere} block(s) deleted here and ${counts.restoredDeletedOutside} block(s) deleted outside`,
+  );
+}
+
+export function reportReconcileKeptLive(
+  docName: string,
+  reason: Extract<ParsedCheckpoint, { kind: 'external-change-kept-live' }>['metadata']['reason'],
+  site: ReconcileCheckSite,
+): void {
+  incrementReconcileKeptLive();
+  getLogger('reconcile').warn(
+    { docName, site, reason },
+    `[reconcile] ${site} ${docName} could not be merged (${reason}); the live version stays and the other version was saved to history`,
+  );
+}
+
 export function wireReasonForRefusal(reason: ReconcileRefusalReason): ReconcileReason {
   switch (reason) {
     case 'conflict-markers':
@@ -203,6 +308,7 @@ export function wireReasonForRefusal(reason: ReconcileRefusalReason): ReconcileR
     case 'no-base':
       return 'refused-no-base';
     case 'too-large':
+    case 'check-failed':
       return 'refused-too-large';
     default: {
       const unhandled: never = reason;
@@ -270,10 +376,96 @@ export interface ReconcileBeforeWriteResult {
   reconciled: boolean;
   baseBytes: number;
   diskBytes: number;
-  mergeOutcome?: 'clean' | 'merged';
+  mergeOutcome?: ReconcileMergeOutcome;
+  keptBlocks?: KeptBlockCounts;
 }
 
-const NOT_RECONCILED: ReconcileBeforeWriteResult = {
+const RE_READ = 'Re-read the document (e.g. `exec("cat <path>")`)';
+
+function blocks(count: number): string {
+  return count === 1 ? '1 block' : `${count} blocks`;
+}
+
+function bothKeptHint(counts: KeptBlockCounts): string {
+  const sentences: string[] = [];
+  if (counts.duplicated > 0) {
+    sentences.push(
+      `An out-of-band edit changed ${blocks(counts.duplicated)} also edited here, so both versions were kept: the version here first, the out-of-band version directly under it.`,
+    );
+  }
+  if (counts.restoredDeletedHere > 0) {
+    sentences.push(
+      `The deletion here of ${blocks(counts.restoredDeletedHere)} was undone because the out-of-band edit changed ${counts.restoredDeletedHere === 1 ? 'it' : 'them'}: the out-of-band version was restored.`,
+    );
+  }
+  if (counts.restoredDeletedOutside > 0) {
+    sentences.push(
+      `The out-of-band deletion of ${blocks(counts.restoredDeletedOutside)} edited here was undone: the version here was kept.`,
+    );
+  }
+  sentences.push('Your write landed; do not retry it.');
+  const tidy = [
+    ...(counts.duplicated > 0 ? ['remove the duplicate'] : []),
+    ...(counts.restoredDeletedHere > 0 ? ['delete the restored block again'] : []),
+  ];
+  sentences.push(
+    tidy.length > 0
+      ? `${RE_READ} and, if your task calls for it, ${tidy.join(' or ')} with an ordinary edit.`
+      : `${RE_READ} before continuing.`,
+  );
+  return sentences.join(' ');
+}
+
+function reconcileWarningHint(reconcile: ReconcileBeforeWriteResult): string {
+  const outcome = reconcile.mergeOutcome;
+  switch (outcome) {
+    case 'merged':
+      return 'An out-of-band edit was three-way merged into this document before your edit was applied on top; the merge may have interleaved content blocks. Re-read it (e.g. `exec("cat <path>")`) and review the combined result carefully before continuing.';
+    case 'both-kept':
+      return bothKeptHint(
+        reconcile.keptBlocks ?? {
+          duplicated: 1,
+          restoredDeletedHere: 0,
+          restoredDeletedOutside: 0,
+        },
+      );
+    case 'kept-live':
+      return 'An out-of-band edit to this file could not be merged safely, so the version here was kept and the out-of-band version was saved to the history of this document. Your write landed; do not retry it. Re-read the document (e.g. `exec("cat <path>")`) before continuing.';
+    case 'clean':
+    case undefined:
+      return 'An out-of-band edit was reconciled into this document before your edit was applied on top; the document now reflects that edit plus yours. Re-read it (e.g. `exec("cat <path>")`) to see the combined result before continuing.';
+    default: {
+      const unhandled: never = outcome;
+      throw new Error(`unhandled merge outcome: ${String(unhandled)}`);
+    }
+  }
+}
+
+export function buildReconcileWarning(
+  reconcile: ReconcileBeforeWriteResult,
+): DiskEditReconciledWarning | undefined {
+  if (!reconcile.reconciled) return undefined;
+  const asksReRead =
+    reconcile.mergeOutcome === 'both-kept' || reconcile.mergeOutcome === 'kept-live';
+  return {
+    kind: 'disk-edit-reconciled',
+    intendedBytes: reconcile.baseBytes,
+    actualBytes: reconcile.diskBytes,
+    byteDelta: reconcile.diskBytes - reconcile.baseBytes,
+    ...(reconcile.mergeOutcome ? { mergeOutcome: reconcile.mergeOutcome } : {}),
+    ...(reconcile.keptBlocks === undefined
+      ? {}
+      : {
+          duplicatedBlocks: reconcile.keptBlocks.duplicated,
+          restoredDeletedHere: reconcile.keptBlocks.restoredDeletedHere,
+          restoredDeletedOutside: reconcile.keptBlocks.restoredDeletedOutside,
+        }),
+    ...(asksReRead ? { nextStep: 're-read' as const } : {}),
+    hint: reconcileWarningHint(reconcile),
+  };
+}
+
+export const NOT_RECONCILED: ReconcileBeforeWriteResult = {
   reconciled: false,
   baseBytes: 0,
   diskBytes: 0,
@@ -287,7 +479,7 @@ export function serializeYDocSource(document: {
   return prependFrontmatter(frontmatter, body);
 }
 
-export function reconcileDiskBeforeAgentWrite(
+export async function reconcileDiskBeforeAgentWrite(
   durabilityState: DocumentDurabilityState,
   hocuspocus: Hocuspocus,
   docName: string,
@@ -295,7 +487,8 @@ export function reconcileDiskBeforeAgentWrite(
   resolveEmbed: ((basename: string, sourcePath: string) => string | null) | undefined,
   bridgeLossReporter: BridgeDeriveLossReporter | undefined,
   conflicts: Pick<ConflictAuthority, 'dissolveReconcile' | 'fileOf' | 'raise'>,
-): ReconcileBeforeWriteResult {
+  history: MergeHistoryRecorder,
+): Promise<ReconcileBeforeWriteResult> {
   if (
     isSystemDoc(docName) ||
     isConfigDoc(docName) ||
@@ -387,28 +580,46 @@ export function reconcileDiskBeforeAgentWrite(
     `[reconcile] before-agent-write ${docName} result=${outcome.kind}`,
   );
 
+  const reconciledResult = (
+    mergeOutcome: ReconcileMergeOutcome,
+    keptBlocks?: KeptBlockCounts,
+  ): ReconcileBeforeWriteResult => ({
+    reconciled: true,
+    baseBytes: Buffer.byteLength(base, 'utf8'),
+    diskBytes: Buffer.byteLength(diskContent, 'utf8'),
+    mergeOutcome,
+    ...(keptBlocks === undefined ? {} : { keptBlocks }),
+  });
+
   switch (outcome.kind) {
     case 'noop':
       return NOT_RECONCILED;
 
-    case 'conflicts':
     case 'refused': {
+      reportReconcileCheckFailed(docName, outcome, 'agent-write');
+      if (outcome.reason === 'check-failed' || outcome.reason === 'too-large') {
+        if (
+          await history.keptLive(docName, { side: 'theirs', bytes: diskContent }, outcome.reason)
+        ) {
+          durabilityState.setReconciledBase(docName, diskContent);
+          reportReconcileKeptLive(docName, outcome.reason, 'agent-write');
+          return reconciledResult('kept-live');
+        }
+      }
       conflicts.raise({
         kind: 'reconcile',
         file: conflicts.fileOf(docName),
-        reason:
-          outcome.kind === 'conflicts'
-            ? 'merged-with-markers'
-            : wireReasonForRefusal(outcome.reason),
+        reason: wireReasonForRefusal(outcome.reason),
         stages: { base, ours, theirs: diskContent },
       });
       return NOT_RECONCILED;
     }
 
     case 'clean':
-    case 'merged': {
+    case 'merged':
+    case 'both-kept': {
       const ingest = outcome.kind === 'clean' ? diskContent : outcome.newContent;
-      if (outcome.kind === 'merged' && outcome.dedupSkipped) {
+      if (outcome.kind !== 'clean' && outcome.dedupSkipped) {
         incrementReconcileInsertDedupSkipped();
         getLogger('reconcile').warn(
           { docName },
@@ -424,15 +635,14 @@ export function reconcileDiskBeforeAgentWrite(
         undefined,
         bridgeLossReporter,
       );
-      if (outcome.kind === 'merged') {
+      if (outcome.kind !== 'clean') {
         durabilityState.setReconciledBase(docName, diskContent);
       }
-      return {
-        reconciled: true,
-        baseBytes: Buffer.byteLength(base, 'utf8'),
-        diskBytes: Buffer.byteLength(diskContent, 'utf8'),
-        mergeOutcome: outcome.kind,
-      };
+      if (outcome.kind !== 'both-kept') return reconciledResult(outcome.kind);
+      const keptBlocks = countKeptBlocks(outcome.kept);
+      history.bothKept(docName, { ours, theirs: diskContent }, outcome.kept);
+      reportReconcileBothKept(docName, outcome.kept, 'agent-write');
+      return reconciledResult('both-kept', keptBlocks);
     }
   }
 }

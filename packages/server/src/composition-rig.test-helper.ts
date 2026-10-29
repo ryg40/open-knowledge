@@ -35,23 +35,31 @@ export async function bootCompositionRig(
   seedOkScaffold(contentDir);
   const ownedHome =
     overrides.configHomedirOverride ?? mkdtempSync(resolve(tmpdir(), 'ok-rig-home-'));
-  const booted = await bootServer({
-    host: '127.0.0.1',
-    config: TEST_CONFIG,
-    contentDir,
-    port: 0,
-    quiet: true,
-    gitEnabled: false,
-    idleShutdownMs: null,
-    authorityRegistryPath: testAuthorityRegistryPath,
-    ...overrides,
-    configHomedirOverride: ownedHome,
-  });
+  let booted: BootedServer;
+  try {
+    booted = await bootServer({
+      host: '127.0.0.1',
+      config: TEST_CONFIG,
+      contentDir,
+      port: 0,
+      quiet: true,
+      gitEnabled: false,
+      idleShutdownMs: null,
+      authorityRegistryPath: testAuthorityRegistryPath,
+      ...overrides,
+      configHomedirOverride: ownedHome,
+    });
+  } catch (error) {
+    if (overrides.configHomedirOverride === undefined) {
+      rmSync(ownedHome, { recursive: true, force: true });
+    }
+    throw error;
+  }
   if (overrides.configHomedirOverride === undefined) {
     const inner = booted.destroy;
-    booted.destroy = async (reason) => {
+    booted.destroy = async (...args) => {
       try {
-        await inner(reason);
+        await inner(...args);
       } finally {
         rmSync(ownedHome, { recursive: true, force: true });
       }

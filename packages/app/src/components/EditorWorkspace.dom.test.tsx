@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { EditorPaneState } from '@/editor/editor-panes';
 import { OK_SIDEBAR_DRAG_MIME, serializeSidebarDragPayload } from '@/lib/sidebar-drag';
+import { swapEditorSidebars } from '@/lib/sidebar-side-store';
 import { renderLinguiTemplate } from '@/test-utils/lingui-mock';
 import {
   expectVisualClassTokens,
@@ -174,23 +175,28 @@ vi.doMock('@/lib/single-file-mode', () => ({
 vi.doMock('./EditorTabs', () => ({
   EditorTabs: ({
     dropIndicatorIndex,
+    leading,
     paneId,
-    reserveLeadingChrome,
-    reserveTrailingChrome,
+    trailing,
   }: {
     dropIndicatorIndex?: number | null;
+    leading?: ReactNode;
     paneId: string;
-    reserveLeadingChrome?: boolean;
-    reserveTrailingChrome?: boolean;
+    trailing?: ReactNode;
   }) => (
-    <div
-      data-editor-pane-tabs={paneId}
-      data-drop-indicator-index={dropIndicatorIndex ?? undefined}
-      data-reserve-leading-chrome={reserveLeadingChrome || undefined}
-      data-reserve-trailing-chrome={reserveTrailingChrome || undefined}
-    >
+    <div data-editor-pane-tabs={paneId} data-drop-indicator-index={dropIndicatorIndex ?? undefined}>
+      {leading}
       Tabs {paneId}
+      {trailing}
     </div>
+  ),
+}));
+
+vi.doMock('./FileListToggle', () => ({
+  FileListToggle: ({ side }: { side?: 'start' | 'end' }) => (
+    <button type="button" data-testid="file-list-toggle" data-side={side}>
+      Files
+    </button>
   ),
 }));
 
@@ -386,14 +392,39 @@ describe('EditorWorkspace', () => {
     expect(headerGroups[0]?.style.flexGrow).toBe('60');
     expect(headerGroups[1]?.classList.contains('basis-0')).toBe(true);
     expect(headerGroups[1]?.style.flexGrow).toBe('40');
+    expect(
+      headerGroups[0]?.classList.contains('[&>*]:pe-[var(--editor-header-trailing-width,0px)]'),
+    ).toBe(false);
+    expect(
+      headerGroups[1]?.classList.contains('[&>*]:pe-[var(--editor-header-trailing-width,0px)]'),
+    ).toBe(true);
     expect(container.querySelectorAll('[data-editor-header-pane-separator]')).toHaveLength(1);
-    expect(headerGroups[0]?.querySelector('[data-reserve-leading-chrome="true"]')).toBeTruthy();
-    expect(headerGroups[1]?.querySelector('[data-reserve-trailing-chrome="true"]')).toBeTruthy();
+    expect(screen.getAllByTestId('file-list-toggle')).toHaveLength(1);
+    expect(headerGroups[0]?.contains(screen.getByTestId('file-list-toggle'))).toBe(true);
 
     if (!workspace || !headerCanvas) throw new Error('Expected workspace and header canvas');
     workspace.scrollLeft = 96;
     fireEvent.scroll(workspace);
     expect(headerCanvas.style.transform).toBe('translateX(-96px)');
+  });
+
+  test('with the file sidebar at the end, the one Files toggle closes the last pane strip', () => {
+    swapEditorSidebars();
+    try {
+      const { container } = renderWorkspace();
+      const toggles = screen.getAllByTestId('file-list-toggle');
+      expect(toggles).toHaveLength(1);
+      expect(toggles[0]?.dataset.side).toBe('end');
+      const lastStrip = container.querySelector('[data-editor-pane-tabs="pane-b"]');
+      expect(lastStrip?.lastElementChild).toBe(toggles[0]);
+      expect(
+        container.querySelector(
+          '[data-editor-pane-tabs="pane-a"] [data-testid="file-list-toggle"]',
+        ),
+      ).toBeNull();
+    } finally {
+      swapEditorSidebars();
+    }
   });
 
   test('resizes header tab groups continuously before persisting the panel layout', () => {

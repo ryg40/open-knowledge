@@ -24,6 +24,7 @@ import {
   EDITOR_TARGETS,
   editorConfigPathDisplay,
   editorEntryLocator,
+  findJetsamKillSync,
   getOkArtifactPaths,
   isEntryUpToDate,
   isOwnManagedEntry,
@@ -33,6 +34,7 @@ import {
   type ProjectAiIntegrationsResult,
   previewContent,
   readExistingMcpEntry,
+  registerWindowsProcessStartReader,
   removeOwnMcpEntry,
   removeProjectSkill,
   removeUserGlobalSkillBundle,
@@ -53,12 +55,12 @@ import {
   estimateSkillCost,
   hasUninstallFeedbackContent,
   type LanguagePreference,
+  type OkCliCommand,
   OPENKNOWLEDGE_SKILLS_REPO,
   PROTOCOL_VERSION,
   projectWorktreeCreateResult,
   resolveDesktopProductName,
   ServerInfoSuccessSchema,
-  SPAWN_ERROR_LOG,
   TERMINAL_CLIS,
   type TerminalCli,
   type UninstallFeedbackAnswers,
@@ -70,7 +72,7 @@ import type {
   OkTerminalDockStateWriteResult,
   OkTerminalRestartSnapshot,
 } from '@inkeep/open-knowledge-core/desktop-bridge';
-import { openSpawnErrorLog } from '@inkeep/open-knowledge-core/server';
+import { openSpawnErrorLog, projectSpawnErrorLogPath } from '@inkeep/open-knowledge-core/server';
 import { parseSkillDir } from '@inkeep/open-knowledge-core/skills-catalog';
 import {
   assertGitAvailable,
@@ -85,13 +87,15 @@ import {
   getMeter,
   initContent,
   isProcessAlive,
-  type LocalOpCliInvocation,
   normalizeFsPath,
   ONBOARDING_BUNDLE_IDS,
   prepareSingleFileOpen,
+  prepareSpawnProjectLogsDir,
   type ResolvedSkillHost,
   RUNTIME_VERSION,
+  readBootStartedAtMs,
   readBundleDecision,
+  readProcessStart,
   readServerLock,
   readServerPackageVersion,
   recordSkillInstallEvent,
@@ -158,6 +162,7 @@ import type { EventChannels } from '../shared/ipc-events.ts';
 import { createHandler } from '../shared/ipc-handler.ts';
 import { registerPendingDelivery, sendToRenderer } from '../shared/ipc-send.ts';
 import { createPtyPhaseTrace } from '../shared/pty-phase-trace.ts';
+import { releasesPageUrl } from '../shared/release-links.ts';
 import { UNINSTALL_PRELOAD_ARG } from '../shared/uninstall-preload-arg.ts';
 import { getWindowsEnvValue } from '../shared/windows-env.ts';
 import { resolveShell } from '../utility/pty-host.ts';
@@ -173,9 +178,10 @@ import {
   type ProjectWriterSurface,
 } from './agent-registry-apply.ts';
 import { collectDesktopHostSnapshot, withoutProjectScope } from './agent-registry-probes.ts';
+import { drainAppOwnedWork } from './app-quit-drain.ts';
 import { appendOkIgnoreSync } from './append-okignore.ts';
 import { registerAppImageDeepLinks } from './appimage-integration.ts';
-import { openAssetSafely, revealAssetSafely } from './asset-allowlist.ts';
+import { openAssetOrReveal, openAssetSafely, revealAssetSafely } from './asset-allowlist.ts';
 import { popAssetMenu, revealMenuLabel } from './asset-menu.ts';
 import { attachAssetSafetyNet } from './asset-safety-net.ts';
 import { resolveEffectiveInstanceName } from './auto-instance.ts';
@@ -227,12 +233,14 @@ import {
   runLoginShellProbe,
   runWindowsPathProbe,
 } from './claude-readiness.ts';
+import { withCliCommandNameArg } from './cli-command-name-arg.ts';
 import { requestUserConsent } from './consent-dialog.ts';
 import { copyImageToClipboard } from './copy-image-clipboard.ts';
 import {
   type CrashDetection,
   createCrashDetection,
   isProcessCrashReason,
+  readInstalledAppChangeSync,
   SENTINEL_HEARTBEAT_INTERVAL_MS,
   startLocalCrashReporter,
 } from './crash-detection.ts';
@@ -278,6 +286,7 @@ import {
   showDesktopUninstallResult,
 } from './desktop-uninstall-handoff.ts';
 import { desktopUninstallResultCommand } from './desktop-uninstall-result.ts';
+import { desktopProtocolScheme } from './dev-channel.ts';
 import { promptForExistingFolder, promptForExistingMarkdownFile } from './dialog-helpers.ts';
 import {
   type DriverUtilityLike,
@@ -285,6 +294,7 @@ import {
   runDriverBootSmoke,
 } from './driver-boot-smoke.ts';
 import { EMBED_HOST_PATTERNS, rewriteEmbedRequestHeaders } from './embed-referer.ts';
+import { showErrorDialog, showErrorDialogOnceVisible } from './error-dialog.ts';
 import {
   defaultGitTopLevel,
   discoverProject,
@@ -295,17 +305,18 @@ import {
 import { createBootBudgetDirSizeProbe } from './fs-walk-budget.ts';
 import { ensureGitAvailable } from './git-preflight-handler.ts';
 import { readCanonicalGitHubRemoteUrl } from './git-remote.ts';
-import { failedOpenHolder, promptHolderStop } from './holder-stop-prompt.ts';
+import { describeStopFailure, failedOpenHolder, promptHolderStop } from './holder-stop-prompt.ts';
 import { agentConnectionsAvailability, isSupportedInstallShape } from './install-shape.ts';
 import {
-  combineInstanceLabels,
   formatInstanceAppName,
   resolveInstanceLabel,
+  resolveWindowInstanceLabels,
 } from './instance-identity.ts';
 import { deriveInstanceUserDataDir } from './instance-isolation.ts';
 import {
   type EditorPresenceProbes,
   registerIntegrationsSettings,
+  testPinnedSchemeHandlers,
 } from './integrations-settings.ts';
 import { handleAssetUpload } from './ipc/asset-upload.ts';
 import {
@@ -344,12 +355,17 @@ import { logIpcError, withIpcErrorLogging } from './ipc-log.ts';
 import { createDesktopKeepaliveFactory, toKeepaliveLogger } from './keepalive.ts';
 import { decideAllWindowsClosed, decideRelaunchReveal } from './last-window-policy.ts';
 import { getBootAmbientCapsFacts, logAmbientCapsPosture } from './linux-ambient-caps.ts';
+import { describeLinuxDisplaySession } from './linux-display-session.ts';
 import {
   detectGraphicalAuthCommand,
   runManualInstallFallbackDialog,
 } from './linux-install-fallback.ts';
 import { applyDevShmPosture } from './linux-shm-posture.ts';
-import { resolveLocalOpCliInvocation } from './local-op-cli-invocation.ts';
+import {
+  type HostCliInvocation,
+  mainProcessOkCli,
+  resolveLocalOpCliInvocation,
+} from './local-op-cli-invocation.ts';
 import { createMenuTranslator, resolveMenuCatalogDir } from './main-i18n.ts';
 import { createMainThreadWatchdog } from './main-thread-watchdog.ts';
 import { withMcpServerNameArg } from './mcp-server-name-arg.ts';
@@ -426,8 +442,9 @@ import {
   setPreferredWindowVibrancy,
   type VibrancyMaterial,
 } from './reduced-transparency-handler.ts';
-import { removeGitFolder } from './remove-git-folder.ts';
+import { stopServerThenRemoveGitFolder } from './remove-git-folder.ts';
 import { attachRendererConsoleCapture } from './renderer-console-capture.ts';
+import { installRendererFileProtocol } from './renderer-file-protocol.ts';
 import { createRendererReadySink, type RendererReadySink } from './renderer-ready-sink.ts';
 import { createRendererRecovery, type RendererRecovery } from './renderer-recovery.ts';
 import { resolveDetachedSpawnArgs } from './resolve-detached-spawn-args.ts';
@@ -494,9 +511,11 @@ import {
   setProjectWindowBounds,
   setSpellCheckEnabled as setSpellCheckEnabledState,
   type UpdateChannel,
+  unrecognizedUpdateModeIn,
   windowRestoreKey,
 } from './state-store.ts';
-import { quoteStopCommandPath } from './stop-command.ts';
+import { stopCommandLine } from './stop-command.ts';
+import { createMacMemoryPressureProbe, readSystemMemorySample } from './system-memory-sample.ts';
 import { isTerminalAvailable, withTerminalCapabilityArg } from './terminal-capability.ts';
 import {
   isTerminalConsented,
@@ -504,9 +523,9 @@ import {
   readTerminalShellSetting,
 } from './terminal-consent.ts';
 import {
-  applyAgentPanelVisibilityUpdate,
   commitTerminalDockState,
   resolveRestoredAgentPanelVisible,
+  resolveRestoredEditorVisible,
 } from './terminal-dock-persistence.ts';
 import { observeTerminalLaunch } from './terminal-gate-observation.ts';
 import { type TerminalReaper, wireWindowTerminalReap } from './terminal-lifecycle.ts';
@@ -562,12 +581,24 @@ import { migrateLegacyUserDataDir } from './userdata-migration.ts';
 import { buildUtilityForkEnv } from './utility-fork-env.ts';
 import { computeFirstLaunchAfterUpgrade } from './version-drift.ts';
 import { buildViewMenuStateDeps, EditorViewMenuStateRegistry } from './view-menu-state.ts';
-import { applyThemeToWindow, buildNonDarwinChromeOpts } from './window-chrome.ts';
+import { handleViewMenuStateChange } from './view-menu-state-change.ts';
 import {
+  applyThemeToWindow,
+  buildNonDarwinChromeOpts,
+  DEFAULT_WINDOW_CHROME_KIND,
+  rememberWindowChromeKind,
+  TRAFFIC_LIGHT_POSITION,
+  windowChromeOptsForKind,
+} from './window-chrome.ts';
+import {
+  APP_QUITTING_OPEN_KIND,
   type BrowserWindowLike,
   bringWindowToFront,
   collabUrlFromApiOrigin,
-  setWindowInstanceLabel,
+  heldChildServer,
+  pendingDeepLinkPayload,
+  setWindowInstanceLabels,
+  shareBranchSwitchPayload,
   type UtilityProcessLike,
   WindowManager,
   type WindowManagerDeps,
@@ -637,7 +668,7 @@ const DEFAULT_WIN_OPTS: BrowserWindowConstructorOptions = {
   ...(process.platform === 'darwin'
     ? {
         titleBarStyle: 'hiddenInset',
-        trafficLightPosition: { x: 22, y: 24 },
+        trafficLightPosition: TRAFFIC_LIGHT_POSITION,
         vibrancy: VIBRANCY_DEFAULT,
         visualEffectState: 'followWindow',
         transparent: true,
@@ -925,6 +956,13 @@ function loadAppState(): AppState {
     quarantineCorruptState(statePath, 'schema-invalid');
     return emptyState();
   }
+  const unrecognizedUpdateMode = unrecognizedUpdateModeIn(raw);
+  if (unrecognizedUpdateMode !== null) {
+    getRootDesktopLogger().warn(
+      { persisted: unrecognizedUpdateMode },
+      'persisted update mode unrecognized, automatic updates stay on',
+    );
+  }
   return parsed;
 }
 
@@ -1024,6 +1062,7 @@ function sweepConsoleHostsBeforeUpdate(): WindowsUpdateSurvivorSweepResult {
 const slidesDeckRegistry = createSlidesDeckRegistry();
 const dockVisibleForWindow = new Map<number, boolean>();
 const agentPanelVisibleForWindow = new Map<number, boolean>();
+const editorVisibleForWindow = new Map<number, boolean>();
 type DockOrderRecord = { order: string[]; activeKey: string | null };
 const dockOrderForWindow = new Map<
   number,
@@ -1042,6 +1081,7 @@ function persistTerminalDockForWindow(
     terminalVisible: boolean;
     terminalSnapshot: OkTerminalRestartSnapshot;
     agentPanelVisible: boolean;
+    editorVisible: boolean;
   }>,
 ): OkTerminalDockStateWriteResult {
   const stateKey = terminalStateKey(win);
@@ -1239,14 +1279,31 @@ function isDebugKeyringSmokeAllowed(): boolean {
   return !app.isPackaged || process.env.OK_DEBUG_KEYRING_SMOKE === '1';
 }
 
-function resolveLocalOpCli(): LocalOpCliInvocation {
-  return resolveLocalOpCliInvocation({
+let warnedUnbuiltWorkspaceCli = false;
+
+function resolveLocalOpCli(): HostCliInvocation | undefined {
+  const workspaceCliEntry = join(app.getAppPath(), '..', 'cli', 'dist', 'cli.mjs');
+  const invocation = resolveLocalOpCliInvocation({
     platform: process.platform,
     isPackaged: app.isPackaged,
     execPath: app.getPath('exe'),
     resourcesPath: process.resourcesPath,
     parentEnv: process.env,
+    workspaceCliEntry,
+    workspaceCliBuilt: !app.isPackaged && existsSync(workspaceCliEntry),
   });
+  if (invocation === undefined && !warnedUnbuiltWorkspaceCli) {
+    warnedUnbuiltWorkspaceCli = true;
+    getLogger('lifecycle').warn(
+      { workspaceCliEntry },
+      'The workspace CLI is not built, so this dev build runs the open-knowledge on PATH as Stable and refuses sign-in, sign-out, token storage and clone. Run pnpm build in the checkout, then restart this dev build.',
+    );
+  }
+  return invocation;
+}
+
+function resolveMainProcessLocalOpCli(): OkCliCommand {
+  return mainProcessOkCli(resolveLocalOpCli(), process.env);
 }
 
 function runDriverBootSmokeInProduction(): void {
@@ -1268,7 +1325,7 @@ function runDriverBootSmokeInProduction(): void {
 }
 
 function withWindowRuntimeArgs(args: readonly string[]): string[] {
-  const withServerName = withMcpServerNameArg(args);
+  const withServerName = withCliCommandNameArg(withMcpServerNameArg(args));
   const withDebug = isDebugKeyringSmokeAllowed()
     ? [...withServerName, '--ok-debug-keyring-smoke=1']
     : withServerName;
@@ -1310,11 +1367,13 @@ function readPositiveIntEnv(envVar: string): number | undefined {
   return parsed;
 }
 
+function rendererRoot(): string {
+  return app.isPackaged ? join(process.resourcesPath, 'app') : join(__dirname, '../renderer');
+}
+
 function ensureWindowManager() {
   if (wm) return;
-  const rendererEntryPath = app.isPackaged
-    ? join(process.resourcesPath, 'app', 'index.html')
-    : join(__dirname, '../renderer/index.html');
+  const rendererEntryPath = join(rendererRoot(), 'index.html');
   const utilityEntryPath = join(__dirname, 'utility/server-entry.js');
 
   const bundleCliMjsPath = app.isPackaged
@@ -1355,14 +1414,15 @@ function ensureWindowManager() {
         );
       }
     }
-    const spawnErrorLogPath = join(lockDir, SPAWN_ERROR_LOG);
+    const spawnErrorLogPath = projectSpawnErrorLogPath(projectRoot);
     let spawnErrorLogFd: number;
     try {
+      await prepareSpawnProjectLogsDir(projectRoot);
       spawnErrorLogFd = openSpawnErrorLog(spawnErrorLogPath, process.pid);
     } catch (err) {
       throw Object.assign(
         new Error(
-          `spawnCliServer: failed to open spawn-error log fd at ${spawnErrorLogPath}: ${
+          `spawnCliServer: server start failed while preparing diagnostics at ${spawnErrorLogPath}: ${
             err instanceof Error ? err.message : String(err)
           }`,
         ),
@@ -1455,13 +1515,21 @@ function ensureWindowManager() {
         'spawnCliServer: child_process.spawn did not return a pid after spawn-event resolution.',
       );
     }
-    return { pid, readExit: () => exitRecord };
+    childRef.on('error', (err) => {
+      getLogger('server-spawn').warn(
+        { event: 'desktop-spawned-server-signal-failed', err, pid },
+        'signalling a spawned server failed',
+      );
+    });
+    return heldChildServer(childRef, pid, () => exitRecord);
   };
 
   wm = new WindowManager({
     createWindow: (opts) => {
+      const chromeKind = opts.chrome ?? DEFAULT_WINDOW_CHROME_KIND;
       const win = new BrowserWindow({
         ...DEFAULT_WIN_OPTS,
+        ...windowChromeOptsForKind(chromeKind, process.platform, nativeTheme.shouldUseDarkColors),
         minWidth: WINDOW_MIN_SIZE.EDITOR.width,
         minHeight: WINDOW_MIN_SIZE.EDITOR.height,
         title: opts.title,
@@ -1471,6 +1539,7 @@ function ensureWindowManager() {
           preload: join(__dirname, '../preload/index.js'),
         },
       });
+      rememberWindowChromeKind(win, chromeKind);
       win.on('page-title-updated', (e) => {
         e.preventDefault();
       });
@@ -1504,6 +1573,7 @@ function ensureWindowManager() {
         wireWindowTerminalReap(win, terminalReaper, (windowId) => {
           dockVisibleForWindow.delete(windowId);
           agentPanelVisibleForWindow.delete(windowId);
+          editorVisibleForWindow.delete(windowId);
           dockOrderForWindow.delete(windowId);
           terminalSnapshotForWindow.delete(windowId);
         });
@@ -1546,6 +1616,7 @@ function ensureWindowManager() {
     readServerLock: (lockDir) => readServerLock(lockDir),
     removeServerLock: (lockDir, expected) => breakServerLockHeldBy(lockDir, expected),
     isProcessAlive: (pid) => isProcessAlive(pid),
+    readProcessStart: (pid) => readProcessStart(pid),
     hostname: () => osHostname(),
     probeWsUpgrade: (url, timeoutMs) => probeWsUpgrade(url, timeoutMs),
     realpathSync: (p) => realpathSync(p),
@@ -1637,9 +1708,7 @@ function openNavigator(pendingPayload?: ShareNavigatorPayload) {
       attachSpellcheckMenuToWindow(win);
       return win as unknown as BrowserWindowLike;
     },
-    rendererEntryPath: app.isPackaged
-      ? join(process.resourcesPath, 'app', 'index.html')
-      : join(__dirname, '../renderer/index.html'),
+    rendererEntryPath: join(rendererRoot(), 'index.html'),
     rendererDevUrl,
     appVersion: app.getVersion(),
     productName: DESKTOP_VARIANT.productName,
@@ -1776,11 +1845,10 @@ async function openProject(
   );
 
   if (discovery.kind === 'rejected') {
-    dialog.showErrorBox(
+    showErrorOverNavigator(
       'Cannot open this folder',
       `${projectPath}\n\nReason: ${REJECTION_REASON_COPY[discovery.reason]}`,
     );
-    openNavigator();
     return false;
   }
 
@@ -1843,7 +1911,7 @@ async function openProject(
       { projectName, resolvedPickedName },
       'project admission confirmation requested',
     );
-    const { response } = await dialog.showMessageBox({
+    const { response } = await showMessageBoxAttached({
       type: 'question',
       buttons: ['Cancel', `Open ${projectName}`],
       cancelId: 0,
@@ -1885,7 +1953,7 @@ async function openProject(
       openNavigator();
       navigator = navigatorWindow;
       if (!navigator) {
-        dialog.showErrorBox(
+        showErrorOnFocusedWindow(
           'Cannot open this folder',
           `${projectPath}\n\nFailed to open the Project Navigator.`,
         );
@@ -2142,6 +2210,31 @@ async function openProjectOrFallbackToNavigator(
   } catch (err) {
     const errorMessage = (err as Error).message;
     const kind = (err as Error & { kind?: string }).kind;
+    if (kind === APP_QUITTING_OPEN_KIND) {
+      const cause = (err as Error).cause;
+      const underlying:
+        | (Error & {
+            kind?: string;
+            holderPid?: number;
+            exitCode?: number | null;
+            exitSignal?: string | null;
+          })
+        | undefined = cause instanceof Error ? cause : undefined;
+      getLogger('project').info(
+        {
+          event: 'desktop-open-project-cancelled-by-quit',
+          projectPath,
+          entryPoint,
+          causeKind: underlying?.kind,
+          holderPid: underlying?.holderPid,
+          exitCode: underlying?.exitCode,
+          exitSignal: underlying?.exitSignal,
+          err,
+        },
+        '[main] project open cancelled because the app is quitting',
+      );
+      return false;
+    }
     const otherChannelHolder = failedOpenHolder(err, projectPath, wm as WindowManager | undefined);
     const holderPid =
       otherChannelHolder?.holderPid ?? (err as Error & { holderPid?: number }).holderPid;
@@ -2208,7 +2301,7 @@ async function openProjectOrFallbackToNavigator(
         holderIsOwnChild,
       },
       {
-        showMessageBox: (options) => dialog.showMessageBox(options),
+        showMessageBox: (options) => showMessageBoxAttached(options),
         forceStop: (expectedHolder) => {
           ensureWindowManager();
           return wm.forceStopConflictingServer(projectPath, expectedHolder);
@@ -2236,11 +2329,10 @@ async function openProjectOrFallbackToNavigator(
               '[main] openProject retry after stopping the conflicting server failed',
             );
             flushDesktopLogger();
-            dialog.showErrorBox(
+            showErrorOverNavigator(
               'Unable to open project',
               `${projectPath}\n\n${(retryErr as Error).message}`,
             );
-            openNavigator();
             return false;
           }
         },
@@ -2261,12 +2353,9 @@ async function openProjectOrFallbackToNavigator(
     if (prompt.kind !== 'not-offered') {
       if (prompt.kind === 'stop-failed') {
         flushDesktopLogger();
-        dialog.showErrorBox(
+        showErrorOverNavigator(
           'Unable to open project',
-          `${projectPath}\n\n` +
-            (prompt.reason === 'eperm'
-              ? 'The conflicting server belongs to another user account and cannot be stopped from here. Quit it from that account and try again.'
-              : `Could not stop the conflicting server. Quit it manually (\`ok stop --force ${quoteStopCommandPath(projectPath, process.platform)}\`) and try again.`),
+          `${projectPath}\n\n${describeStopFailure(prompt, projectPath, process.platform)}`,
         );
       } else {
         getLogger('project').info(
@@ -2279,9 +2368,9 @@ async function openProjectOrFallbackToNavigator(
           'user declined the stop-and-retry remedy',
         );
         if (isStaleLockHolder && otherChannelHolder === null) {
-          const stopCommandTarget = quoteStopCommandPath(projectPath, process.platform);
+          const stopCommand = stopCommandLine(projectPath, process.platform);
           flushDesktopLogger();
-          dialog.showErrorBox(
+          showErrorOverNavigator(
             dialogTitle,
             `${dialogBody}\n\n` +
               (holderIsOwnChild
@@ -2291,9 +2380,9 @@ async function openProjectOrFallbackToNavigator(
                   `Help > Report a bug.`
                 : warnsHolderMayBeLive
                   ? `Nothing was stopped. If you need that process, leave it running and open a ` +
-                    `different project; if you do not, run \`ok stop ${stopCommandTarget}\` and ` +
+                    `different project; if you do not, run \`${stopCommand}\` and ` +
                     `open the project again, or reopen and choose Stop Server & Retry.`
-                  : `Nothing was stopped. Run \`ok stop ${stopCommandTarget}\` and open the ` +
+                  : `Nothing was stopped. Run \`${stopCommand}\` and open the ` +
                     `project again, or reopen and choose Stop Server & Retry to have ` +
                     `OpenKnowledge do it.`),
           );
@@ -2302,8 +2391,7 @@ async function openProjectOrFallbackToNavigator(
       openNavigator();
       return false;
     }
-    dialog.showErrorBox(dialogTitle, dialogBody);
-    openNavigator();
+    showErrorOverNavigator(dialogTitle, dialogBody);
     return false;
   }
 }
@@ -2317,13 +2405,10 @@ async function openEphemeralFile(filePath: string): Promise<void> {
     plan = prepareSingleFileOpen(filePath);
   } catch (err) {
     getLogger('project').warn({ file: filePath, err }, 'single-file open could not be prepared');
-    dialog.showErrorBox(
+    showErrorOnFocusedWindowOrNavigator(
       'Cannot open this file',
       `${filePath}\n\n${err instanceof Error ? err.message : String(err)}`,
     );
-    if (BrowserWindow.getAllWindows().length === 0) {
-      openNavigator();
-    }
     return;
   }
 
@@ -2362,13 +2447,10 @@ async function openEphemeralFile(filePath: string): Promise<void> {
       { file: plan.canonicalFilePath, err },
       'ephemeral single-file open failed',
     );
-    dialog.showErrorBox(
+    showErrorOnFocusedWindowOrNavigator(
       'Could not open file',
       `${filePath}\n\n${err instanceof Error ? err.message : String(err)}`,
     );
-    if (BrowserWindow.getAllWindows().length === 0) {
-      openNavigator();
-    }
   }
 }
 
@@ -2433,7 +2515,7 @@ async function runMenuDispatchCommand(
       openNavigator();
       return;
     case 'open-folder-dialog': {
-      const picked = await promptForExistingFolder(dialog);
+      const picked = await promptForExistingFolder(dialog, { errorParent: dialogParentWindow });
       if (picked) await openProjectOrFallbackToNavigator(picked, 'pick-existing');
       return;
     }
@@ -2481,6 +2563,7 @@ async function runApplicationMenuRefresh(): Promise<void> {
     showDevToolsMenu: !app.isPackaged || DESKTOP_VARIANT.name !== 'stable',
     terminalCapable: isTerminalAvailable(),
     dialog,
+    errorDialogParent: dialogParentWindow,
     openNavigator,
     openProject: async (path, entryPoint) => {
       await openProjectOrFallbackToNavigator(path, entryPoint);
@@ -2534,6 +2617,10 @@ async function runApplicationMenuRefresh(): Promise<void> {
     onNavigateBack: () => sendMenuAction('navigate-back'),
     onNavigateForward: () => sendMenuAction('navigate-forward'),
     noteWindow: focusedWindow !== null && getNoteWindowContext(focusedWindow.id) !== undefined,
+    singleFileWindow:
+      focusedWindow !== null &&
+      wm?.getContextForBrowserWindow(focusedWindow as unknown as BrowserWindowLike)?.ephemeral !==
+        undefined,
     activeTarget: currentActiveTarget(),
     onOpenInNewWindow: () => {
       const focused = BrowserWindow.getFocusedWindow();
@@ -2584,8 +2671,49 @@ function desktopSelfUninstallAvailable(): boolean {
   return appBundlePath !== null && isSupportedApplicationsBundle(appBundlePath, osHomedir());
 }
 
+function dialogParentWindow(): BrowserWindow | null {
+  return (
+    BrowserWindow.getFocusedWindow() ??
+    BrowserWindow.getAllWindows().find((w) => !w.isDestroyed()) ??
+    null
+  );
+}
+
+function showErrorOnFocusedWindow(title: string, body: string): void {
+  void showErrorDialog(dialog, dialogParentWindow(), title, body);
+}
+
+function showErrorOverNavigator(title: string, body: string): void {
+  try {
+    openNavigator();
+  } catch (err) {
+    getLogger('navigator').error({ err, title }, 'navigator failed to open to report an error');
+    showErrorOnFocusedWindow(title, body);
+    return;
+  }
+  void showErrorDialogOnceVisible(
+    dialog,
+    navigatorWindow as unknown as BrowserWindow | null,
+    title,
+    body,
+    {
+      setTimeout: (cb, ms) => setTimeout(cb, ms),
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      timeoutMs: RESTORE_REVEAL_TIMEOUT_MS,
+    },
+  );
+}
+
+function showErrorOnFocusedWindowOrNavigator(title: string, body: string): void {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    showErrorOverNavigator(title, body);
+  } else {
+    showErrorOnFocusedWindow(title, body);
+  }
+}
+
 async function showMessageBoxAttached(options: MessageBoxOptions) {
-  const target = BrowserWindow.getFocusedWindow();
+  const target = dialogParentWindow();
   return target ? dialog.showMessageBox(target, options) : dialog.showMessageBox(options);
 }
 
@@ -3185,9 +3313,7 @@ function openTerminalWindow(): void {
     terminal: focused ? getTerminalWindowContext(focused.id) : undefined,
     note: focused ? getNoteWindowContext(focused.id) : undefined,
   });
-  const rendererEntryPath = app.isPackaged
-    ? join(process.resourcesPath, 'app', 'index.html')
-    : join(__dirname, '../renderer/index.html');
+  const rendererEntryPath = join(rendererRoot(), 'index.html');
   createTerminalWindow({
     createWindow: (opts) => {
       const win = new BrowserWindow({
@@ -3313,9 +3439,7 @@ function openNoteWindowForDoc(args: {
     });
   if (!project) return { ok: false, reason: 'no-project' };
 
-  const rendererEntryPath = app.isPackaged
-    ? join(process.resourcesPath, 'app', 'index.html')
-    : join(__dirname, '../renderer/index.html');
+  const rendererEntryPath = join(rendererRoot(), 'index.html');
   const nativeChrome = noteWindowNativeChromeOptions(process.platform);
 
   const result = openNoteWindow({
@@ -3651,7 +3775,7 @@ function reconfigureMcpWiringNow(target: McpWiringDispatchTarget | undefined): b
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[main] reconfigureMcpWiring failed', { err: message });
-    dialog.showErrorBox(
+    showErrorOnFocusedWindow(
       'Set up OpenKnowledge integrations failed',
       `OpenKnowledge couldn't re-arm the MCP consent dialog:\n\n${message}`,
     );
@@ -3840,9 +3964,11 @@ function registerIpcHandlers() {
       observePtyFork(phaseTrace, windowId, phaseTrace ? ++nextTraceFork : 0, () =>
         utilityProcess.fork(join(__dirname, 'utility/pty-host.js'), [], {
           serviceName: `OpenKnowledge Terminal Host ${windowId}`,
+          ...(phaseTrace ? { stdio: ['ignore', 'inherit', 'pipe'] } : {}),
         }),
       ) as unknown as PtyUtilityLike,
     sendData: (wc, payload) => sendToRenderer(wc, 'ok:pty:data', payload),
+    phaseTrace,
     sendExit: (wc, payload) => sendToRenderer(wc, 'ok:pty:exit', payload),
     sendNotice: (wc, payload) => sendToRenderer(wc, 'ok:pty:notice', payload),
     newPtyId: () => randomUUID(),
@@ -4062,6 +4188,7 @@ function registerIpcHandlers() {
       return {
         terminalVisible: false,
         agentPanelVisible: false,
+        editorVisible: true,
       };
     const stateKey = terminalStateKey(win);
     const persisted = stateKey === null ? null : getTerminalDockState(appState, stateKey);
@@ -4070,6 +4197,10 @@ function registerIpcHandlers() {
       terminalVisible: dockVisibleForWindow.get(win.id) ?? persisted?.terminalVisible ?? false,
       agentPanelVisible: resolveRestoredAgentPanelVisible({
         inMemory: agentPanelVisibleForWindow.get(win.id),
+        persisted,
+      }),
+      editorVisible: resolveRestoredEditorVisible({
+        inMemory: editorVisibleForWindow.get(win.id),
         persisted,
       }),
       terminal: orders?.terminal,
@@ -4125,11 +4256,13 @@ function registerIpcHandlers() {
   });
 
   handle('ok:dialog:open-folder', async (_event, opts) => {
-    return promptForExistingFolder(dialog, opts);
+    return promptForExistingFolder(dialog, { ...opts, errorParent: dialogParentWindow });
   });
 
   handle('ok:project:open-file-picker', async () => {
-    const picked = await promptForExistingMarkdownFile(dialog);
+    const picked = await promptForExistingMarkdownFile(dialog, {
+      errorParent: dialogParentWindow,
+    });
     if (picked) await openEphemeralFile(picked);
     return undefined;
   });
@@ -4290,14 +4423,23 @@ function registerIpcHandlers() {
             );
           },
           openInDefault: async () => {
-            await openAssetSafely(
+            const outcome = await openAssetOrReveal(
               {
                 projectPath,
                 platform: process.platform,
                 openPath: (canonical) => shell.openPath(canonical),
+                showItemInFolder: (canonical) => shell.showItemInFolder(canonical),
               },
               params.relPath,
             );
+            if (!outcome.ok) {
+              logIpcError({
+                event: 'ipc.error',
+                channel: 'ok:shell:show-asset-menu',
+                reason: outcome.reason,
+                handler: 'openInDefault',
+              });
+            }
           },
           copyLink: () => clipboard.writeText(params.relPath),
         },
@@ -4418,39 +4560,33 @@ function registerIpcHandlers() {
 
   handle('ok:editor:view-menu-state-changed', async (event, state) => {
     const win = BrowserWindow.fromWebContents(event.sender);
-    if (win) editorViewMenuStates.update(win.id, state);
-    if (state.terminalVisible !== undefined || state.agentPanelVisible !== undefined) {
-      if (win) {
-        if (state.terminalVisible !== undefined) {
-          dockVisibleForWindow.set(win.id, state.terminalVisible);
-          const result = persistTerminalDockForWindow(win, {
-            terminalVisible: state.terminalVisible,
-          });
-          if (!result.ok) {
-            getLogger('terminal').warn(
-              { reason: result.reason },
-              'terminal visibility persistence failed',
-            );
-          }
-        }
-        if (state.agentPanelVisible !== undefined) {
-          applyAgentPanelVisibilityUpdate(
-            {
-              rememberForWindow: (visible) => agentPanelVisibleForWindow.set(win.id, visible),
-              persist: (visible) =>
-                persistTerminalDockForWindow(win, { agentPanelVisible: visible }),
-              warnPersistFailed: (reason) =>
-                getLogger('terminal').warn(
-                  { reason },
-                  'agents panel visibility persistence failed',
-                ),
-            },
-            state.agentPanelVisible,
-          );
-        }
-      }
-    }
-    refreshApplicationMenu();
+    handleViewMenuStateChange(
+      {
+        windowId: win?.id ?? null,
+        state,
+      },
+      {
+        updateMenuState: (windowId, partial) => editorViewMenuStates.update(windowId, partial),
+        rememberEditorVisible: (windowId, visible) => editorVisibleForWindow.set(windowId, visible),
+        rememberTerminalVisible: (windowId, visible) => dockVisibleForWindow.set(windowId, visible),
+        rememberAgentPanelVisible: (windowId, visible) =>
+          agentPanelVisibleForWindow.set(windowId, visible),
+        persist: (update) =>
+          win === null
+            ? { ok: false, reason: 'no-window-context' }
+            : persistTerminalDockForWindow(win, update),
+        warnPersistFailed: (kind, reason) => {
+          const message =
+            kind === 'editor'
+              ? 'editor visibility persistence failed'
+              : kind === 'terminal'
+                ? 'terminal visibility persistence failed'
+                : 'agents panel visibility persistence failed';
+          getLogger('terminal').warn({ reason }, message);
+        },
+        refreshApplicationMenu,
+      },
+    );
     return undefined;
   });
 
@@ -4954,19 +5090,13 @@ function registerIpcHandlers() {
         | (BrowserWindowLike & { webContents: BrowserWindowLike['webContents'] })
         | null;
       if (existing) {
-        sendToRenderer(existing.webContents, 'ok:deep-link', {
-          doc: request.pendingDeepLinkTarget.path,
-          kind: request.pendingDeepLinkTarget.kind,
-          branch: request.pendingBranch ?? null,
-          multiCandidate: request.pendingMultiCandidate === true,
-          ...(request.pendingDeepLinkTarget.repositoryPath === undefined
-            ? {}
-            : { repositoryPath: request.pendingDeepLinkTarget.repositoryPath }),
-          ...(request.pendingDeepLinkTarget.contentRootDepth === undefined
-            ? {}
-            : { contentRootDepth: request.pendingDeepLinkTarget.contentRootDepth }),
-          ...(targetMissing ? { targetMissing: true } : {}),
+        const deepLink = pendingDeepLinkPayload({
+          pendingDeepLinkTarget: request.pendingDeepLinkTarget,
+          pendingBranch: request.pendingBranch,
+          pendingMultiCandidate: request.pendingMultiCandidate,
+          pendingTargetMissing: targetMissing,
         });
+        if (deepLink) sendToRenderer(existing.webContents, 'ok:deep-link', deepLink);
         return undefined;
       }
     }
@@ -4975,12 +5105,11 @@ function registerIpcHandlers() {
         | (BrowserWindowLike & { webContents: BrowserWindowLike['webContents'] })
         | null;
       if (existing) {
-        sendToRenderer(existing.webContents, 'ok:share:received', {
-          kind: 'project-branch-switch' as const,
-          share: request.pendingShareBranchSwitch.share,
-          projectPath: request.pendingShareBranchSwitch.projectPath,
-          currentBranch: request.pendingShareBranchSwitch.currentBranch,
-        });
+        sendToRenderer(
+          existing.webContents,
+          'ok:share:received',
+          shareBranchSwitchPayload(request.pendingShareBranchSwitch),
+        );
         return undefined;
       }
     }
@@ -5288,25 +5417,12 @@ function registerIpcHandlers() {
   });
 
   handle('ok:fs:remove-git-folder', async (_event, gitRoot) => {
-    if (typeof gitRoot === 'string' && recentGitRoots.has(gitRoot)) {
-      try {
-        const outcome = await runStop({
-          lockDir: resolveLockDir(gitRoot),
-          force: true,
-          log: (msg) => getLogger('project').info({ gitRoot }, `[remove-git-folder] ${msg}`),
-        });
-        getLogger('project').info(
-          { gitRoot, stopped: outcome.stopped.length, hadTargets: outcome.hadTargets },
-          'remove-git-folder: stopped worktree server before .git removal',
-        );
-      } catch (err) {
-        getLogger('project').warn(
-          { gitRoot, err },
-          'remove-git-folder: worktree server stop failed',
-        );
-      }
-    }
-    await removeGitFolder(gitRoot, { allowedGitRoots: recentGitRoots });
+    await stopServerThenRemoveGitFolder(gitRoot, {
+      allowedGitRoots: recentGitRoots,
+      lockDirFor: resolveLockDir,
+      runStop,
+      log: getLogger('project'),
+    });
     return undefined;
   });
 
@@ -5494,7 +5610,7 @@ function registerIpcHandlers() {
   });
 
   const localOpDeps: LocalOpDeps = {
-    resolveCliInvocation: resolveLocalOpCli,
+    resolveOkCli: resolveMainProcessLocalOpCli,
     logFailure: logIpcError,
     state: createLocalOpState(),
   };
@@ -5558,18 +5674,21 @@ function probeEditorPresence(): Promise<EditorPresenceProbes> {
 }
 
 async function probeEditorPresenceUncached(): Promise<EditorPresenceProbes> {
+  const pinnedSchemes = testPinnedSchemeHandlers(process.env);
   const [cliOnPath, ...schemes] = await Promise.all([
     resolveTerminalCliInstalledMap().catch(() => ({}) as Record<TerminalCli, boolean>),
     ...(['claude', 'codex', 'cursor', 'lmstudio'] as const).map((scheme) =>
-      detectProtocolImpl(
-        {
-          platform: process.platform,
-          getApplicationInfoForProtocol: (url) => app.getApplicationInfoForProtocol(url),
-        },
-        scheme,
-      )
-        .then((r) => r.installed)
-        .catch(() => false),
+      pinnedSchemes !== null
+        ? Promise.resolve(pinnedSchemes.has(scheme))
+        : detectProtocolImpl(
+            {
+              platform: process.platform,
+              getApplicationInfoForProtocol: (url) => app.getApplicationInfoForProtocol(url),
+            },
+            scheme,
+          )
+            .then((r) => r.installed)
+            .catch(() => false),
     ),
   ]);
   return {
@@ -5966,6 +6085,7 @@ installStdioBrokenPipeGuard(process, {
 
 app.commandLine.appendSwitch('use-system-ca');
 trustSystemCertificates();
+registerWindowsProcessStartReader(getLogger('process-start'));
 
 applyDevShmPosture({
   platform: process.platform,
@@ -5975,6 +6095,15 @@ applyDevShmPosture({
   log: (level, facts) =>
     getRootDesktopLogger()[level](facts, 'linux shared-memory posture for chromium'),
 });
+
+const linuxDisplaySession = describeLinuxDisplaySession({
+  platform: process.platform,
+  env: process.env,
+  getSwitchValue: (name) => app.commandLine.getSwitchValue(name),
+});
+if (linuxDisplaySession) {
+  getRootDesktopLogger().info(linuxDisplaySession, 'linux display session');
+}
 
 const bootAmbientCapsFacts = getBootAmbientCapsFacts();
 if (bootAmbientCapsFacts) {
@@ -6006,13 +6135,14 @@ if (!app.isPackaged) {
 }
 
 const parallelInstanceLabel = resolveInstanceLabel(app.getPath('userData'));
-const instanceLabel = combineInstanceLabels(DESKTOP_VARIANT.instanceLabel, parallelInstanceLabel);
+const windowInstanceLabels = resolveWindowInstanceLabels(
+  DESKTOP_VARIANT.instanceLabel,
+  parallelInstanceLabel,
+);
 if (parallelInstanceLabel) {
   app.setName(formatInstanceAppName(app.getName(), parallelInstanceLabel));
 }
-if (instanceLabel) {
-  setWindowInstanceLabel(instanceLabel);
-}
+setWindowInstanceLabels(windowInstanceLabels);
 
 const A11Y_FORCED_BY_ENV = process.env.OK_FORCE_A11Y === '1';
 if (A11Y_FORCED_BY_ENV) {
@@ -6091,10 +6221,21 @@ function bootPrimaryInstance(): void {
   );
 
   startLocalCrashReporter(crashReporter);
+  const macMemoryPressure =
+    process.platform === 'darwin' ? createMacMemoryPressureProbe({ now: () => new Date() }) : null;
+  macMemoryPressure?.refresh();
   desktopProcessObservability = createDesktopProcessObservability({
     now: () => new Date(),
     getAppMetrics: () => app.getAppMetrics(),
     getAllWindows: () => BrowserWindow.getAllWindows(),
+    readSystemMemory: () => {
+      const sample = readSystemMemorySample(
+        process.getSystemMemoryInfo(),
+        macMemoryPressure?.latest() ?? null,
+      );
+      macMemoryPressure?.refresh();
+      return sample;
+    },
     logger: getLogger('desktop-process-observability'),
     setInterval: (callback, ms) => setInterval(callback, ms).unref(),
     clearInterval: (handle) => clearInterval(handle),
@@ -6106,6 +6247,7 @@ function bootPrimaryInstance(): void {
     crashDumpsDir: app.getPath('crashDumps'),
     appBundleRoot: appBundleRootFromExecutable(app.getPath('exe')),
     appVersion: app.getVersion(),
+    processId: process.pid,
     emit: (event) => {
       const focused = BrowserWindow.getFocusedWindow();
       const candidates = focused
@@ -6121,12 +6263,19 @@ function bootPrimaryInstance(): void {
     },
     now: () => new Date(),
     currentBootSessionUuid: readBootSessionUuid,
+    currentBootStartedAtMs: () => readBootStartedAtMs(),
     installInFlight: (span) =>
       installWasInFlightDuring(
         bootStateSnapshot,
         span,
         bootStateSnapshot.versionPendingInstallStagedAt,
       ),
+    ...(process.platform === 'darwin'
+      ? { processTermination: (query) => findJetsamKillSync(query) }
+      : {}),
+    ...(process.platform === 'win32'
+      ? { installedAppChange: () => readInstalledAppChangeSync(app.getPath('exe')) }
+      : {}),
     mainThreadWatchdog: createMainThreadWatchdog({
       path: join(app.getPath('userData'), 'bug-report-main-thread-liveness.json'),
       stallPath: join(app.getPath('userData'), 'bug-report-main-thread-stall.json'),
@@ -6282,7 +6431,7 @@ function bootPrimaryInstance(): void {
   });
 
   const protocolControl = registerProtocolHandler({
-    protocolScheme: DESKTOP_VARIANT.protocolScheme,
+    protocolScheme: desktopProtocolScheme(app.isPackaged, DESKTOP_VARIANT.protocolScheme),
     app: {
       on: (event, cb) => {
         app.on(event as Parameters<typeof app.on>[0], cb as Parameters<typeof app.on>[1]);
@@ -6335,7 +6484,7 @@ function bootPrimaryInstance(): void {
       let authenticated = false;
       try {
         const status = await runAuthStatusSubprocess({
-          ...resolveLocalOpCli(),
+          cli: resolveMainProcessLocalOpCli(),
           host,
         });
         authenticated = status.authenticated;
@@ -6423,6 +6572,7 @@ function bootPrimaryInstance(): void {
     .whenReady()
     .then(async () => {
       startupWaterfall.mark('appReady');
+      installRendererFileProtocol(session.defaultSession.protocol, rendererRoot());
       startupWaterfall.otelEnabled = beginRoot();
       desktopProcessObservability?.start();
       logBootAccessibilityPosture();
@@ -6453,17 +6603,19 @@ function bootPrimaryInstance(): void {
         evaluateSchemaCompatibility,
         installLocalhostCorsInjector,
         installEmbedRefererRewriter,
+        publishAppState: (state) => {
+          appState = state;
+        },
         registerIpcHandlers,
         setNativeThemeSource: (source) => {
           nativeTheme.themeSource = source;
         },
         refreshApplicationMenu,
-        installDockIcon: () => installDockIcon(instanceLabel),
+        installDockIcon: () => installDockIcon(windowInstanceLabels.title),
         log: { warn: (msg, obj) => console.warn(msg, obj) },
         appVersion: app.getVersion(),
         maxSupportedSchemaVersion: MAX_SUPPORTED_SCHEMA_VERSION,
       });
-      appState = result.appState;
 
       if (process.platform !== 'darwin') {
         nativeTheme.on('updated', fanOutChromeColors);
@@ -6556,7 +6708,13 @@ function bootPrimaryInstance(): void {
           showMessageBox: async (opts) =>
             dialog.showMessageBox({ ...opts, buttons: [...opts.buttons] }),
           openExternal: (url) => shell.openExternal(url),
-          log: { warn: (msg, obj) => console.warn(msg, obj) },
+          log: {
+            warn: (msg, obj) => {
+              getLogger('git-preflight').warn({ ...obj }, msg);
+              flushDesktopLogger();
+            },
+            info: (msg, obj) => getLogger('git-preflight').info({ ...obj }, msg),
+          },
         });
         if (gitOutcome === 'aborted') {
           app.quit();
@@ -6856,6 +7014,24 @@ function bootPrimaryInstance(): void {
               }
             }
           } else if (result.kind === 'available') {
+            if (result.download === 'manual') {
+              const releasesUrl = releasesPageUrl(DESKTOP_VARIANT);
+              return dialog
+                .showMessageBox(target, {
+                  type: 'info',
+                  buttons: ['Download Manually', 'OK'],
+                  defaultId: 0,
+                  cancelId: 1,
+                  title: 'Update Available',
+                  message: `OpenKnowledge ${result.latestVersion} is available.`,
+                  detail:
+                    'Automatic updates are turned off, so OpenKnowledge will not download it. Download it from the releases page, or turn on "Download and install updates automatically" in Settings > About & updates.',
+                })
+                .then(async ({ response }) => {
+                  if (response === 0) await shell.openExternal(releasesUrl);
+                  return 'dismiss' as const;
+                });
+            }
             void dialog.showMessageBox(target, {
               type: 'info',
               buttons: ['OK'],
@@ -6923,6 +7099,11 @@ function bootPrimaryInstance(): void {
     .catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       const stack = err instanceof Error ? (err.stack ?? '') : '';
+      getLogger('startup').error(
+        { event: 'whenReady-unhandled-rejection', err },
+        'startup chain rejected; its remaining steps did not run',
+      );
+      flushDesktopLogger();
       console.error(JSON.stringify({ event: 'whenReady-unhandled-rejection', message, stack }));
     });
 
@@ -6955,15 +7136,14 @@ function bootPrimaryInstance(): void {
 
   const runTerminalQuitDrain = createTerminalQuitDrain({
     defer: (callback) => setImmediate(callback),
-    drain: async () => {
-      const [terminalResult] = await Promise.allSettled([
-        terminalReaper?.killAll('quit') ?? Promise.resolve(),
-        slidesDeckRegistry.reapAll(),
-      ]);
-      if (terminalResult.status === 'rejected') {
-        getLogger('lifecycle').warn({ err: terminalResult.reason }, 'terminal quit drain failed');
-      }
-    },
+    drain: () =>
+      drainAppOwnedWork({
+        stopTerminals: () => terminalReaper?.killAll('quit') ?? Promise.resolve(),
+        reapSlideDecks: () => slidesDeckRegistry.reapAll(),
+        drainProjectServers: () => wm?.drainOwnedUtilities() ?? Promise.resolve(),
+        onTerminalStopFailed: (err) =>
+          getLogger('lifecycle').warn({ err }, 'terminal quit drain failed'),
+      }),
     resumeQuit: () => app.quit(),
   });
   app.on('will-quit', (event) => {
@@ -6979,6 +7159,7 @@ function bootPrimaryInstance(): void {
     desktopProcessObservability = null;
     dockVisibleForWindow.clear();
     agentPanelVisibleForWindow.clear();
+    editorVisibleForWindow.clear();
     dockOrderForWindow.clear();
     terminalSnapshotForWindow.clear();
     autoUpdaterHandle?.destroy();

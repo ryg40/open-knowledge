@@ -6,6 +6,7 @@ import { Trans } from '@lingui/react/macro';
 import { useEffect, useState } from 'react';
 import { OkBlob } from '@/components/OkBlob';
 import { useDocumentContext, useOpenBlobRunner } from '@/editor/DocumentContext';
+import { okCliCommandName } from '@/lib/channel-cli-copy';
 
 const GRACE_PERIOD_MS = 500;
 
@@ -33,7 +34,10 @@ export function isNoCollabServerError(err: CollabError): boolean {
 export function describeError(err: CollabError): string {
   if (err === null) return t`no response`;
   if (err.kind === 'null-collab') return t`the server responded but server.lock has no port yet`;
-  if (err.code === 'network') return t`network error (is \`ok start\` running?)`;
+  if (err.code === 'network') {
+    const cliCommand = okCliCommandName();
+    return t`network error (is \`${cliCommand} start\` running?)`;
+  }
   if (err.code === 'invalid-body') return t`/api/config returned a malformed body`;
   const code = err.code;
   return t`/api/config returned HTTP ${code}`;
@@ -60,42 +64,43 @@ export function ConnectingBanner() {
   if (mode === 'terminal') {
     const isNoCollabServer = isNoCollabServerError(collabLastError);
     const errorDetail = describeError(collabLastError);
+    const cliCommand = okCliCommandName();
     return (
       <div
         role="alert"
         aria-live="assertive"
-        className="fixed top-0 inset-x-0 z-50 bg-red-500/95 text-red-950 text-sm text-center py-2 px-4 pl-[var(--ok-titlebar-reserve-left,1rem)] shadow-md flex items-center justify-center gap-3 flex-wrap"
+        className="fixed top-[var(--ok-app-header-height,0px)] inset-x-0 z-50 bg-destructive text-background text-sm text-center py-2 px-4 pl-[var(--ok-titlebar-reserve-left,1rem)] shadow-md flex items-center justify-center gap-3 flex-wrap"
       >
         <span>
           {isNoCollabServer ? (
             <Trans>
               No collab server for this worktree — run{' '}
-              <code className="bg-red-100/60 px-1 rounded">ok start</code> here, or reopen the
-              project.
+              <code className="bg-background/20 px-1 rounded">{cliCommand} start</code> here, or
+              reopen the project.
             </Trans>
           ) : (
             <Trans>
               Couldn't reach collab server — {errorDetail}. Try{' '}
-              <code className="bg-red-100/60 px-1 rounded">ok status</code> or check{' '}
-              <code className="bg-red-100/60 px-1 rounded">.ok/local/last-spawn-error.log</code>.
+              <code className="bg-background/20 px-1 rounded">{cliCommand} status</code> or collect
+              logs with{' '}
+              <code className="bg-background/20 px-1 rounded">{cliCommand} diagnose bundle</code>.
             </Trans>
           )}
         </span>
         <button
           type="button"
           onClick={retryCollab}
-          className="bg-red-950 text-red-50 px-2 py-0.5 rounded text-xs font-medium hover:bg-red-900"
+          className="bg-background text-foreground px-2 py-0.5 rounded text-xs font-medium hover:bg-background/90"
         >
-          <Trans>Retry</Trans>
+          <Trans>Try again</Trans>
         </button>
-        {}
         {openBlobRunner ? (
           <button
             type="button"
             onClick={openBlobRunner}
             aria-label={t`Play Blob Run`}
             title={t`Play Blob Run`}
-            className="ml-1 flex items-center rounded bg-red-100/60 px-1.5 py-1 transition-colors hover:bg-red-100/90"
+            className="ml-1 flex items-center rounded bg-background/20 px-1.5 py-1 transition-colors hover:bg-background/30"
           >
             <OkBlob size={22} trackMouse={false} variant="sleeping" />
           </button>
@@ -108,7 +113,7 @@ export function ConnectingBanner() {
     <div
       role="status"
       aria-live="polite"
-      className="fixed top-0 inset-x-0 z-50 bg-amber-500/95 text-amber-950 text-sm text-center py-2 px-4 pl-[var(--ok-titlebar-reserve-left,1rem)] shadow-md"
+      className="fixed top-[var(--ok-app-header-height,0px)] inset-x-0 z-50 bg-warning text-background text-sm text-center py-2 px-4 pl-[var(--ok-titlebar-reserve-left,1rem)] shadow-md"
     >
       <Trans>Connecting — waiting for collab server</Trans>
     </div>

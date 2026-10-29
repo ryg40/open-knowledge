@@ -1,5 +1,6 @@
 import { useLingui } from '@lingui/react/macro';
 import { CircleAlert, Moon, Pencil, Plus, Sun, Trash2 } from 'lucide-react';
+import type { Ref } from 'react';
 import { Button } from '@/components/ui/button';
 import { Toggle } from '@/components/ui/toggle';
 import {
@@ -44,6 +45,7 @@ export interface ColorThemePickerProps {
   editControl?: ColorThemeEditControl;
   deleteControl?: ColorThemeDeleteControl;
   createControl?: ColorThemeCreateControl;
+  createTileRef?: Ref<HTMLButtonElement>;
   slotMode?: 'light' | 'dark';
   customSeed?: SeedInput;
   firstItemId?: string;
@@ -101,7 +103,6 @@ function ThemeSwatch({
       className="aspect-[4/3] w-full overflow-hidden rounded-md border"
       style={{ backgroundColor: c.surface, borderColor: c.line }}
     >
-      {}
       <div
         className="flex h-1/3 items-center gap-1 px-1.5"
         style={{ backgroundColor: c.chrome, borderBottom: `1px solid ${c.line}` }}
@@ -112,7 +113,6 @@ function ThemeSwatch({
           style={{ backgroundColor: c.line }}
         />
       </div>
-      {}
       <div className="flex h-2/3">
         <div
           className="flex w-1/4 flex-col items-center justify-center gap-1"
@@ -161,6 +161,7 @@ export function ColorThemePicker({
   editControl,
   deleteControl,
   createControl,
+  createTileRef,
   slotMode = 'light',
   customSeed,
   firstItemId,
@@ -174,7 +175,7 @@ export function ColorThemePicker({
       aria-label={ariaLabel}
       aria-describedby={ariaDescribedby}
       aria-invalid={ariaInvalid}
-      className="grid w-full min-w-0 grid-cols-2 gap-2 sm:grid-cols-3"
+      className="color-theme-picker grid w-full min-w-0 grid-cols-2 gap-2 sm:grid-cols-3"
     >
       {themes.map((theme, index) => {
         const isLight = selection.light === theme.id;
@@ -272,6 +273,7 @@ export function ColorThemePicker({
       })}
       {createControl ? (
         <Button
+          ref={createTileRef}
           type="button"
           variant="ghost"
           onClick={createControl.onCreate}

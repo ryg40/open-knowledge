@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 import type { ConfigBinding } from '@inkeep/open-knowledge-core/config/bind-config-doc';
 import { humanFormat } from '@inkeep/open-knowledge-core/config/errors';
 import type { ConfigPatch } from '@inkeep/open-knowledge-core/config/schema';
@@ -333,7 +334,7 @@ export function MarkdownlintPluginSection({
             onAuxClick={(e) =>
               dispatchExternalLinkClick(e, 'https://github.com/DavidAnson/markdownlint')
             }
-            className="inline-flex items-center gap-0.5 text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            className="inline-flex items-center gap-0.5 text-primary underline-offset-2 hover:underline"
           >
             markdownlint
             <ArrowUpRight aria-hidden className="size-3" />
@@ -624,7 +625,6 @@ export function OkfPluginSection() {
             <Label htmlFor="settings-okf-generate-index" className="text-sm font-medium">
               <Trans>Maintain index.md</Trans>
             </Label>
-            {}
             <p className="text-sm text-muted-foreground">
               <Trans>
                 Open Knowledge maintains a navigation file named index.md in every folder that
@@ -836,13 +836,10 @@ function GeneratedIndexSettingsNotice({
   return (
     <div
       role="status"
-      className="flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm"
+      className="flex gap-2 rounded-md border border-warning/40 px-3 py-2 text-sm"
       data-testid="settings-okf-generate-index-status"
     >
-      <CircleAlert
-        aria-hidden="true"
-        className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-300"
-      />
+      <CircleAlert aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning" />
       <p>
         {issue !== null && requestedEnabled === false ? (
           issue === 'git-conflict' ? (
@@ -1237,7 +1234,7 @@ export function FrontmatterPluginSection() {
 
       {problems.length > 0 && (
         <div
-          className="space-y-1 rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-sm"
+          className="space-y-1 rounded-md border border-warning/50 p-3 text-sm"
           data-testid="frontmatter-config-problems"
         >
           <p className="font-medium">

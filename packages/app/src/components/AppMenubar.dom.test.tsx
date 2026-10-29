@@ -29,7 +29,12 @@ function installBridge(
 
 async function openMenu(name: string) {
   const { AppMenubar } = await import('./AppMenubar');
-  render(<AppMenubar />);
+  const { SingleFileModeProvider } = await import('@/lib/single-file-mode');
+  render(
+    <SingleFileModeProvider>
+      <AppMenubar />
+    </SingleFileModeProvider>,
+  );
   await userEvent.click(screen.getByRole('menuitem', { name }));
 }
 
@@ -86,6 +91,13 @@ describe('AppMenubar Help menu', () => {
     await userEvent.click(screen.getByRole('menuitem', { name: /^Report a bug…/ }));
 
     expect(dispatch).toHaveBeenCalledWith({ kind: 'menu-action', action: 'report-bug' });
+  });
+
+  test('the open Help menu is marked as a bug-report launcher', async () => {
+    installBridge('win32');
+    await openHelpMenu();
+
+    expect(screen.getByRole('menu').hasAttribute('data-bug-report-launcher')).toBe(true);
   });
 
   test('Help entries read identically to the native menu, ellipsis included', async () => {
@@ -257,6 +269,36 @@ describe('AppMenubar View terminal toggle', () => {
 
     expect(await screen.findByRole('menuitem', { name: /Hide Terminal/ })).not.toBeNull();
     expect(screen.queryByRole('menuitem', { name: /Show Terminal/ })).toBeNull();
+  });
+
+  test('a project window offers Hide Editor, then Show Editor once hidden, through the shared menu action', async () => {
+    const dispatch = installBridge('linux', 'editor', { queryResult: snapshot(false) });
+    await openMenu('View');
+
+    const item = await screen.findByRole('menuitem', { name: 'Hide Editor' });
+    dispatch.mockClear();
+    await userEvent.click(item);
+    expect(dispatch).toHaveBeenCalledWith({ kind: 'menu-action', action: 'toggle-editor' });
+
+    cleanup();
+    const hidden = snapshot(false);
+    installBridge('linux', 'editor', {
+      queryResult: { ...hidden, viewMenuState: { ...hidden.viewMenuState, editorVisible: false } },
+    });
+    await openMenu('View');
+    expect(await screen.findByRole('menuitem', { name: 'Show Editor' })).not.toBeNull();
+  });
+
+  test('a single-file window offers no editor toggle', async () => {
+    const dispatch = installBridge('win32', 'editor', { queryResult: snapshot(false) });
+    const bridge = (window as unknown as { okDesktop: { config: Record<string, unknown> } })
+      .okDesktop;
+    bridge.config.singleFile = true;
+    await openMenu('View');
+    await screen.findByRole('menuitem', { name: /document panel/ });
+
+    expect(screen.queryByRole('menuitem', { name: /Editor/ })).toBeNull();
+    expect(dispatch).not.toHaveBeenCalledWith({ kind: 'menu-action', action: 'toggle-editor' });
   });
 
   test('Windows keeps the terminal toggle absent while PTYs are unavailable', async () => {

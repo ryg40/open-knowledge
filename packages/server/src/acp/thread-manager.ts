@@ -21,7 +21,6 @@ import {
   type PermissionOption,
   PROTOCOL_VERSION,
   type PromptCapabilities,
-  RequestError,
   type RequestPermissionResponse,
   type SessionConfigOption,
   type SessionNotification,
@@ -30,17 +29,18 @@ import {
   type SetSessionConfigOptionResponse,
   type StopReason,
   type ToolCallUpdate,
+  type WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import {
   AGENT_ICON_COLORS,
   agentIdForAcpAgent,
-  changedBlockRange,
   colorFromSeed,
   currentMcpServerName,
   type EditorId,
   type HostSnapshot,
   iconFromClientName,
   OK_HOSTED_AGENT_ENV,
+  OkCliCommand,
 } from '@inkeep/open-knowledge-core';
 import type {
   AttachmentPart,
@@ -61,39 +61,39 @@ import type {
 } from '@inkeep/open-knowledge-core/acp/thread-protocol';
 import { THREAD_REOPEN_OP_TIMEOUT_MS } from '@inkeep/open-knowledge-core/acp/thread-protocol';
 import { asRecord } from '@inkeep/open-knowledge-core/acp/tool-call-input';
-import { sessionWriterId, toBroadcasterKey } from '../agent-id.ts';
+import { toBroadcasterKey } from '../agent-id.ts';
 import type { AgentPresenceBroadcaster } from '../agent-presence.ts';
 import { observeReadiness } from '../agent-registry-gate.ts';
-import {
-  type AgentSessionManager,
-  agentWriteLossDetect,
-  applyAgentMarkdownWrite,
-  snapshotBlocks,
-} from '../agent-sessions.ts';
+import type { AgentSessionManager } from '../agent-sessions.ts';
 import { resolveBundledSkillDir } from '../build-skill-zip.ts';
-import { isConfigDoc, isSystemDoc } from '../cc1-broadcast.ts';
 import {
-  CONCURRENT_OVERWRITE_REFUSED_DETAIL,
-  CONCURRENT_OVERWRITE_REFUSED_TYPE,
-  CONCURRENT_OVERWRITE_RETRY_AFTER_SECONDS,
-  ConcurrentOverwriteRefusedError,
-  logConcurrentOverwriteRefusal,
-} from '../concurrent-overwrite-refused-error.ts';
+  isConfigDoc,
+  isEditableTextDoc,
+  isExcalidrawDoc,
+  isMermaidDoc,
+  isSystemDoc,
+} from '../cc1-broadcast.ts';
 import { tracedRm } from '../fs-traced.ts';
 import { resolveOnPath } from '../git-preflight.ts';
+import type { LocalApiDispatch } from '../http/local-api-dispatch.ts';
 import type { PinoLogger } from '../logger.ts';
 import { MCP_HOSTED_AGENT_HEADER } from '../mcp/agent-identity.ts';
 import { RUNTIME_VERSION } from '../version-constants.ts';
 import { isWithin } from './archive.ts';
 import { buildPromptBlocks } from './attachment-blocks.ts';
 import {
+  AGENT_BROWSER_MCP_PACKAGE,
+  agentBrowserInstallLaunch,
   agentBrowserMcpServer,
   agentGetsBrowser,
   type BrowserCallEvidence,
+  type BrowserPackageData,
   browserNpxRunnable,
   identifyBrowserCall,
   needsReportedToolCall,
+  npmCacheOf,
   prepareAgentBrowserFolders,
+  type ResolvedBrowserNpx,
   removeAgentBrowserFolders,
   resolveBrowserNpx,
 } from './browser-mcp.ts';
@@ -102,6 +102,7 @@ import {
   createDiagnosticStderrCapture,
   redactDiagnostic,
 } from './diagnostics.ts';
+import { writeDocumentThroughRoute } from './document-write.ts';
 import { boundSessionUpdateForLog, coalesceChunkInto } from './event-log-bounds.ts';
 import { exitFailureDetail } from './exit-diagnosis.ts';
 import {
@@ -109,6 +110,7 @@ import {
   agentSpawnPath,
   brokenInterpreterHint,
   declinedRepairHint,
+  ensureNpmPackageInstalled,
   envPath,
   expiredFallbackHint,
   expiredIncompatibleNodeHint,
@@ -116,11 +118,14 @@ import {
   incompatibleManagedRuntimeHint,
   incompatibleNodeHint,
   isPathQualified,
+  type NpxCacheEntry,
+  npxInstallRefused,
   packageAcquisitionFailure,
   preflightLaunch,
   probeInterpreterHealth,
   probeNpxNodeCompatibility,
   type ResolvedLaunch,
+  refusedNpxPackage,
   resolveCustomLaunch,
   resolveRegistryLaunch,
   rewriteLaunchToManagedRuntime,
@@ -196,6 +201,7 @@ const DEFAULT_UNWATCHED_TURN_KILL_MS = 20 * 60 * 1000;
 const DEFAULT_STEER_STALL_MS = 10_000;
 const DEFAULT_TURN_STALL_MS = 3 * 60 * 1000;
 const DEFAULT_AUTHENTICATE_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_BROWSER_INSTALL_WAIT_MS = 2 * 60 * 1000;
 const STDERR_TAIL_LINES = 40;
 const CRASH_REPORT_STATUSES: ReadonlySet<ThreadStatus> = new Set([
   'ready',
@@ -206,11 +212,10 @@ const SIGN_IN_OUTPUT_LINES = 6;
 const RESUME_REPLAY_QUIESCENCE_MS = 300;
 const RESUME_REPLAY_MAX_WAIT_MS = 3_000;
 const AUTH_REQUIRED_CODE = -32000;
-const CONCURRENT_OVERWRITE_REFUSED_CODE = -32009;
 
 type AcquisitionPolicy = 'reuse' | 'reacquire';
 
-type NpxCacheRecovery = 'available' | 'spent';
+type NpxLaunchRecovery = 'available' | 'spent';
 
 const NPX_CACHE_CLEAR_COOLDOWN_MS = 5 * 60 * 1000;
 
@@ -323,6 +328,10 @@ interface PendingConsent {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface LaunchTicket {
+  initialPrompt: { content: string; attachments?: readonly AttachmentPart[] } | null;
+}
+
 interface ThreadRecord {
   info: ThreadInfo;
   docName?: string;
@@ -339,7 +348,13 @@ interface ThreadRecord {
   lastInit: InitializeResponse | null;
   terminalAuthBase: TerminalAuthBase | null;
   agentLaunchPath?: string;
+  agentNpmCache?: string | null;
   sessionId: string | null;
+  sessionBeforeRestart: {
+    sessionId: string | null;
+    resumable: ThreadInfo['resumable'];
+    contextWindow: ThreadInfo['contextWindow'];
+  } | null;
   agentSessionId: string;
   events: ThreadEvent[];
   baseSeq: number;
@@ -348,6 +363,7 @@ interface ThreadRecord {
   midTurnOnDisk: boolean;
   resumeInFlight: boolean;
   authInFlight: boolean;
+  launchTicket: LaunchTicket | null;
   suppressUpdates: boolean;
   lastSuppressedAt: number;
   subscribers: Set<Subscriber>;
@@ -434,12 +450,12 @@ export interface AcpThreadManagerOptions {
   permissions: AcpPermissionStore;
   sessionManager: AgentSessionManager;
   agentPresenceBroadcaster?: AgentPresenceBroadcaster | null;
-  resolveEmbed?: (basename: string, sourcePath: string) => string | null;
+  localApi?: LocalApiDispatch;
   isExcludedPath: (relPath: string) => boolean;
   isIgnoredPath: (relPosix: string) => boolean;
   getLoadedDocText?: (docName: string) => string | null;
   getServerUrl?: () => string;
-  getMcpStdioCommand?: () => { command: string; args: readonly string[] } | null | undefined;
+  getMcpStdioCommand?: () => OkMcpStdioCommand | null | undefined;
   probeHarnessManagedMcpEntry?: (
     editorId: EditorId,
     cwd: string,
@@ -468,6 +484,14 @@ export interface AcpThreadManagerOptions {
   autoApproveOkTools?: () => boolean;
   agentBrowserTools?: () => boolean;
   resolveBrowserNpx?: typeof resolveBrowserNpx;
+  ensureBrowserPackage?: typeof ensureNpmPackageInstalled;
+  browserInstallWaitMs?: number;
+}
+
+export interface OkMcpStdioCommand {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
 }
 
 export function buildOkMcpStdioCommand(
@@ -476,12 +500,16 @@ export function buildOkMcpStdioCommand(
   deps?: {
     resolveCommand?: (name: string) => string | null;
     log?: PinoLogger;
+    env?: Readonly<Record<string, string | undefined>>;
   },
-): { command: string; args: string[] } {
-  const argv = localOpCliArgs && localOpCliArgs.length > 0 ? localOpCliArgs : ['open-knowledge'];
-  const [command = 'open-knowledge', ...rest] = argv;
-  const args = [...rest, 'mcp', '--port', String(port)];
-  if (command.includes('/') || command.includes('\\')) return { command, args };
+): OkMcpStdioCommand {
+  const server = OkCliCommand.resolve({
+    host: localOpCliArgs === undefined ? undefined : { cliArgs: localOpCliArgs },
+    ...(deps?.env === undefined ? {} : { env: deps.env }),
+  }).stdioServer(['mcp', '--port', String(port)]);
+  const { command, args } = server;
+  const channel = Object.keys(server.env).length > 0 ? { env: server.env } : {};
+  if (command.includes('/') || command.includes('\\')) return { command, args, ...channel };
   const resolved = (deps?.resolveCommand ?? ((name) => resolveOnPath(name, agentSpawnPath())))(
     command,
   );
@@ -490,9 +518,9 @@ export function buildOkMcpStdioCommand(
       { command },
       '[acp-threads] OK MCP stdio command did not resolve on PATH — injecting the bare name, which fails for harnesses that spawn MCP children under a minimal PATH',
     );
-    return { command, args };
+    return { command, args, ...channel };
   }
-  return { command: resolved, args };
+  return { command: resolved, args, ...channel };
 }
 
 export type OkMcpHostedMarker = 'http-header' | 'stdio-entry-env' | 'unknown' | 'none';
@@ -513,6 +541,7 @@ export class AcpThreadManager {
   private readonly unwatchedTurnCancelMs: number;
   private readonly unwatchedTurnKillMs: number;
   private readonly turnStallMs: number;
+  private readonly browserInstallWaitMs: number;
   private readonly persistence: ThreadPersistenceStore;
   private readonly npxCacheClears = new Map<string, number>();
   private readonly resolveLoginShellPath: () => Promise<string | null>;
@@ -532,6 +561,7 @@ export class AcpThreadManager {
     this.unwatchedTurnCancelMs = opts.unwatchedTurnCancelMs ?? DEFAULT_UNWATCHED_TURN_CANCEL_MS;
     this.unwatchedTurnKillMs = opts.unwatchedTurnKillMs ?? DEFAULT_UNWATCHED_TURN_KILL_MS;
     this.turnStallMs = opts.turnStallMs ?? DEFAULT_TURN_STALL_MS;
+    this.browserInstallWaitMs = opts.browserInstallWaitMs ?? DEFAULT_BROWSER_INSTALL_WAIT_MS;
     const [primaryDir, legacyDir = null] = acpThreadStoreRoots(opts.globalDir, opts.localDir);
     this.persistence = new ThreadPersistenceStore({
       primaryDir,
@@ -697,6 +727,7 @@ export class AcpThreadManager {
       lastInit: null,
       terminalAuthBase: null,
       sessionId: null,
+      sessionBeforeRestart: null,
       agentSessionId: `acp-${threadId}`,
       events: [],
       baseSeq: 0,
@@ -705,6 +736,7 @@ export class AcpThreadManager {
       midTurnOnDisk: false,
       resumeInFlight: false,
       authInFlight: false,
+      launchTicket: null,
       suppressUpdates: false,
       lastSuppressedAt: 0,
       subscribers: new Set(),
@@ -740,11 +772,20 @@ export class AcpThreadManager {
       chatGrants: new Set(),
     };
     this.threads.set(threadId, record);
+    const hasContent =
+      (params.prompt !== undefined && params.prompt !== '') ||
+      (params.attachments !== undefined && params.attachments.length > 0);
+    const ticket = beginLaunch(
+      record,
+      hasContent ? { content: params.prompt ?? '', attachments: params.attachments } : null,
+    );
     this.emitStatus(record, 'spawning');
 
-    void this.startThread(record, params, custom).catch((err) => {
+    void this.startThread(record, ticket, params, custom).catch((err) => {
       this.opts.log.error({ err, threadId }, '[acp-threads] thread start failed');
-      this.emitStatus(record, 'error', err instanceof Error ? err.message : String(err));
+      if (isCurrentLaunch(record, ticket)) {
+        this.emitStatus(record, 'error', err instanceof Error ? err.message : String(err));
+      }
     });
 
     return { ...record.info };
@@ -827,48 +868,70 @@ export class AcpThreadManager {
 
   private async connectAgent(
     record: ThreadRecord,
+    ticket: LaunchTicket,
     custom: CustomAgentEntry | null,
     acquisition: AcquisitionPolicy = 'reuse',
     consentBudgetMs: number,
-    npxCacheRecovery: NpxCacheRecovery = 'available',
+    npxLaunchRecovery: NpxLaunchRecovery = 'available',
   ): Promise<{ conn: ClientConnection; init: InitializeResponse; launch: ResolvedLaunch } | null> {
     let launch: ResolvedLaunch | null;
     if (custom !== null) {
-      launch = await this.ensureLaunchable(record, resolveCustomLaunch(custom), consentBudgetMs);
+      launch = await this.ensureLaunchable(
+        record,
+        ticket,
+        resolveCustomLaunch(custom),
+        consentBudgetMs,
+      );
     } else {
       const manifest = await this.opts.registry.getAgent(record.agentRef.id);
       if (manifest === undefined) throw new ThreadOpError('unknown-agent', 'agent vanished');
-      launch = await resolveRegistryLaunch(
-        manifest,
-        registryPlatformKey(),
-        this.opts.log,
-        undefined,
-        (candidate) => this.ensureLaunchable(record, candidate, consentBudgetMs),
-        {
-          reacquire: acquisition === 'reacquire',
-          onProbeStart: () => this.emitStatus(record, 'installing'),
-          onResolved: ({ acquired, outcome, source, elapsedMs }) =>
-            this.opts.log.info(
-              {
-                threadId: record.info.threadId,
-                agentId: record.info.agent.id,
-                package: acquired,
-                outcome,
-                source,
-                elapsedMs,
-              },
-              '[acp-threads] agent package acquired',
-            ),
-        },
-      );
+      try {
+        launch = await resolveRegistryLaunch(
+          manifest,
+          registryPlatformKey(),
+          this.opts.log,
+          undefined,
+          (candidate) => this.ensureLaunchable(record, ticket, candidate, consentBudgetMs),
+          {
+            reacquire: acquisition === 'reacquire',
+            install: true,
+            onAcquiring: () => {
+              if (isCurrentLaunch(record, ticket)) this.emitStatus(record, 'installing');
+            },
+            onResolved: ({ acquired, outcome, source, elapsedMs }) =>
+              this.opts.log.info(
+                {
+                  threadId: record.info.threadId,
+                  agentId: record.info.agent.id,
+                  package: acquired,
+                  outcome,
+                  source,
+                  elapsedMs,
+                },
+                '[acp-threads] agent package acquired',
+              ),
+          },
+        );
+      } catch (err) {
+        if (
+          err instanceof AgentLaunchError &&
+          err.npxCacheEntry !== undefined &&
+          npxLaunchRecovery === 'available' &&
+          (await this.clearStaleNpxCacheEntry(record, ticket, err.npxCacheEntry))
+        ) {
+          return this.connectAgent(record, ticket, custom, 'reacquire', consentBudgetMs, 'spent');
+        }
+        throw err;
+      }
     }
-    if (launch === null || record.closed) return null;
+    if (launch === null || !isCurrentLaunch(record, ticket)) return null;
 
     const loginShellPath = await this.resolveLoginShellPath().catch(() => null);
-    if (record.closed) return null;
+    if (!isCurrentLaunch(record, ticket)) return null;
 
-    record.projectSkill = await this.stageProjectSkillFor(record);
-    if (record.closed) return null;
+    const projectSkill = await this.stageProjectSkillFor(record);
+    if (!isCurrentLaunch(record, ticket)) return null;
+    record.projectSkill = projectSkill;
 
     const terminals = new AcpTerminalSet({
       defaultCwd: record.cwd,
@@ -879,6 +942,7 @@ export class AcpThreadManager {
 
     record.terminalAuthBase = terminalAuthBaseFor(launch);
     record.agentLaunchPath = envPath(launch.env);
+    record.agentNpmCache = npmCacheOf(launch.env);
     launch = applyLaunchContextWindow(
       launch,
       record.agentRef.id,
@@ -931,12 +995,13 @@ export class AcpThreadManager {
     );
     const launchKind = launch.kind;
     let launchSuperseded = false;
-    const staleNpxCacheRecoveryPending = (): boolean =>
+    const npxLaunchRecoveryPending = (): boolean =>
       launchKind === 'npx' &&
       capturingStartup &&
-      npxCacheRecovery === 'available' &&
-      staleNpxCacheEntry(rawStartupStderr) !== null;
-    const launchStatusMuted = (): boolean => launchSuperseded || staleNpxCacheRecoveryPending();
+      npxLaunchRecovery === 'available' &&
+      (staleNpxCacheEntry(rawStartupStderr) !== null || npxInstallRefused(rawStartupStderr));
+    const launchStatusMuted = (): boolean =>
+      launchSuperseded || npxLaunchRecoveryPending() || !isCurrentLaunch(record, ticket);
 
     child.stderr?.setEncoding('utf8');
     child.stderr?.on('data', diagnosticCapture.write);
@@ -1047,8 +1112,7 @@ export class AcpThreadManager {
       })
       .onRequest(acpMethods.client.fs.writeTextFile, async (ctx) => {
         try {
-          await this.handleFsWrite(record, ctx.params.path, ctx.params.content);
-          return {};
+          return await this.handleFsWrite(record, ctx.params.path, ctx.params.content);
         } catch (err) {
           this.opts.log.warn(
             {
@@ -1138,12 +1202,21 @@ export class AcpThreadManager {
         if (acquisitionFailure !== null) throw acquisitionFailure;
       }
       const staleEntry =
-        launchKind === 'npx' && npxCacheRecovery === 'available'
+        launchKind === 'npx' && npxLaunchRecovery === 'available'
           ? staleNpxCacheEntry(rawStartupStderr)
           : null;
-      if (staleEntry !== null && (await this.clearStaleNpxCacheEntry(record, staleEntry))) {
+      if (staleEntry !== null && (await this.clearStaleNpxCacheEntry(record, ticket, staleEntry))) {
         launchSuperseded = true;
-        return this.connectAgent(record, custom, acquisition, consentBudgetMs, 'spent');
+        return this.connectAgent(record, ticket, custom, 'reacquire', consentBudgetMs, 'spent');
+      }
+      if (
+        launchKind === 'npx' &&
+        npxLaunchRecovery === 'available' &&
+        npxInstallRefused(rawStartupStderr) &&
+        (await this.discardRefusedNpxLaunch(record, ticket, launch))
+      ) {
+        launchSuperseded = true;
+        return this.connectAgent(record, ticket, custom, 'reacquire', consentBudgetMs, 'spent');
       }
       throw new ThreadOpError('spawn-failed', `initialize failed: ${agentErrorMessage(err)}`);
     } finally {
@@ -1151,27 +1224,69 @@ export class AcpThreadManager {
       startupStderr = '';
       rawStartupStderr = '';
     }
-    if (record.closed) return null;
+    if (!isCurrentLaunch(record, ticket)) return null;
     record.lastInit = init;
     record.info.promptCapabilities = init.agentCapabilities?.promptCapabilities ?? {};
     this.emitInfo(record);
     return { conn, init, launch };
   }
 
-  private async clearStaleNpxCacheEntry(record: ThreadRecord, entryDir: string): Promise<boolean> {
+  private async discardRefusedNpxLaunch(
+    record: ThreadRecord,
+    ticket: LaunchTicket,
+    launch: ResolvedLaunch,
+  ): Promise<boolean> {
+    if (!isCurrentLaunch(record, ticket)) return false;
+    this.opts.log.warn(
+      {
+        threadId: record.info.threadId,
+        agentId: record.info.agent.id,
+        package: refusedNpxPackage(launch.args),
+      },
+      '[acp-threads] npx refused to install a missing agent package; reinstalling it before relaunch',
+    );
+    await this.discardFailedLaunch(record);
+    return isCurrentLaunch(record, ticket);
+  }
+
+  private async clearStaleNpxCacheEntry(
+    record: ThreadRecord,
+    ticket: LaunchTicket,
+    entryDir: NpxCacheEntry,
+  ): Promise<boolean> {
     const logContext = {
       threadId: record.info.threadId,
       agentId: record.info.agent.id,
       npxCacheEntry: redactDiagnostic(entryDir),
     };
+    const outcome = await this.removeStaleNpxCacheEntry(entryDir, logContext);
+    if (outcome === 'kept') return false;
+    if (!isCurrentLaunch(record, ticket)) {
+      if (outcome === 'removed') {
+        this.opts.log.warn(
+          logContext,
+          '[acp-threads] cleared a stale npx cache entry; the launch was closed or superseded, so the agent is not relaunched',
+        );
+      }
+      return false;
+    }
+    this.opts.log.warn(
+      logContext,
+      outcome === 'recently-removed'
+        ? '[acp-threads] npx cache entry was cleared by another launch moments ago; relaunching without clearing it again'
+        : '[acp-threads] cleared a stale npx cache entry; relaunching the agent',
+    );
+    await this.discardFailedLaunch(record);
+    return isCurrentLaunch(record, ticket);
+  }
+
+  private async removeStaleNpxCacheEntry(
+    entryDir: NpxCacheEntry,
+    logContext: Record<string, unknown>,
+  ): Promise<'removed' | 'recently-removed' | 'kept'> {
     const clearedAt = this.npxCacheClears.get(entryDir);
     if (clearedAt !== undefined && Date.now() - clearedAt < NPX_CACHE_CLEAR_COOLDOWN_MS) {
-      this.opts.log.warn(
-        logContext,
-        '[acp-threads] npx cache entry was cleared by another launch moments ago; relaunching without clearing it again',
-      );
-      await this.discardFailedLaunch(record);
-      return !isThreadClosed(record);
+      return 'recently-removed';
     }
     const claimedAt = Date.now();
     this.npxCacheClears.set(entryDir, claimedAt);
@@ -1189,7 +1304,7 @@ export class AcpThreadManager {
           '[acp-threads] leaving an npx cache entry alone',
         );
         releaseClaim();
-        return false;
+        return 'kept';
       }
     }
     try {
@@ -1200,14 +1315,9 @@ export class AcpThreadManager {
         '[acp-threads] stale npx cache entry could not be cleared',
       );
       releaseClaim();
-      return false;
+      return 'kept';
     }
-    this.opts.log.warn(
-      logContext,
-      '[acp-threads] cleared a stale npx cache entry; relaunching the agent',
-    );
-    await this.discardFailedLaunch(record);
-    return !isThreadClosed(record);
+    return 'removed';
   }
 
   private async discardFailedLaunch(t: ThreadRecord): Promise<void> {
@@ -1236,6 +1346,7 @@ export class AcpThreadManager {
 
   private async ensureLaunchable(
     record: ThreadRecord,
+    ticket: LaunchTicket,
     launch: ResolvedLaunch,
     consentBudgetMs: number,
   ): Promise<ResolvedLaunch | null> {
@@ -1247,31 +1358,39 @@ export class AcpThreadManager {
       if (!(err instanceof AgentLaunchError) || err.code !== 'command-not-found') throw err;
       const viaLoginShell = await this.retryWithLoginShellPath(launch);
       if (viaLoginShell === null)
-        return this.fallbackToManagedRuntime(record, launch, err, undefined, consentBudgetMs);
+        return this.fallbackToManagedRuntime(
+          record,
+          ticket,
+          launch,
+          err,
+          undefined,
+          consentBudgetMs,
+        );
       candidate = viaLoginShell;
     }
-    if (record.closed) return null;
-    return this.ensureInterpreterRuns(record, candidate, consentBudgetMs);
+    if (!isCurrentLaunch(record, ticket)) return null;
+    return this.ensureInterpreterRuns(record, ticket, candidate, consentBudgetMs);
   }
 
   private async ensureInterpreterRuns(
     record: ThreadRecord,
+    ticket: LaunchTicket,
     launch: ResolvedLaunch,
     consentBudgetMs: number,
   ): Promise<ResolvedLaunch | null> {
     if (launch.kind !== 'npx' && launch.kind !== 'uvx') return launch;
     const failure = await this.probeInterpreterOnce(launch);
-    if (record.closed) return null;
+    if (!isCurrentLaunch(record, ticket)) return null;
     if (failure === null) return launch;
 
     if (failure.kind === 'incompatible') {
       const preferred = await this.withPreferredLoginShellPathIfEligible(launch);
-      if (record.closed) return null;
+      if (!isCurrentLaunch(record, ticket)) return null;
       if (envPath(preferred.env) !== envPath(launch.env)) {
         try {
           await preflightLaunch(preferred);
           const preferredFailure = await this.probeInterpreterOnce(preferred);
-          if (record.closed) return null;
+          if (!isCurrentLaunch(record, ticket)) return null;
           if (preferredFailure === null) {
             this.opts.log.info(
               { threadId: record.info.threadId, agentId: record.info.agent.id },
@@ -1322,6 +1441,7 @@ export class AcpThreadManager {
     );
     return this.fallbackToManagedRuntime(
       record,
+      ticket,
       launch,
       declined,
       { declined, expired },
@@ -1331,6 +1451,7 @@ export class AcpThreadManager {
 
   private async fallbackToManagedRuntime(
     record: ThreadRecord,
+    ticket: LaunchTicket,
     launch: ResolvedLaunch,
     cause: AgentLaunchError,
     refusalCauses: { declined: AgentLaunchError; expired: AgentLaunchError } | undefined,
@@ -1341,6 +1462,7 @@ export class AcpThreadManager {
     if (!runtimeDownloadSupported(runtimeKind)) throw cause;
     const runtime = await this.provideManagedRuntime(
       record,
+      ticket,
       runtimeKind,
       refusalCauses === undefined ? 'missing' : 'broken',
       consentBudgetMs,
@@ -1363,6 +1485,7 @@ export class AcpThreadManager {
     }
     return this.repairManagedRuntime(
       record,
+      ticket,
       launch,
       runtimeKind,
       brokenManaged.detail,
@@ -1372,11 +1495,13 @@ export class AcpThreadManager {
 
   private async repairManagedRuntime(
     record: ThreadRecord,
+    ticket: LaunchTicket,
     launch: ResolvedLaunch,
     runtimeKind: ManagedRuntimeKind,
     detail: string,
     consentBudgetMs: number,
   ): Promise<ResolvedLaunch | null> {
+    if (!isCurrentLaunch(record, ticket)) return null;
     const logContext = {
       threadId: record.info.threadId,
       agentId: record.info.agent.id,
@@ -1398,6 +1523,7 @@ export class AcpThreadManager {
 
     const fresh = await this.provideManagedRuntime(
       record,
+      ticket,
       runtimeKind,
       'damaged',
       consentBudgetMs,
@@ -1482,6 +1608,7 @@ export class AcpThreadManager {
 
   private async provideManagedRuntime(
     record: ThreadRecord,
+    ticket: LaunchTicket,
     runtimeKind: ManagedRuntimeKind,
     reason: 'missing' | 'broken' | 'damaged',
     consentBudgetMs: number,
@@ -1490,9 +1617,10 @@ export class AcpThreadManager {
     await cleanupManagedRuntimeStaging(runtimeKind, this.opts.log, root);
     const existing = await findManagedRuntime(runtimeKind, root).catch(() => null);
     if (existing !== null) return existing;
+    if (!isCurrentLaunch(record, ticket)) return null;
 
     const decision = await this.requestRuntimeConsent(record, runtimeKind, reason, consentBudgetMs);
-    if (decision === 'closed' || record.closed) return null;
+    if (decision === 'closed' || !isCurrentLaunch(record, ticket)) return null;
     if (decision !== 'granted') {
       throw new RuntimeConsentRefusedError(
         decision,
@@ -1501,8 +1629,8 @@ export class AcpThreadManager {
     }
 
     try {
-      const runtime = await this.downloadRuntime(record, runtimeKind);
-      return record.closed ? null : runtime;
+      const runtime = await this.downloadRuntime(record, ticket, runtimeKind);
+      return isCurrentLaunch(record, ticket) ? runtime : null;
     } catch (err) {
       const name = describeRuntime(runtimeKind).displayName;
       throw new AgentLaunchError(
@@ -1571,6 +1699,7 @@ export class AcpThreadManager {
 
   private async downloadRuntime(
     record: ThreadRecord,
+    ticket: LaunchTicket,
     runtimeKind: ManagedRuntimeKind,
   ): Promise<ManagedRuntime> {
     this.emitStatus(record, 'installing');
@@ -1582,7 +1711,7 @@ export class AcpThreadManager {
         const now = Date.now();
         if (now - lastProgressAt < RUNTIME_PROGRESS_THROTTLE_MS) return;
         lastProgressAt = now;
-        if (record.closed) return;
+        if (!isCurrentLaunch(record, ticket)) return;
         this.appendEvent(record, {
           kind: 'runtime_install_progress',
           runtime: runtimeKind,
@@ -1597,18 +1726,21 @@ export class AcpThreadManager {
 
   private async buildMcpServers(
     record: ThreadRecord,
+    ticket: LaunchTicket,
     init: InitializeResponse,
     consentBudgetMs: number = CONSENT_TIMEOUT_MS,
   ): Promise<{
     servers: McpServer[];
     hostedMarker: OkMcpHostedMarker;
     browserUnavailable: BrowserUnavailableReason | null;
+    browserInjected: boolean;
   }> {
     const servers: McpServer[] = [];
     let browserUnavailable: BrowserUnavailableReason | null = null;
+    let browserInjected = false;
     let hostedMarker: OkMcpHostedMarker;
     if (isPiBridgeAgent(record.agentRef)) {
-      const outcome = await this.settlePiBridge(record, consentBudgetMs);
+      const outcome = await this.settlePiBridge(record, ticket, consentBudgetMs);
       hostedMarker = outcome === 'unavailable' ? 'none' : 'unknown';
     } else if ((await this.harnessAlreadyHasOkMcp(record)) !== null) {
       hostedMarker = 'unknown';
@@ -1635,6 +1767,7 @@ export class AcpThreadManager {
               ...(entryPath !== undefined && entryPath !== ''
                 ? [{ name: 'PATH', value: entryPath }]
                 : []),
+              ...Object.entries(stdio.env ?? {}).map(([name, value]) => ({ name, value })),
             ],
           });
           hostedMarker = 'stdio-entry-env';
@@ -1643,15 +1776,14 @@ export class AcpThreadManager {
         }
       }
     }
-    record.browserInjected = false;
-    if (this.opts.agentBrowserTools?.() === true) {
+    if (this.opts.agentBrowserTools?.() === true && isCurrentLaunch(record, ticket)) {
       if (agentGetsBrowser(record.agentRef)) {
-        const browser = await this.agentBrowserServer(record);
+        const browser = await this.agentBrowserServer(record, ticket, consentBudgetMs);
         if (typeof browser === 'string') {
           browserUnavailable = browser;
         } else {
           servers.push(browser);
-          record.browserInjected = true;
+          browserInjected = true;
         }
       } else {
         this.opts.log.info(
@@ -1671,7 +1803,7 @@ export class AcpThreadManager {
         '[acp-threads] OK MCP injection outcome',
       );
     }
-    return { servers, hostedMarker, browserUnavailable };
+    return { servers, hostedMarker, browserUnavailable, browserInjected };
   }
 
   private noteBrowserUnavailable(
@@ -1689,6 +1821,8 @@ export class AcpThreadManager {
 
   private async agentBrowserServer(
     record: ThreadRecord,
+    ticket: LaunchTicket,
+    waitBudgetMs: number,
   ): Promise<McpServerStdio | BrowserUnavailableReason> {
     const context = { threadId: record.info.threadId, agentId: record.agentRef.id };
     const browserRoot = this.opts.globalDir;
@@ -1700,6 +1834,7 @@ export class AcpThreadManager {
       return 'failed';
     }
     const loginShellPath = await this.resolveLoginShellPath().catch(() => null);
+    if (!isCurrentLaunch(record, ticket)) return 'failed';
     const rejectedNpx: string[] = [];
     const npx = (this.opts.resolveBrowserNpx ?? resolveBrowserNpx)(
       [record.agentLaunchPath, loginShellPath, agentSpawnPath()],
@@ -1719,11 +1854,13 @@ export class AcpThreadManager {
       );
       return 'no-node';
     }
+    const npmCache = record.agentNpmCache ?? null;
     let server: McpServerStdio | null;
     try {
       server = agentBrowserMcpServer({
         npx,
         folders: await prepareAgentBrowserFolders(browserRoot, record.info.threadId),
+        npmCache,
       });
     } catch (err) {
       this.opts.log.warn(
@@ -1739,11 +1876,75 @@ export class AcpThreadManager {
       );
       return 'no-node';
     }
+    if (!isCurrentLaunch(record, ticket)) return 'failed';
+    const waitMs = Math.min(this.browserInstallWaitMs, waitBudgetMs);
+    let waitTimer: ReturnType<typeof setTimeout> | undefined;
+    const installed = await Promise.race([
+      this.installBrowserPackage(record, npx, npmCache),
+      new Promise<'still-installing'>((resolve) => {
+        waitTimer = setTimeout(() => resolve('still-installing'), waitMs);
+        waitTimer.unref?.();
+      }),
+    ]).finally(() => clearTimeout(waitTimer));
+    if (installed === 'still-installing') {
+      this.opts.log.warn(
+        { ...context, waitedMs: waitMs },
+        '[acp-threads] installing the browser is taking too long — the chat starts without a browser',
+      );
+      return 'failed';
+    }
+    if (!installed) return 'failed';
     this.opts.log.info(
       { ...context, command: server.command, npx: npx.npx },
       '[acp-threads] browser MCP injected',
     );
     return server;
+  }
+
+  private async installBrowserPackage(
+    record: ThreadRecord,
+    npx: ResolvedBrowserNpx,
+    npmCache: string | null,
+    packageData: BrowserPackageData = 'cached',
+    npxCacheRecovery: NpxLaunchRecovery = 'available',
+  ): Promise<boolean> {
+    const context = { threadId: record.info.threadId, agentId: record.agentRef.id };
+    const ensure = this.opts.ensureBrowserPackage ?? ensureNpmPackageInstalled;
+    const launch = agentBrowserInstallLaunch(npx, npmCache, packageData);
+    try {
+      await ensure(launch, AGENT_BROWSER_MCP_PACKAGE, this.opts.log, { reacquire: true });
+      return true;
+    } catch (err) {
+      if (
+        err instanceof AgentLaunchError &&
+        err.npxCacheEntry !== undefined &&
+        npxCacheRecovery === 'available'
+      ) {
+        const logContext = { ...context, npxCacheEntry: redactDiagnostic(err.npxCacheEntry) };
+        const removal = await this.removeStaleNpxCacheEntry(err.npxCacheEntry, logContext);
+        if (removal !== 'kept') {
+          this.opts.log.warn(
+            logContext,
+            removal === 'removed'
+              ? '[acp-threads] cleared a stale browser npx cache entry; reinstalling the browser'
+              : '[acp-threads] browser npx cache entry was cleared by another launch moments ago; reinstalling the browser without clearing it again',
+          );
+          return this.installBrowserPackage(record, npx, npmCache, packageData, 'spent');
+        }
+      }
+      if (packageData === 'cached') {
+        this.opts.log.info(
+          { ...context, err },
+          "[acp-threads] installing the browser from npm's cached package data failed; installing it again with fresh package data",
+        );
+        return this.installBrowserPackage(record, npx, npmCache, 'fresh', npxCacheRecovery);
+      }
+      this.opts.log.warn(
+        { ...context, err },
+        '[acp-threads] installing the browser failed — the chat starts without a browser',
+      );
+      return false;
+    }
   }
 
   private async harnessAlreadyHasOkMcp(
@@ -1780,6 +1981,7 @@ export class AcpThreadManager {
 
   private async settlePiBridge(
     record: ThreadRecord,
+    ticket: LaunchTicket,
     consentBudgetMs: number,
   ): Promise<PiBridgeOutcome> {
     const probe = this.opts.probePiAcpBridge;
@@ -1798,7 +2000,7 @@ export class AcpThreadManager {
       this.opts.log.warn({ err, threadId }, '[acp-threads] Pi bridge probe failed');
       return 'unknown';
     }
-    if (record.closed) return 'unknown';
+    if (!isCurrentLaunch(record, ticket)) return 'unknown';
     if (state.project === 'unavailable') {
       this.opts.log.warn(
         { threadId, cwd: state.cwd, err: new Error(state.error) },
@@ -1852,7 +2054,7 @@ export class AcpThreadManager {
     const requestId = crypto.randomUUID();
     const decision = await this.requestPiBridgeConsent(record, requestId, state, consentBudgetMs);
     if (decision === 'declined') record.piBridgeDeclined = true;
-    if (record.closed) return 'unknown';
+    if (!isCurrentLaunch(record, ticket)) return 'unknown';
     if (decision !== 'granted') {
       this.opts.log.info(
         { threadId, decision },
@@ -1867,7 +2069,9 @@ export class AcpThreadManager {
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       this.opts.log.warn({ err, threadId }, '[acp-threads] Pi bridge provisioning threw');
-      this.appendPiBridgeFailure(record, requestId, 'bridge-failed', state.bridgePath, { detail });
+      this.appendPiBridgeFailure(record, ticket, requestId, 'bridge-failed', state.bridgePath, {
+        detail,
+      });
       return 'unavailable';
     }
     if (result.ok) {
@@ -1875,7 +2079,7 @@ export class AcpThreadManager {
         { threadId, bridge: result.bridge, trust: result.trust, bridgePath: result.bridgePath },
         '[acp-threads] provisioned the Pi bridge extension for this project',
       );
-      if (record.closed) return 'unknown';
+      if (!isCurrentLaunch(record, ticket)) return 'unknown';
       this.appendEvent(record, {
         kind: 'pi_bridge_status',
         requestId,
@@ -1909,7 +2113,7 @@ export class AcpThreadManager {
       },
       '[acp-threads] Pi bridge provisioning did not complete — the thread continues without OK tools',
     );
-    this.appendPiBridgeFailure(record, requestId, state2, result.bridgePath, {
+    this.appendPiBridgeFailure(record, ticket, requestId, state2, result.bridgePath, {
       bridge: result.bridge,
       trust: result.trust,
       ...(result.error !== undefined ? { detail: result.error } : {}),
@@ -1919,12 +2123,13 @@ export class AcpThreadManager {
 
   private appendPiBridgeFailure(
     record: ThreadRecord,
+    ticket: LaunchTicket,
     requestId: string,
     state: PiBridgeThreadState,
     bridgePath: string,
     extra: { bridge?: PiBridgeWriteAction; trust?: PiTrustWriteAction; detail?: string },
   ): void {
-    if (record.closed) return;
+    if (!isCurrentLaunch(record, ticket)) return;
     this.appendEvent(record, {
       kind: 'pi_bridge_status',
       requestId,
@@ -1997,10 +2202,9 @@ export class AcpThreadManager {
 
   private async startThread(
     record: ThreadRecord,
+    ticket: LaunchTicket,
     params: {
       agent: { source: 'registry' | 'custom'; id: string };
-      prompt?: string;
-      attachments?: readonly AttachmentPart[];
       settings?: {
         config?: Record<string, string | boolean>;
         modeId?: string;
@@ -2013,22 +2217,33 @@ export class AcpThreadManager {
   ): Promise<void> {
     let handshake: Awaited<ReturnType<AcpThreadManager['connectAgent']>>;
     try {
-      handshake = await this.connectAgent(record, custom, acquisition, consentBudgetMs);
+      handshake = await this.connectAgent(record, ticket, custom, acquisition, consentBudgetMs);
     } catch (err) {
-      const failure = await connectionFailureDetail(err, record);
-      this.emitStatus(record, 'error', failure.agentMessage, failure);
-      if (!isThreadClosed(record)) await this.teardownFailedAgent(record);
+      const failure = await connectionFailureDetail(
+        err,
+        record,
+        isCurrentLaunch(record, ticket) || isThreadClosed(record),
+      );
+      await this.failLaunch(record, ticket, failure.agentMessage, failure);
       return;
     }
     if (handshake === null) return;
     const { conn, init, launch } = handshake;
 
     if (
-      (await this.openSession(record, conn, init, params.settings, 'park', consentBudgetMs)) !==
-      true
+      (await this.openSession(
+        record,
+        ticket,
+        conn,
+        init,
+        params.settings,
+        'park',
+        consentBudgetMs,
+      )) !== true
     ) {
       return;
     }
+    if (!isCurrentLaunch(record, ticket)) return;
     this.opts.log.info(
       {
         threadId: record.info.threadId,
@@ -2039,16 +2254,16 @@ export class AcpThreadManager {
       '[acp-threads] agent ready',
     );
 
-    const hasContent =
-      (params.prompt !== undefined && params.prompt !== '') ||
-      (params.attachments !== undefined && params.attachments.length > 0);
-    if (hasContent) {
-      this.sendPrompt(record.info.threadId, params.prompt ?? '', params.attachments);
+    const prompt = ticket.initialPrompt;
+    ticket.initialPrompt = null;
+    if (prompt !== null) {
+      this.sendPrompt(record.info.threadId, prompt.content, prompt.attachments);
     }
   }
 
   private async openSession(
     record: ThreadRecord,
+    ticket: LaunchTicket,
     conn: ClientConnection,
     init: InitializeResponse,
     settings?: { config?: Record<string, string | boolean>; modeId?: string },
@@ -2056,17 +2271,20 @@ export class AcpThreadManager {
     consentBudgetMs: number = CONSENT_TIMEOUT_MS,
   ): Promise<boolean | 'auth-required'> {
     record.info.availableCommands = null;
-    const { servers: mcpServers, browserUnavailable } = await this.buildMcpServers(
-      record,
-      init,
-      consentBudgetMs,
-    );
+    const {
+      servers: mcpServers,
+      browserUnavailable,
+      browserInjected,
+    } = await this.buildMcpServers(record, ticket, init, consentBudgetMs);
+    if (!isCurrentLaunch(record, ticket)) return false;
+    record.browserInjected = browserInjected;
     this.noteBrowserUnavailable(record, browserUnavailable);
     try {
       const session = await conn.agent.request(acpMethods.agent.session.new, {
         cwd: record.cwd,
         mcpServers,
       });
+      if (!isCurrentLaunch(record, ticket)) return false;
       record.sessionId = session.sessionId;
       record.info.resumable = resumableFromCapabilities(init);
       record.confirmedContextWindow = appliedContextWindow(record);
@@ -2082,37 +2300,43 @@ export class AcpThreadManager {
         this.emitInfo(record);
       }
     } catch (err) {
+      const agentMessage = agentErrorMessage(err);
       if (isAuthRequiredError(err)) {
-        if (onAuthRequired === 'report') return 'auth-required';
-        this.emitStatus(record, 'auth_required', `sign in required: ${agentErrorMessage(err)}`, {
+        const detail = `sign in required: ${agentMessage}`;
+        const failure: ThreadFailureDetail = {
           reason: 'auth-required',
-          agentMessage: agentErrorMessage(err),
+          agentMessage,
           machineDetail: authMachineDetail(err, record),
           authMethods: threadAuthMethods(init.authMethods, record.terminalAuthBase),
-        });
-      } else {
-        const tail = await stderrTailDetail(record);
-        this.emitStatus(record, 'error', `session setup failed: ${agentErrorMessage(err)}`, {
-          reason: 'session-setup',
-          agentMessage: agentErrorMessage(err),
-          machineDetail: joinMachineDetail({
-            primary: agentErrorData(err),
-            tail,
-          }),
-        });
-        if (!isThreadClosed(record)) await this.teardownFailedAgent(record);
+        };
+        if (!isCurrentLaunch(record, ticket)) {
+          this.logSuppressedStatus(record, 'auth_required', detail, failure);
+          return false;
+        }
+        if (onAuthRequired === 'report') return 'auth-required';
+        this.emitStatus(record, 'auth_required', detail, failure);
+        return false;
       }
+      const ownsStderrTail = isCurrentLaunch(record, ticket) || isThreadClosed(record);
+      await this.failLaunch(record, ticket, `session setup failed: ${agentMessage}`, {
+        reason: 'session-setup',
+        agentMessage,
+        machineDetail: joinMachineDetail({
+          primary: agentErrorData(err),
+          tail: ownsStderrTail ? await stderrTailDetail(record) : undefined,
+        }),
+      });
       return false;
     }
-    if (isThreadClosed(record)) return false;
+    if (!isCurrentLaunch(record, ticket)) return false;
 
     if (settings?.config !== undefined) {
-      await this.applyInitialConfig(record, conn, settings.config);
-      if (isThreadClosed(record)) return false;
+      await this.applyInitialConfig(record, ticket, conn, settings.config);
+      if (!isCurrentLaunch(record, ticket)) return false;
     }
     if (settings?.modeId !== undefined) {
-      await this.applyInitialMode(record, conn, settings.modeId);
-      if (isThreadClosed(record)) return false;
+      await this.applyInitialMode(record, ticket, conn, settings.modeId);
+      if (!isCurrentLaunch(record, ticket)) return false;
     }
 
     this.emitStatus(record, 'ready');
@@ -2126,6 +2350,7 @@ export class AcpThreadManager {
   ): Promise<ThreadInfo> {
     if (this.destroyed) throw new ThreadOpError('capacity', 'server is shutting down');
     const t = this.mustGet(threadId);
+    if (t.closed) throw new ThreadOpError('not-ready', 'the thread is closing');
     if (t.info.archived !== true) {
       throw new ThreadOpError('not-ready', 'thread is not archived');
     }
@@ -2148,6 +2373,7 @@ export class AcpThreadManager {
           `maximum of ${this.maxThreads} concurrent agent threads`,
         );
       }
+      const ticket = beginLaunch(t);
       t.info.agent = agentInfo;
       t.info.archived = false;
       t.info.availableCommands = null;
@@ -2175,7 +2401,13 @@ export class AcpThreadManager {
             'this thread never completed an agent session',
           );
         }
-        const handshake = await this.connectAgent(t, custom, 'reuse', BLOCKING_CONSENT_TIMEOUT_MS);
+        const handshake = await this.connectAgent(
+          t,
+          ticket,
+          custom,
+          'reuse',
+          BLOCKING_CONSENT_TIMEOUT_MS,
+        );
         if (handshake === null) {
           throw new ThreadOpError('not-ready', 'thread closed during resume');
         }
@@ -2183,11 +2415,15 @@ export class AcpThreadManager {
         t.info.resumable = resumableFromCapabilities(init);
         t.confirmedContextWindow = appliedContextWindow(t);
         t.info.contextWindow = t.confirmedContextWindow;
-        const { servers: mcpServers, browserUnavailable } = await this.buildMcpServers(
-          t,
-          init,
-          BLOCKING_CONSENT_TIMEOUT_MS,
-        );
+        const {
+          servers: mcpServers,
+          browserUnavailable,
+          browserInjected,
+        } = await this.buildMcpServers(t, ticket, init, BLOCKING_CONSENT_TIMEOUT_MS);
+        if (!isCurrentLaunch(t, ticket)) {
+          throw new ThreadOpError('not-ready', 'thread closed during resume');
+        }
+        t.browserInjected = browserInjected;
         this.noteBrowserUnavailable(t, browserUnavailable);
         const caps = init.agentCapabilities;
         const viaResume = caps?.sessionCapabilities?.resume != null;
@@ -2221,6 +2457,9 @@ export class AcpThreadManager {
             `${t.info.agent.name} doesn't support resuming previous sessions`,
           );
         }
+        if (!isCurrentLaunch(t, ticket)) {
+          throw new ThreadOpError('not-ready', 'thread closed during resume');
+        }
         t.sessionId = sessionId;
         const resumedConfig: Record<string, string | boolean> = Object.fromEntries(
           (t.info.configOptions ?? []).map((option) => [option.id, option.currentValue]),
@@ -2232,11 +2471,15 @@ export class AcpThreadManager {
         if (configOptions !== undefined && configOptions !== null) {
           t.info.configOptions = configOptions;
         }
-        await this.applyInitialConfig(t, conn, resumedConfig, configOptions == null);
-        if (t.closed) throw new ThreadOpError('not-ready', 'thread closed during resume');
+        await this.applyInitialConfig(t, ticket, conn, resumedConfig, configOptions == null);
+        if (!isCurrentLaunch(t, ticket)) {
+          throw new ThreadOpError('not-ready', 'thread closed during resume');
+        }
         if (resumedModeId !== undefined) {
-          await this.applyInitialMode(t, conn, resumedModeId, modes == null);
-          if (t.closed) throw new ThreadOpError('not-ready', 'thread closed during resume');
+          await this.applyInitialMode(t, ticket, conn, resumedModeId, modes == null);
+          if (!isCurrentLaunch(t, ticket)) {
+            throw new ThreadOpError('not-ready', 'thread closed during resume');
+          }
         }
         this.emitStatus(t, 'ready');
         this.opts.log.info(
@@ -2253,7 +2496,7 @@ export class AcpThreadManager {
         }
         return { ...t.info };
       } catch (err) {
-        await this.abortResume(t, await connectionFailureDetail(err, t));
+        await this.abortResume(t, await connectionFailureDetail(err, t, true));
         if (err instanceof ThreadOpError) throw err;
         if (err instanceof AgentLaunchError) {
           throw new ThreadOpError(
@@ -2281,30 +2524,23 @@ export class AcpThreadManager {
   async setContextWindow(threadId: string, tokens: number): Promise<ThreadInfo> {
     if (this.destroyed) throw new ThreadOpError('capacity', 'server is shutting down');
     const t = this.mustGet(threadId);
-    if (!Number.isFinite(tokens) || tokens <= 0) {
-      throw new ThreadOpError('not-ready', 'a context window must be a positive number of tokens');
-    }
-    const change = contextWindowChangeFor({
-      agentId: t.agentRef.id,
-      archived: t.info.archived === true,
-      turnActive: t.turnActive,
-      hasStartedWork: this.hasStartedWork(threadId),
-    });
-    if (change.kind === 'unsupported') {
-      throw new ThreadOpError('not-ready', 'this agent takes its context window from the model');
-    }
-    if (change.kind === 'needs-new-chat') {
-      throw new ThreadOpError('not-ready', 'start a new chat to change the context window');
-    }
-    if (t.resumeInFlight) throw new ThreadOpError('not-ready', 'a restart is already in progress');
+    this.assertContextWindowChangeable(t, tokens);
+    const { custom } = await this.resolveAgentInfo(t.agentRef);
+    this.assertContextWindowChangeable(t, tokens);
 
     const previousWindow = t.launchSettings?.contextWindow;
     const previousConfirmed = t.confirmedContextWindow ?? null;
     t.launchSettings = { ...t.launchSettings, contextWindow: Math.floor(tokens) };
     t.resumeInFlight = true;
+    const carried = t.launchTicket?.initialPrompt ?? null;
+    const ticket = beginLaunch(t);
     let applied = false;
+    t.sessionBeforeRestart = {
+      sessionId: t.sessionId,
+      resumable: t.info.resumable,
+      contextWindow: t.info.contextWindow,
+    };
     try {
-      const { custom } = await this.resolveAgentInfo(t.agentRef);
       await this.teardownFailedAgent(t);
       t.stderrTail = [];
       t.cancelRequested = false;
@@ -2312,16 +2548,20 @@ export class AcpThreadManager {
       this.emitStatus(t, 'spawning');
       await this.startThread(
         t,
+        ticket,
         { agent: t.agentRef, settings: t.launchSettings },
         custom,
         BLOCKING_CONSENT_TIMEOUT_MS,
       );
-      if (t.closed) {
-        throw new ThreadOpError('spawn-failed', 'thread closed during the context window change');
+      if (!isCurrentLaunch(t, ticket)) {
+        throw new ThreadOpError('not-ready', 'thread closed during the context window change');
       }
       const settled = this.getInfo(threadId)?.status;
       if (settled === 'ready' || settled === 'running') {
         applied = true;
+        if (carried !== null) {
+          this.dispatchPrompt(t, carried.content, carried.attachments, { echo: true });
+        }
         return { ...t.info };
       }
       throw new ThreadOpError(
@@ -2334,34 +2574,62 @@ export class AcpThreadManager {
       this.emitStatus(t, 'error', detail, { reason: 'connect', agentMessage: detail });
       throw new ThreadOpError('spawn-failed', detail);
     } finally {
+      if (!applied && carried !== null) {
+        this.opts.log.info(
+          { threadId, agentId: t.agentRef.id },
+          '[acp-threads] pending first message dropped: the context window change did not start the agent',
+        );
+      }
       if (!applied && this.threads.has(threadId)) {
         t.launchSettings = { ...t.launchSettings, contextWindow: previousWindow };
         t.confirmedContextWindow = previousConfirmed;
         t.info.contextWindow =
           this.getInfo(threadId)?.status === 'ready' ? previousConfirmed : null;
+        this.endRestart(t);
         this.emitInfo(t);
       }
+      t.sessionBeforeRestart = null;
       t.resumeInFlight = false;
     }
+  }
+
+  private assertContextWindowChangeable(t: ThreadRecord, tokens: number): void {
+    if (this.destroyed) throw new ThreadOpError('capacity', 'server is shutting down');
+    if (t.closed) throw new ThreadOpError('not-ready', 'the thread is closing');
+    if (!Number.isFinite(tokens) || tokens <= 0) {
+      throw new ThreadOpError('not-ready', 'a context window must be a positive number of tokens');
+    }
+    const change = contextWindowChangeFor({
+      agentId: t.agentRef.id,
+      archived: t.info.archived === true,
+      turnActive: t.turnActive,
+      hasStartedWork: this.hasStartedWork(t.info.threadId),
+    });
+    if (change.kind === 'unsupported') {
+      throw new ThreadOpError('not-ready', 'this agent takes its context window from the model');
+    }
+    if (change.kind === 'needs-new-chat') {
+      throw new ThreadOpError('not-ready', 'start a new chat to change the context window');
+    }
+    if (t.resumeInFlight) throw new ThreadOpError('not-ready', 'a restart is already in progress');
   }
 
   async retryThread(threadId: string): Promise<ThreadInfo> {
     if (this.destroyed) throw new ThreadOpError('capacity', 'server is shutting down');
     const t = this.mustGet(threadId);
-    if (t.info.archived === true) {
-      throw new ThreadOpError('not-ready', 'the thread is archived — resume it instead');
-    }
-    if (t.info.status !== 'error' && t.info.status !== 'auth_required' && !t.authInFlight) {
-      throw new ThreadOpError('not-ready', 'this thread did not fail to start');
-    }
-    if (t.resumeInFlight) {
-      throw new ThreadOpError('not-ready', 'a retry is already in progress');
-    }
+    this.assertRetryable(t);
+    const { info: agentInfo, custom } = await this.resolveAgentInfo(t.agentRef);
+    this.assertRetryable(t);
     t.resumeInFlight = true;
+    const ticket = beginLaunch(t);
+    t.sessionBeforeRestart = {
+      sessionId: t.sessionId,
+      resumable: t.info.resumable,
+      contextWindow: t.info.contextWindow,
+    };
     try {
       resetSharedLoginShellPathProvider();
       this.healthyInterpreters.clear();
-      const { info: agentInfo, custom } = await this.resolveAgentInfo(t.agentRef);
       await this.teardownFailedAgent(t);
       t.info.agent = agentInfo;
       t.stderrTail = [];
@@ -2371,6 +2639,7 @@ export class AcpThreadManager {
       try {
         await this.startThread(
           t,
+          ticket,
           { agent: t.agentRef, settings: t.launchSettings },
           custom,
           BLOCKING_CONSENT_TIMEOUT_MS,
@@ -2381,7 +2650,9 @@ export class AcpThreadManager {
         this.emitStatus(t, 'error', detail, { reason: 'connect', agentMessage: detail });
         throw new ThreadOpError('spawn-failed', detail);
       }
-      if (t.closed) throw new ThreadOpError('not-ready', 'thread closed during retry');
+      if (!isCurrentLaunch(t, ticket)) {
+        throw new ThreadOpError('not-ready', 'thread closed during retry');
+      }
       const settled = this.getInfo(threadId)?.status;
       if (settled === 'ready' || settled === 'running') {
         this.opts.log.info(
@@ -2392,7 +2663,22 @@ export class AcpThreadManager {
       }
       throw new ThreadOpError('spawn-failed', lastFailureMessage(t) ?? 'the agent failed to start');
     } finally {
+      if (this.threads.has(threadId) && this.endRestart(t)) this.emitInfo(t);
       t.resumeInFlight = false;
+    }
+  }
+
+  private assertRetryable(t: ThreadRecord): void {
+    if (this.destroyed) throw new ThreadOpError('capacity', 'server is shutting down');
+    if (t.closed) throw new ThreadOpError('not-ready', 'the thread is closing');
+    if (t.info.archived === true) {
+      throw new ThreadOpError('not-ready', 'the thread is archived — resume it instead');
+    }
+    if (t.info.status !== 'error' && t.info.status !== 'auth_required' && !t.authInFlight) {
+      throw new ThreadOpError('not-ready', 'this thread did not fail to start');
+    }
+    if (t.resumeInFlight) {
+      throw new ThreadOpError('not-ready', 'a retry is already in progress');
     }
   }
 
@@ -2408,6 +2694,7 @@ export class AcpThreadManager {
   async authenticateThread(threadId: string, methodId: string): Promise<ThreadInfo> {
     if (this.destroyed) throw new ThreadOpError('capacity', 'server is shutting down');
     const t = this.mustGet(threadId);
+    if (t.closed) throw new ThreadOpError('not-ready', 'the thread is closing');
     if (t.info.archived === true) {
       throw new ThreadOpError('not-ready', 'the thread is archived — resume it instead');
     }
@@ -2416,7 +2703,8 @@ export class AcpThreadManager {
     }
     const conn = t.conn;
     const init = t.lastInit;
-    if (conn === null || init === null || t.child === null) {
+    const ticket = t.launchTicket;
+    if (conn === null || init === null || t.child === null || ticket === null) {
       throw new ThreadOpError(
         'not-ready',
         `${t.info.agent.name} is no longer running — use Retry to start it again`,
@@ -2451,10 +2739,11 @@ export class AcpThreadManager {
         });
         throw new ThreadOpError('not-ready', message);
       }
-      if (t.closed) throw new ThreadOpError('not-ready', 'thread closed during sign-in');
+      if (isThreadClosed(t)) throw new ThreadOpError('not-ready', 'thread closed during sign-in');
       if (t.conn !== conn) throw threadRestartedDuringSignIn();
       const opened = await this.openSession(
         t,
+        ticket,
         conn,
         init,
         t.launchSettings,
@@ -2482,6 +2771,8 @@ export class AcpThreadManager {
         }
       }
       if (opened !== true) {
+        if (isThreadClosed(t)) throw new ThreadOpError('not-ready', 'thread closed during sign-in');
+        if (!isCurrentLaunch(t, ticket)) throw threadRestartedDuringSignIn();
         throw new ThreadOpError(
           'not-ready',
           lastFailureMessage(t) ?? `${t.info.agent.name} still couldn't start a conversation`,
@@ -2512,8 +2803,9 @@ export class AcpThreadManager {
   }
 
   private async abortResume(t: ThreadRecord, failure: ThreadFailureDetail): Promise<void> {
+    t.launchTicket = null;
     if (isThreadClosed(t)) {
-      await this.teardownFailedAgent(t);
+      await this.stopFailedAgent(t);
       this.emitStatus(t, 'exited', 'resume failed', failure);
       return;
     }
@@ -3068,6 +3360,7 @@ export class AcpThreadManager {
 
   private async applyInitialConfig(
     record: ThreadRecord,
+    ticket: LaunchTicket,
     conn: NonNullable<ThreadRecord['conn']>,
     config: Record<string, string | boolean>,
     sessionStateUnknown = false,
@@ -3097,6 +3390,7 @@ export class AcpThreadManager {
             acpMethods.agent.session.setConfigOption,
             request,
           );
+          if (!isCurrentLaunch(record, ticket)) return;
           record.info.configOptions = response.configOptions;
           rejected.delete(configId);
           applied = true;
@@ -3108,7 +3402,7 @@ export class AcpThreadManager {
             '[acp-threads] initial config apply attempt failed',
           );
         }
-        if (record.closed) return;
+        if (!isCurrentLaunch(record, ticket)) return;
       }
       if (!changed) break;
       pending = Object.entries(config).filter(
@@ -3149,6 +3443,7 @@ export class AcpThreadManager {
 
   private async applyInitialMode(
     record: ThreadRecord,
+    ticket: LaunchTicket,
     conn: NonNullable<ThreadRecord['conn']>,
     modeId: string,
     sessionStateUnknown = false,
@@ -3161,6 +3456,7 @@ export class AcpThreadManager {
         if (!sessionStateUnknown && modes.currentModeId === modeId) return;
         try {
           await conn.agent.request(acpMethods.agent.session.setMode, { sessionId, modeId });
+          if (!isCurrentLaunch(record, ticket)) return;
           record.info.modes = { ...modes, currentModeId: modeId };
           this.emitInfo(record);
         } catch (err) {
@@ -3182,6 +3478,7 @@ export class AcpThreadManager {
         acpMethods.agent.session.setConfigOption,
         { sessionId, configId: option.id, value: modeId },
       );
+      if (!isCurrentLaunch(record, ticket)) return;
       record.info.configOptions = response.configOptions;
       this.emitInfo(record);
     } catch (err) {
@@ -3252,6 +3549,7 @@ export class AcpThreadManager {
     const t = this.threads.get(threadId);
     if (t === undefined || t.info.archived === true || t.closed) return;
     t.closed = true;
+    t.launchTicket = null;
     this.clearSteer(t);
     this.failPendingPermissions(t);
     this.failPendingConsents(t);
@@ -3276,20 +3574,14 @@ export class AcpThreadManager {
     await t.terminals?.disposeAll();
     t.terminals = null;
     this.opts.agentPresenceBroadcaster?.clearPresence(toBroadcasterKey(t.agentSessionId));
-    await this.opts.sessionManager.closeAllForAgent(t.agentSessionId).catch((err) => {
-      this.opts.log.warn({ err, threadId }, '[acp-threads] session cleanup failed');
-    });
+    await this.opts.sessionManager
+      .closeAllForAgent(toBroadcasterKey(t.agentSessionId))
+      .catch((err) => {
+        this.opts.log.warn({ err, threadId }, '[acp-threads] session cleanup failed');
+      });
     const failedStart = t.info.status === 'error' || t.info.status === 'auth_required';
     if (!t.hadUserMessage && !failedStart) {
-      this.threads.delete(threadId);
-      t.subscribers.clear();
-      if (t.flushTimer !== null) {
-        clearTimeout(t.flushTimer);
-        t.flushTimer = null;
-      }
-      this.clearStall(t);
-      await this.persistence.whenIdle(threadId);
-      await this.persistence.delete(threadId);
+      await this.forgetThread(t);
       this.opts.log.info({ threadId }, '[acp-threads] empty thread discarded on close');
       return;
     }
@@ -3317,6 +3609,12 @@ export class AcpThreadManager {
     if (t.resumeInFlight) {
       throw new ThreadOpError('not-ready', 'a resume is in progress');
     }
+    await this.forgetThread(t);
+    this.opts.log.info({ threadId }, '[acp-threads] thread deleted');
+  }
+
+  private async forgetThread(t: ThreadRecord): Promise<void> {
+    const threadId = t.info.threadId;
     this.threads.delete(threadId);
     t.subscribers.clear();
     if (t.flushTimer !== null) {
@@ -3331,7 +3629,6 @@ export class AcpThreadManager {
         this.opts.log.warn({ err, threadId }, '[acp-threads] removing browser folders failed');
       });
     }
-    this.opts.log.info({ threadId }, '[acp-threads] thread deleted');
   }
 
   async destroy(): Promise<void> {
@@ -3494,72 +3791,31 @@ export class AcpThreadManager {
     record: ThreadRecord,
     requestedPath: string,
     content: string,
-  ): Promise<void> {
+  ): Promise<WriteTextFileResponse> {
     this.touchTurnActivity(record);
     const target = await this.confinePath(requestedPath);
     if (target.docName !== null) {
-      const session = await this.opts.sessionManager.getSession(
-        target.docName,
-        record.agentSessionId,
-        {
-          displayName: record.info.agent.name,
-          colorSeed: record.agentSessionId,
-          clientName: record.info.agent.id,
-        },
-      );
-      const embedResolver =
-        this.opts.resolveEmbed !== undefined
-          ? { resolveEmbed: this.opts.resolveEmbed, sourcePath: target.rel }
-          : undefined;
-      const suppliedWriterId = sessionWriterId(session);
-      try {
-        session.dc.document.transact(() => {
-          const beforeBlocks = snapshotBlocks(session.dc.document);
-          applyAgentMarkdownWrite(
-            session.dc.document,
-            content,
-            'replace',
-            embedResolver,
-            undefined,
-            agentWriteLossDetect(session),
-            suppliedWriterId,
-          );
-          const changedBlocks =
-            changedBlockRange(beforeBlocks, snapshotBlocks(session.dc.document)) ?? undefined;
-          const activityMap = session.dc.document.getMap('agent-flash');
-          activityMap.set(record.agentSessionId, {
-            agentId: record.agentSessionId,
-            timestamp: Date.now(),
-            type: 'insert',
-            description: `Added (${record.info.agent.name}): ${content.slice(0, 50)}`,
-            ...(changedBlocks !== undefined ? { changedBlocks } : {}),
-          });
-        }, session.origin);
-      } catch (error) {
-        if (error instanceof ConcurrentOverwriteRefusedError) {
-          logConcurrentOverwriteRefusal(error, 'acp-fs-write');
-          throw new RequestError(
-            CONCURRENT_OVERWRITE_REFUSED_CODE,
-            CONCURRENT_OVERWRITE_REFUSED_DETAIL,
-            {
-              type: CONCURRENT_OVERWRITE_REFUSED_TYPE,
-              file: error.file,
-              retryable: true,
-              retryAfterSeconds: CONCURRENT_OVERWRITE_RETRY_AFTER_SECONDS,
-            },
-          );
-        }
-        throw error;
+      if (this.opts.localApi === undefined) {
+        throw new Error(`document writes are not available here: ${requestedPath}`);
       }
+      const result = await writeDocumentThroughRoute(this.opts.localApi, {
+        docName: target.docName,
+        file: target.rel,
+        markdown: content,
+        agentId: record.agentSessionId,
+        agentName: record.info.agent.name,
+        clientName: record.info.agent.id,
+      });
       this.setPresence(record, target.docName);
-    } else {
-      if (this.opts.isIgnoredPath(target.rel)) {
-        throw new Error(`path is excluded from the project content scope: ${requestedPath}`);
-      }
-      const { tracedMkdir, tracedWriteFile } = await import('../fs-traced.ts');
-      await tracedMkdir(dirname(target.abs), { recursive: true });
-      await tracedWriteFile(target.abs, content);
+      return result;
     }
+    if (this.opts.isIgnoredPath(target.rel)) {
+      throw new Error(`path is excluded from the project content scope: ${requestedPath}`);
+    }
+    const { tracedMkdir, tracedWriteFile } = await import('../fs-traced.ts');
+    await tracedMkdir(dirname(target.abs), { recursive: true });
+    await tracedWriteFile(target.abs, content);
+    return {};
   }
 
   private confinePath(
@@ -3623,27 +3879,38 @@ export class AcpThreadManager {
     failure?: ThreadFailureDetail,
   ): void {
     if (isThreadClosed(t)) {
-      const log =
-        status === 'error' || status === 'auth_required' ? this.opts.log.warn : this.opts.log.info;
-      log.call(
-        this.opts.log,
-        {
-          threadId: t.info.threadId,
-          agentId: t.info.agent.id,
-          status,
-          suppressed: true,
-          detail: detail === undefined ? undefined : redactDiagnostic(detail),
-          reason: failure?.reason,
-          machineDetail:
-            failure?.machineDetail === undefined
-              ? undefined
-              : redactDiagnostic(failure.machineDetail),
-        },
-        '[acp-threads] status suppressed after thread close',
-      );
+      this.logSuppressedStatus(t, status, detail, failure);
       return;
     }
     this.recordTerminalStatus(t, status, detail, failure);
+  }
+
+  private logSuppressedStatus(
+    t: ThreadRecord,
+    status: ThreadStatus,
+    detail: string | undefined,
+    failure: ThreadFailureDetail | undefined,
+  ): void {
+    const log =
+      status === 'error' || status === 'auth_required' ? this.opts.log.warn : this.opts.log.info;
+    log.call(
+      this.opts.log,
+      {
+        threadId: t.info.threadId,
+        agentId: t.info.agent.id,
+        status,
+        suppressed: true,
+        detail: detail === undefined ? undefined : redactDiagnostic(detail),
+        reason: failure?.reason,
+        machineDetail:
+          failure?.machineDetail === undefined
+            ? undefined
+            : redactDiagnostic(failure.machineDetail),
+      },
+      isThreadClosed(t)
+        ? '[acp-threads] status suppressed after thread close'
+        : '[acp-threads] status suppressed for a superseded launch',
+    );
   }
 
   private recordTerminalStatus(
@@ -3656,6 +3923,17 @@ export class AcpThreadManager {
       t.info.queue = undefined;
       this.clearSteer(t);
       this.clearStall(t);
+    }
+    if (
+      t.launchTicket !== null &&
+      t.launchTicket.initialPrompt !== null &&
+      (status === 'exited' || status === 'error' || status === 'auth_required')
+    ) {
+      t.launchTicket.initialPrompt = null;
+      this.opts.log.info(
+        { threadId: t.info.threadId, agentId: t.info.agent.id, status },
+        '[acp-threads] pending first message dropped: the launch settled without starting a turn',
+      );
     }
     t.info.status = status;
     t.info.lastActivityAt = Date.now();
@@ -3698,12 +3976,43 @@ export class AcpThreadManager {
     this.emitInfo(t);
   }
 
+  private async failLaunch(
+    record: ThreadRecord,
+    ticket: LaunchTicket,
+    message: string | undefined,
+    failure: ThreadFailureDetail,
+  ): Promise<void> {
+    if (!isCurrentLaunch(record, ticket)) {
+      this.logSuppressedStatus(record, 'error', message, failure);
+      return;
+    }
+    this.emitStatus(record, 'error', message, failure);
+    if (isCurrentLaunch(record, ticket)) await this.teardownFailedAgent(record);
+  }
+
   private async teardownFailedAgent(t: ThreadRecord): Promise<void> {
+    t.sessionId = null;
+    t.info.resumable = false;
+    t.info.contextWindow = null;
+    await this.stopFailedAgent(t);
+  }
+
+  private endRestart(t: ThreadRecord): boolean {
+    const previous = t.sessionBeforeRestart;
+    t.sessionBeforeRestart = null;
+    if (previous === null || t.sessionId !== null) return false;
+    if (isThreadClosed(t)) {
+      t.sessionId = previous.sessionId;
+      t.info.resumable = previous.resumable;
+      t.info.contextWindow = previous.contextWindow;
+    }
+    return true;
+  }
+
+  private async stopFailedAgent(t: ThreadRecord): Promise<void> {
     this.failPendingPermissions(t);
     this.failPendingConsents(t);
     t.lastInit = null;
-    t.sessionId = null;
-    t.info.contextWindow = null;
     await this.stopAgentProcess(
       t,
       '[acp-threads] terminal cleanup on failed-agent teardown failed',
@@ -3740,10 +4049,11 @@ export class AcpThreadManager {
       chatGrants: _chatGrants,
       ...info
     } = t.info;
+    const restarting = t.sessionId === null ? t.sessionBeforeRestart : null;
     return {
       version: 1,
-      info,
-      sessionId: t.sessionId,
+      info: restarting === null ? info : { ...info, resumable: restarting.resumable },
+      sessionId: t.sessionId ?? restarting?.sessionId ?? null,
       cwd: t.cwd,
       agentRef: t.agentRef,
       docName: t.docName,
@@ -3853,16 +4163,22 @@ export async function confineToContentDir(
       if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
         throw new Error(`path escapes the content directory: ${requestedPath}`);
       }
-      const mdMatch = /\.(md|mdx)$/.exec(rel);
-      let docName: string | null = null;
-      if (mdMatch !== null) {
-        const candidate = rel.slice(0, -mdMatch[0].length).split(sep).join('/');
-        const relPosix = rel.split(sep).join('/');
-        if (!isSystemDoc(candidate) && !isConfigDoc(candidate) && !isExcludedPath(relPosix)) {
-          docName = candidate;
-        }
-      }
-      return { abs: resolved, rel: rel.split(sep).join('/'), docName };
+      const relPosix = rel.split(sep).join('/');
+      const mdMatch = /\.(md|mdx)$/.exec(relPosix);
+      const candidate =
+        mdMatch !== null
+          ? relPosix.slice(0, -mdMatch[0].length)
+          : isMermaidDoc(relPosix) || isExcalidrawDoc(relPosix) || isEditableTextDoc(relPosix)
+            ? relPosix
+            : null;
+      const docName =
+        candidate !== null &&
+        !isSystemDoc(candidate) &&
+        !isConfigDoc(candidate) &&
+        !isExcludedPath(relPosix)
+          ? candidate
+          : null;
+      return { abs: resolved, rel: relPosix, docName };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       const parent = dirname(existing);
@@ -3900,6 +4216,7 @@ function rehydratedRecord(meta: PersistedThreadMeta): ThreadRecord {
     lastInit: null,
     terminalAuthBase: null,
     sessionId: meta.sessionId,
+    sessionBeforeRestart: null,
     agentSessionId: `acp-${meta.info.threadId}`,
     events: [],
     baseSeq: meta.info.lastSeq + 1,
@@ -3908,6 +4225,7 @@ function rehydratedRecord(meta: PersistedThreadMeta): ThreadRecord {
     midTurnOnDisk: false,
     resumeInFlight: false,
     authInFlight: false,
+    launchTicket: null,
     suppressUpdates: false,
     lastSuppressedAt: 0,
     subscribers: new Set(),
@@ -4018,6 +4336,7 @@ function lastFailureMessage(t: ThreadRecord): string | undefined {
 async function connectionFailureDetail(
   err: unknown,
   record: ThreadRecord,
+  ownsStderrTail: boolean,
 ): Promise<ThreadFailureDetail> {
   const detail =
     err instanceof AgentLaunchError || err instanceof ThreadOpError ? err.message : String(err);
@@ -4026,7 +4345,7 @@ async function connectionFailureDetail(
     agentMessage: detail,
     machineDetail: joinMachineDetail({
       primary: err instanceof AgentLaunchError ? err.machineDetail : undefined,
-      tail: await stderrTailDetail(record),
+      tail: ownsStderrTail ? await stderrTailDetail(record) : undefined,
     }),
   };
 }
@@ -4041,6 +4360,19 @@ function queuedFromSteer(steer: SteerMessage): QueuedMessage {
 
 function isThreadClosed(t: ThreadRecord): boolean {
   return t.closed || t.info.archived === true;
+}
+
+function beginLaunch(
+  t: ThreadRecord,
+  initialPrompt: LaunchTicket['initialPrompt'] = null,
+): LaunchTicket {
+  const ticket: LaunchTicket = { initialPrompt };
+  t.launchTicket = ticket;
+  return ticket;
+}
+
+function isCurrentLaunch(t: ThreadRecord, ticket: LaunchTicket): boolean {
+  return t.launchTicket === ticket;
 }
 
 async function stderrTailDetail(t: ThreadRecord): Promise<string | undefined> {

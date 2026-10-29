@@ -97,13 +97,13 @@ for ref in "refs/tags/v$upstream_version" "refs/tags/$upstream_version" refs/hea
   if candidate=$(git rev-parse --verify --quiet "$ref^{commit}"); then
     git show "$candidate:packages/cli/package.json" > "$tmp/package" 2>/dev/null || cannot_run "upstream version cannot be read"
     candidate_version=$(awk -F '"' '/"version"[[:space:]]*:/ { print $4; exit }' "$tmp/package") || cannot_run "upstream version cannot be parsed"
-    if [ "$candidate_version" = "$upstream_version" ]; then
+    if [ "$candidate_version" = "$upstream_version" ] || { [ "$ref" = "refs/tags/$upstream_version" ] && [ "$candidate_version" = 0.0.0-unknown ]; }; then
       upstream=$candidate
       break
     fi
   fi
 done
-[ -n "$upstream" ] || cannot_run "OK_VERSION needs its upstream release commit or a matching main"
+[ -n "$upstream" ] || cannot_run "OK_VERSION needs its upstream release commit or a matching main; run scripts/tenant/ci.sh upstream-ref"
 
 identity_allowed() {
   [ "$1" = 'OpenKnowledge Release <noreply@example.com>' ] || grep -Fqx -- "$1" "$tmp/upstream-identities"

@@ -134,7 +134,7 @@ RELEASE_TAG=portable-v0.2.0
    ```
 
    The previous tag is the line after `$RELEASE_TAG` in the list.
-5. Check the public content. The first command makes sure that the check compares with the upstream release commit. That commit is the one commit `main reset: post-stable v<upstream version>` of the upstream branch, and it holds the pinned version. The upstream tag of a version is an earlier commit and does not hold that version. When the clone does not hold the commit, the command fetches the upstream branch. When no ref that `public-check.sh` reads names the commit, the command makes the local tag `<upstream version>` on it. It does not push the tag. Exit code 1 of the second command means a finding, and 2 means that the check cannot run.
+5. Check the public content. The first command selects the upstream release commit. It prefers the unique `main reset: post-stable v<upstream version>` commit with the pinned package version. Without one, it fetches `v<upstream version>` and verifies its first-parent ancestry. The tagged package version must match the pin or be upstream's unstamped source placeholder. The command fetches the upstream branch when needed. It makes the local tag `<upstream version>` when the content check needs that marker. It never pushes the marker. Exit code 1 of the second command means a finding. Exit code 2 means that the check cannot run.
 
    ```sh
    scripts/tenant/ci.sh upstream-ref

@@ -1,11 +1,18 @@
 import type { HandoffHostPlatform } from '@inkeep/open-knowledge-core/agent-registry';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type { OkBugReportScreenshot } from '@inkeep/open-knowledge-core/logger-types';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import type { BugReportCapture } from '@/lib/bug-report-capture';
 import {
   __resetLocalMenuActionBusForTests,
   subscribeLocalMenuAction,
 } from '@/lib/local-menu-action-bus';
+import {
+  __resetPaneVisibilityStoreForTests,
+  paneVisibilityStore,
+} from '@/lib/pane-visibility-store';
+import { installPointerPositionTracker } from '@/lib/pointer-position';
 import { __resetViewMenuStateForTests, setViewMenuState } from '@/lib/view-menu-state-store';
 import {
   restrictHandoffTargetPlatforms,
@@ -26,6 +33,7 @@ type CommandDialogProps = {
   description?: string;
   className?: string;
   commandProps?: Record<string, unknown>;
+  contentAttributes?: Record<string, string>;
   transition?: unknown;
   placement?: unknown;
 };
@@ -43,10 +51,10 @@ let activeTarget: { kind: string; [key: string]: unknown } | null = {
   docName: 'docs/active',
 };
 let requestDocPanelTabCalls: string[] = [];
-let seedDialogProps: Array<{ open: boolean }> = [];
+let seedDialogProps: Array<{ open: boolean; onSeedApplied?: () => void }> = [];
 let newItemDialogProps: Array<{ open: boolean; kind: string; initialDir: string }> = [];
 let createProjectDialogProps: Array<{ open: boolean; bridge: unknown }> = [];
-let reportBugDialogProps: Array<{ open: boolean; launcherBorne?: boolean }> = [];
+let reportBugDialogProps: Array<{ capture: BugReportCapture | null }> = [];
 let feedbackDialogProps: Array<{ open: boolean; source?: string }> = [];
 let commandDialogProps: CommandDialogProps[] = [];
 let refreshInstallStatesCalls = 0;
@@ -124,6 +132,7 @@ vi.doMock('@/components/ui/command', () => ({
   CommandShortcut: ({ children }: { children?: ReactNode }) => (
     <span data-testid="command-shortcut">{children}</span>
   ),
+  useSelectFirstItemOn: () => {},
 }));
 
 vi.doMock('@/components/doc-panel-events', () => ({
@@ -142,7 +151,7 @@ vi.doMock('@/components/NewItemDialog', () => ({
 }));
 
 vi.doMock('@/components/SeedDialog', () => ({
-  SeedDialog: (props: { open: boolean }) => {
+  SeedDialog: (props: { open: boolean; onSeedApplied?: () => void }) => {
     seedDialogProps.push(props);
     return <div data-open={String(props.open)} data-testid="seed-dialog" />;
   },
@@ -162,9 +171,9 @@ vi.doMock('@/components/CreateProjectDialog', () => ({
 }));
 
 vi.doMock('@/components/ReportBugDialog', () => ({
-  ReportBugDialog: (props: { open: boolean; launcherBorne?: boolean }) => {
+  ReportBugDialog: (props: { capture: BugReportCapture | null }) => {
     reportBugDialogProps.push(props);
-    return <div data-open={String(props.open)} data-testid="report-bug-dialog" />;
+    return <div data-open={String(props.capture !== null)} data-testid="report-bug-dialog" />;
   },
 }));
 
@@ -312,15 +321,25 @@ function createBridge({
 async function renderPalette({
   bridge = createBridge(),
   docName = 'docs/active',
+  withSingleFileModeProvider = false,
 }: {
   bridge?: (ReturnType<typeof createBridge> & { platform?: HandoffHostPlatform }) | null;
   docName?: string | null;
+  withSingleFileModeProvider?: boolean;
 } = {}) {
   activeDocName = docName;
   activeTarget = docName ? { kind: 'doc', docName } : null;
   const onOpenChange = vi.fn(() => {});
   const { CommandPalette } = await import('./CommandPalette');
-  render(<CommandPalette bridge={bridge as never} open={true} onOpenChange={onOpenChange} />);
+  const palette = (
+    <CommandPalette bridge={bridge as never} open={true} onOpenChange={onOpenChange} />
+  );
+  if (withSingleFileModeProvider) {
+    const { SingleFileModeProvider } = await import('@/lib/single-file-mode');
+    render(<SingleFileModeProvider>{palette}</SingleFileModeProvider>);
+  } else {
+    render(palette);
+  }
   await waitFor(() => expect(screen.getByRole('dialog')).not.toBeNull());
   return { bridge, onOpenChange };
 }
@@ -332,9 +351,39 @@ async function setQuery(value: string) {
   });
 }
 
+const SCREENSHOT: OkBugReportScreenshot = {
+  dataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+  width: 1200,
+  height: 800,
+};
+
+function installCaptureBridge(onCapture: () => void): void {
+  Object.defineProperty(window, 'okDesktop', {
+    configurable: true,
+    writable: true,
+    value: {
+      bugReport: {
+        captureScreenshot: () => {
+          onCapture();
+          return Promise.resolve(SCREENSHOT);
+        },
+      },
+    },
+  });
+}
+
+function clearCaptureBridge(): void {
+  Object.defineProperty(window, 'okDesktop', {
+    configurable: true,
+    writable: true,
+    value: undefined,
+  });
+}
+
 describe('CommandPalette DOM behavior', () => {
   beforeEach(() => {
     cleanup();
+    __resetPaneVisibilityStoreForTests();
     activeDocName = 'docs/active';
     activeTarget = { kind: 'doc', docName: 'docs/active' };
     pageListLoading = false;
@@ -343,6 +392,7 @@ describe('CommandPalette DOM behavior', () => {
     newItemDialogProps = [];
     createProjectDialogProps = [];
     reportBugDialogProps = [];
+    clearCaptureBridge();
     feedbackDialogProps = [];
     commandDialogProps = [];
     refreshInstallStatesCalls = 0;
@@ -540,7 +590,7 @@ describe('CommandPalette DOM behavior', () => {
     expect(createProjectDialogProps.at(-1)?.bridge).toBe(bridge);
   });
 
-  test('report-a-bug command is desktop-only, searchable by issue tokens, and opens ReportBugDialog', async () => {
+  test('report-a-bug command is desktop-only, searchable by issue tokens, leaves the palette out of the shot, then closes it', async () => {
     await renderPalette({ bridge: null });
 
     await setQuery('bug');
@@ -555,17 +605,45 @@ describe('CommandPalette DOM behavior', () => {
     const reportBug = screen.getByTestId('command-palette-report-bug');
     expect(reportBug.textContent).toContain('Report a bug');
 
-    fireEvent.click(reportBug);
-
-    expect(onOpenChange).toHaveBeenCalledWith(false);
-    await waitFor(() => {
-      expect(screen.getByTestId('report-bug-dialog').getAttribute('data-open')).toBe('true');
+    const stopPointerTracking = installPointerPositionTracker();
+    window.dispatchEvent(new PointerEvent('pointermove', { clientX: 40, clientY: 50 }));
+    let paletteAtCapture: {
+      inDocument: boolean;
+      hiddenAsLauncher: boolean;
+      closeRequested: boolean;
+    } | null = null;
+    installCaptureBridge(() => {
+      const palette = screen.queryByRole('dialog', { name: 'Workspace Command Palette' });
+      paletteAtCapture = {
+        inDocument: palette !== null,
+        hiddenAsLauncher:
+          document.documentElement.hasAttribute('data-bug-report-capturing') &&
+          commandDialogProps.at(-1)?.contentAttributes?.['data-bug-report-launcher'] === '',
+        closeRequested: onOpenChange.mock.calls.length > 0,
+      };
     });
-    expect(reportBugDialogProps.at(-1)?.open).toBe(true);
-    expect(reportBugDialogProps.at(-1)?.launcherBorne).toBe(true);
+    try {
+      fireEvent.click(reportBug);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('report-bug-dialog').getAttribute('data-open')).toBe('true');
+      });
+    } finally {
+      stopPointerTracking();
+    }
+    expect(paletteAtCapture).toEqual({
+      inDocument: true,
+      hiddenAsLauncher: true,
+      closeRequested: false,
+    });
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(reportBugDialogProps.at(-1)?.capture).toEqual({
+      screenshot: SCREENSHOT,
+      pointerMarked: false,
+    });
   });
 
-  test('the bug-report-history CTA opens the compose dialog launcher-free', async () => {
+  test('the bug-report-history CTA captures with the history still up, pointer marked, then opens', async () => {
     const bridge = createBridge();
     await renderPalette({ bridge });
 
@@ -573,13 +651,27 @@ describe('CommandPalette DOM behavior', () => {
     fireEvent.click(screen.getByTestId('command-palette-bug-report-history'));
 
     const cta = await screen.findByTestId('history-report-cta');
-    fireEvent.click(cta);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('report-bug-dialog').getAttribute('data-open')).toBe('true');
+    const stopPointerTracking = installPointerPositionTracker();
+    window.dispatchEvent(new PointerEvent('pointermove', { clientX: 40, clientY: 50 }));
+    let historyAtCapture: boolean | null = null;
+    installCaptureBridge(() => {
+      historyAtCapture = screen.queryByTestId('history-report-cta') !== null;
     });
-    expect(reportBugDialogProps.at(-1)?.open).toBe(true);
-    expect(reportBugDialogProps.at(-1)?.launcherBorne).toBe(false);
+    try {
+      fireEvent.click(cta);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('report-bug-dialog').getAttribute('data-open')).toBe('true');
+      });
+    } finally {
+      stopPointerTracking();
+    }
+    expect(historyAtCapture).toBe(true);
+    expect(screen.queryByTestId('history-report-cta')).toBeNull();
+    expect(reportBugDialogProps.at(-1)?.capture).toEqual({
+      screenshot: SCREENSHOT,
+      pointerMarked: true,
+    });
   });
 
   test('send-feedback command renders on both hosts and opens FeedbackFormDialog', async () => {
@@ -619,6 +711,25 @@ describe('CommandPalette DOM behavior', () => {
       expect(screen.getByTestId('seed-dialog').getAttribute('data-open')).toBe('true');
     });
     expect(seedDialogProps.at(-1)?.open).toBe(true);
+  });
+
+  test('an applied starter pack asks a hidden editor to show', async () => {
+    await renderPalette({ bridge: null });
+    await setQuery('scaffold');
+    fireEvent.click(screen.getByTestId('command-palette-initialize-starter-pack'));
+    await waitFor(() => expect(seedDialogProps.at(-1)?.open).toBe(true));
+
+    const requests: Array<{ pane: string; open: boolean }> = [];
+    paneVisibilityStore.subscribeRequests((request) => requests.push(request));
+    paneVisibilityStore.publish({
+      editor: { open: false, onScreen: false },
+      agents: null,
+      terminal: null,
+    });
+
+    act(() => seedDialogProps.at(-1)?.onSeedApplied?.());
+
+    expect(requests).toEqual([{ pane: 'editor', open: true }]);
   });
 
   test('CommandDialog receives no transition or placement prop from CommandPalette', async () => {
@@ -858,6 +969,118 @@ describe('CommandPalette DOM behavior', () => {
 
     await setQuery('report zzzznomatch');
     expect(screen.queryByTestId('command-palette-report-bug')).toBeNull();
+  });
+
+  test('a command whose label matches leads a command that matched only a keyword', async () => {
+    pageListLoading = true;
+    await renderPalette({ bridge: createBridge() });
+
+    await setQuery('check');
+
+    await waitFor(() =>
+      expect(screen.getByTestId('command-palette-search-preparing')).not.toBeNull(),
+    );
+    const commandIds = screen
+      .getAllByRole('option')
+      .map((option) => option.getAttribute('data-testid'))
+      .filter((id) => id?.startsWith('command-palette-'));
+    expect(commandIds[0]).toBe('command-palette-check-for-updates');
+    expect(commandIds).toContain('command-palette-switch-worktree');
+    expect(commandIds.indexOf('command-palette-toggle-spell-check')).toBeLessThan(
+      commandIds.indexOf('command-palette-switch-worktree'),
+    );
+    expect(screen.queryByTestId('command-palette-search-hint-empty')).toBeNull();
+  });
+
+  test('a label match in a later group leads a keyword-only match in an earlier group', async () => {
+    await renderPalette({ bridge: createBridge() });
+
+    await setQuery('show');
+
+    const commandIds = screen
+      .getAllByRole('option')
+      .map((option) => option.getAttribute('data-testid'));
+    expect(commandIds).toContain('command-palette-open-graph');
+    expect(commandIds.indexOf('command-palette-toggle-show-hidden-files')).toBeLessThan(
+      commandIds.indexOf('command-palette-open-graph'),
+    );
+    expect(commandIds[0]).not.toBe('command-palette-open-graph');
+  });
+
+  test('a dynamic block leads with its strongest row, not its source order', async () => {
+    worktreeModelMock = {
+      mainRoot: '/projects/current',
+      currentBranch: 'main',
+      remoteBranches: [],
+      entries: [
+        {
+          branch: 'dev',
+          worktreePath: '/projects/current/.ok/worktrees/dev',
+          isCurrent: false,
+          isMain: false,
+          locked: false,
+        },
+        {
+          branch: 'worktree-cleanup',
+          worktreePath: '/projects/current/.ok/worktrees/worktree-cleanup',
+          isCurrent: false,
+          isMain: false,
+          locked: false,
+        },
+      ],
+    };
+    await renderPalette({ bridge: createBridge() });
+
+    await setQuery('worktree');
+
+    const commandIds = screen
+      .getAllByRole('option')
+      .map((option) => option.getAttribute('data-testid'));
+    expect(commandIds).toContain('command-palette-worktree-dev');
+    expect(commandIds[0]).toBe('command-palette-worktree-worktree-cleanup');
+  });
+
+  test('a dynamic block whose rows match only by keyword follows a label-matching command group', async () => {
+    worktreeModelMock = {
+      mainRoot: '/projects/current',
+      currentBranch: 'main',
+      remoteBranches: [],
+      entries: [
+        {
+          branch: 'dev',
+          worktreePath: '/projects/current/.ok/worktrees/dev',
+          isCurrent: false,
+          isMain: false,
+          locked: false,
+        },
+      ],
+    };
+    await renderPalette({ bridge: createBridge() });
+
+    await setQuery('worktree');
+
+    const commandIds = screen
+      .getAllByRole('option')
+      .map((option) => option.getAttribute('data-testid'));
+    expect(commandIds).toContain('command-palette-worktree-dev');
+    expect(commandIds.indexOf('command-palette-new-worktree')).toBeLessThan(
+      commandIds.indexOf('command-palette-worktree-dev'),
+    );
+  });
+
+  test('within a group, label matches lead keyword-only matches', async () => {
+    await renderPalette({ bridge: createBridge() });
+
+    await setQuery('copy');
+
+    const commandIds = screen
+      .getAllByRole('option')
+      .map((option) => option.getAttribute('data-testid'));
+    expect(commandIds[0]).toBe('command-palette-copy-full-path');
+    expect(commandIds).toContain('command-palette-duplicate');
+    expect(commandIds.indexOf('command-palette-copy-relative-path')).toBeLessThan(
+      commandIds.indexOf('command-palette-duplicate'),
+    );
   });
 
   test('a rejected worktree scope shows its cause, refreshes, and never opens', async () => {
@@ -1169,6 +1392,7 @@ describe('Cmd+K menu-parity backfill', () => {
       query: 'copy relative path',
       id: 'copy-relative-path',
     },
+    { testid: 'command-palette-toggle-editor', query: 'hide editor', id: 'toggle-editor' },
   ];
 
   for (const { testid, query, id } of ID_BACKED) {
@@ -1192,6 +1416,22 @@ describe('Cmd+K menu-parity backfill', () => {
     expect(screen.getByTestId('command-palette-navigate-forward').textContent).toMatch(
       /⌘ \]|Alt →/,
     );
+  });
+
+  test('each pane toggle row wears the glyph its header pane button wears', async () => {
+    await renderPalette({ bridge: createBridge() });
+
+    await setQuery('agents');
+    const agents = screen.getByTestId('command-palette-toggle-agent-panel').querySelector('svg');
+    expect(agents?.classList.contains('lucide-sparkles')).toBe(true);
+
+    await setQuery('hide terminal');
+    const terminal = screen.getByTestId('command-palette-toggle-terminal').querySelector('svg');
+    expect(terminal?.classList.contains('lucide-square-terminal')).toBe(true);
+
+    await setQuery('hide editor');
+    const editor = screen.getByTestId('command-palette-toggle-editor').querySelector('svg');
+    expect(editor?.querySelector('path[d="M9 4v16"]')).not.toBeNull();
   });
 
   test('Ratchet C: every classified palette-command id renders a row or is a pre-existing surface', async () => {
@@ -1335,6 +1575,48 @@ describe('Cmd+K menu-parity backfill', () => {
     expect(screen.getByTestId('command-palette-toggle-terminal').textContent).toContain(
       'Show Terminal',
     );
+  });
+
+  test('a project window offers Show/Hide Editor and a single-file window offers neither', async () => {
+    setViewMenuState({ editorVisible: true });
+    await renderPalette({ bridge: createBridge() });
+    await setQuery('hide editor');
+    expect(screen.getByTestId('command-palette-toggle-editor').textContent).toContain(
+      'Hide Editor',
+    );
+
+    cleanup();
+    setViewMenuState({ editorVisible: false });
+    await renderPalette({ bridge: createBridge() });
+    await setQuery('show editor');
+    expect(screen.getByTestId('command-palette-toggle-editor').textContent).toContain(
+      'Show Editor',
+    );
+
+    cleanup();
+    const projectBridge = createBridge();
+    const singleFileBridge = {
+      ...projectBridge,
+      config: { ...projectBridge.config, singleFile: true },
+    };
+    Object.defineProperty(window, 'okDesktop', { configurable: true, value: singleFileBridge });
+    try {
+      for (const editorVisible of [true, false]) {
+        setViewMenuState({ editorVisible });
+        await renderPalette({ bridge: singleFileBridge, withSingleFileModeProvider: true });
+        for (const query of ['editor', 'show editor', 'hide editor']) {
+          await setQuery(query);
+          expect(screen.queryByTestId('command-palette-toggle-editor')).toBeNull();
+          const editorRows = screen
+            .queryAllByRole('option')
+            .filter((row) => /Show Editor|Hide Editor/.test(row.textContent ?? ''));
+          expect(editorRows).toEqual([]);
+        }
+        cleanup();
+      }
+    } finally {
+      Reflect.deleteProperty(window, 'okDesktop');
+    }
   });
 
   test('terminal placement label and action invert with the current home', async () => {

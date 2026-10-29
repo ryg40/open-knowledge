@@ -125,10 +125,7 @@ describe('dispatchComments', () => {
     const store = await import('./store');
     await store.refresh();
 
-    let release = (): void => {};
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
     const composed: number[] = [];
 
     const first = dispatchWith(store, async (items) => {
@@ -364,5 +361,25 @@ describe('the composed instruction for a property comment', () => {
     expect(out).toContain('1. In `recipes/one`, on the `date` property');
     expect(out).toContain('2. In `recipes/two`, on this passage:');
     expect(out).toContain('   > Whisk the peanut sauce');
+  });
+});
+
+describe('composeCommentBatchInstruction — locating context keeps characters whole', () => {
+  test('context cut at an emoji drops the whole emoji on either side', () => {
+    const prompt = composeCommentBatchInstruction(
+      [
+        {
+          docName: 'notes/one',
+          body: 'fix this',
+          quote: 'repeated',
+          anchorLost: false,
+          repeats: true,
+          prefix: `\u{1F600}${'a'.repeat(47)}`,
+          suffix: `${'b'.repeat(47)}\u{1F600}`,
+        },
+      ],
+      '',
+    );
+    expect(prompt).toContain(`between "…${'a'.repeat(47)}" and "${'b'.repeat(47)}…"`);
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "@inkeep/open-knowledge",
-  "version": "0.83.2",
+  "version": "0.0.0-unknown",
   "description": "Local-first, agent-friendly Markdown knowledge base with a cross-platform CLI and web editor",
   "keywords": [
     "knowledge-base",
@@ -51,7 +51,7 @@
     "build": "pnpm run build:cli && pnpm run build:assets",
     "test": "vitest run",
     "test:e2e:cli": "vitest run --config vitest.e2e.config.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "check:dts": "node scripts/check-published-dts.mjs",
     "verify:package": "node scripts/verify-package-surface.mjs",
     "prepublishOnly": "bash ../../scripts/check-notices-clean.sh && pnpm run build && pnpm run check:dts && pnpm run verify:package"
@@ -76,7 +76,7 @@
     "yaml": "^2.7.1",
     "yazl": "^3.3.1",
     "yjs": "^13.6.30",
-    "zod": "^4.3.6"
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
     "@parcel/watcher": "^2.5.6"
@@ -92,6 +92,7 @@
     "ajv": "^8.18.0",
     "ajv-formats": "^3.0.1",
     "tsdown": "^0.22.14",
+    "tsrs": "0.18.0-ts7.1.0-dev.20260929",
     "typescript": "~7.0.2"
   }
 }

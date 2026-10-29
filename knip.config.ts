@@ -40,6 +40,7 @@ export default {
     'xdg-mime', // Linux default-app query — desktop ipc-handlers.ts
     'ssh-keygen', // ephemeral VM keypair — lume-qa lume-orchestrator.ts
     'zsh', // the executor's `.private.` test also runs the printed Biome fix under zsh -c
+    'rustup',
   ],
   ignoreIssues: {
     'test-support/vitest.base.ts': ['exports'],
@@ -70,7 +71,8 @@ export default {
     'packages/app/src/editor/http-client.ts': ['types'],
     '.{agents,codex}/skills/**': ['files'],
     'lint-plugins/no-comments/__fixtures__/**': ['files'],
-    'lint-plugins/ok-rules/__fixtures__/**': ['files'],
+    'lint-plugins/ok-rules/__fixtures__/**': ['files', 'exports'],
+    '**/*.reads.{ts,mjs}': ['files', 'exports'],
     'scripts/compute-next-beta.mjs': ['files'],
     'scripts/build-slack-release-payload.mjs': ['files'],
     'scripts/assert-smoke-not-vacuous.mjs': ['files'],
@@ -105,6 +107,8 @@ export default {
     '.': {
       entry: [
         'test-support/fixtures/no-net-connect/no-net-connect.fixture.ts',
+        'test-support/fixtures/read-declarations/vitest.read-declarations-fixture.config.ts',
+        'test-support/fixtures/read-declarations/*.cjs',
         'scripts/check-no-major-changeset.mjs',
       ],
       vitest: { entry: ['**/*.uncached.test.{ts,tsx,mjs}'] },
@@ -115,6 +119,8 @@ export default {
         'tests/**/*.{test,e2e}.ts',
         'tests/perf/lib/*.ts',
         'tests/dom/**/*.ts',
+        'vite.prebuilt-dev.ts',
+        'tests/stress/_helpers/reuse/server-supervisor.ts',
       ],
       project: 'src/**',
       ignoreDependencies: [
@@ -145,19 +151,29 @@ export default {
       entry: ['src/**/*.test.{ts,tsx}'],
     },
     'packages/server': {
-      entry: ['src/**/*.test.ts', 'src/parse-worker.ts'],
+      entry: [
+        'src/**/*.test.ts',
+        'src/parse-worker.ts',
+        'src/shadow-fixture-launch.test-helper.mjs',
+      ],
       project: 'src/**',
       ignoreDependencies: ['@types/shell-quote'],
     },
     'packages/cli': {
-      entry: ['src/**/*.test.ts', 'scripts/*.ts', 'tests/**/*.ts', 'src/parse-worker.ts'],
+      entry: [
+        'src/**/*.test.ts',
+        'scripts/*.ts',
+        'tests/**/*.ts',
+        'src/parse-worker.ts',
+        'src/bin.ts',
+      ],
       ignoreDependencies: ['yjs'],
     },
     'packages/desktop': {
       entry: [
         'src/main/entry.ts',
         'src/utility/server-entry.ts',
-        'src/utility/pty-host.ts',
+        'src/utility/pty-host-entry.ts',
         'src/**/*.test.ts',
         'src/**/*.typelock.ts',
         'src/utility/server-entry-load-probe.fixture.test-helper.ts',

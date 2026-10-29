@@ -226,10 +226,10 @@ describe('PRD-6832 β L1: agent write reconciles a newer out-of-band disk edit',
     }
   });
 
-  test('overlapping-block conflict: agent write is refused 409 doc-in-conflict, neither side is silently dropped', async () => {
+  test('overlapping-block edit: both versions are kept and the agent write lands on them', async () => {
     server = await createTestServer({ debounce: 300_000, maxDebounce: 600_000 });
     const { port, contentDir } = server;
-    const docName = `reconcile-conflict-${randomUUID()}`;
+    const docName = `reconcile-both-kept-${randomUUID()}`;
     const filePath = join(contentDir, `${docName}.md`);
 
     writeFileSync(filePath, '# Doc\n\nshared-line\n', 'utf-8');
@@ -258,12 +258,27 @@ describe('PRD-6832 β L1: agent write reconciles a newer out-of-band disk edit',
         body: JSON.stringify({ docName, markdown: 'agent-line\n', position: 'append' }),
       });
       expect(res.status).toBe(409);
-      const body = (await res.json()) as { type?: string };
-      expect(body.type).toBe('urn:ok:error:doc-in-conflict');
+      const body = (await res.json()) as {
+        type?: string;
+        outcome?: string;
+        saved?: boolean;
+        nextStep?: string;
+        warnings?: Array<{ kind?: string; mergeOutcome?: string }>;
+      };
+      expect(body).toMatchObject({
+        type: 'urn:ok:error:both-kept',
+        outcome: 'both-kept',
+        saved: true,
+        nextStep: 're-read',
+      });
+      const reconciled = body.warnings?.find((w) => w.kind === 'disk-edit-reconciled');
+      expect(reconciled?.mergeOutcome).toBe('both-kept');
 
-      expect(serverYtext()).toContain('crdt-version');
-      expect(serverYtext()).not.toContain('agent-line');
-      expect(readTestDoc(contentDir, docName)).toContain('disk-version');
+      expect(serverYtext()).toContain(
+        'shared-line crdt-version\n\nshared-line disk-version\n\nagent-line',
+      );
+      expect(server.instance.conflicts.findByDocName(docName)).toBeUndefined();
+      await pollUntil(() => readTestDoc(contentDir, docName) === serverYtext());
     } finally {
       for (const c of clients) {
         await c.cleanup();

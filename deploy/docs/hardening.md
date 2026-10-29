@@ -101,7 +101,9 @@ lossCapture:
   enabled: false
 ```
 
-With these defaults a start writes no diagnostic span and no server log: a new data volume holds no file under `.ok/local/telemetry/`, `.ok/local/logs/` or `.ok/local/loss-capture/`.
+With these defaults a start writes no diagnostic span and no server log.
+The check covers the user-level `.ok/logs/projects/` directory and the earlier data-volume directories `.ok/local/telemetry/`, `.ok/local/logs/` and `.ok/local/loss-capture/`.
+Existing records remain; the check reports them rather than deleting them.
 A data volume from an earlier release gets the keys at its next start. Its old files stay and get no new byte; delete them when your policy requires it.
 The entrypoint also writes `telemetry.skillInstallReports.enabled: false` into `.ok/global.yml` in the home directory of the container user, in each new container.
 It sets a key back to `false` when a person or the settings page changed it.
@@ -250,7 +252,7 @@ The paths below start at the repository root.
 | Log and autostart settings | Applied in `deploy/` | `deploy/compose.yaml` `environment` sets `OK_LOG_LEVEL: warn` and `OK_MCP_AUTOSTART: "0"`. |
 | Initialization flags | Applied in `deploy/` | `deploy/entrypoint.sh` runs `ok init --no-mcp --no-skills` when `/data/.ok` is absent, then the telemetry program, then `exec ok start`. These flags skip MCP registration and user-global skill bundles, not project-local skills. |
 | Committed configuration | Applied in `deploy/` | `deploy/entrypoint.sh` runs `deploy/no-telemetry.mjs` at each start. It sets `telemetry.localSink.enabled` and `lossCapture.enabled` to `false` in `/data/.ok/config.yml`, and `telemetry.skillInstallReports.enabled` to `false` in the user file of the container. |
-| Telemetry check | Applied in `deploy/` | `scripts/tenant/smoke.sh` runs `no-telemetry.mjs --check` in the started container. The check reports a switch with another value, a key that is not `false`, a recorded file in the data volume, and the file `skill-install-events.jsonl` in the home directory. `scripts/tenant/telemetry.sh` compares the kit files and the upstream source with `scripts/tenant/telemetry.baseline`. |
+| Telemetry check | Applied in `deploy/` | `scripts/tenant/smoke.sh` runs `no-telemetry.mjs --check` in the started container. The check reports a switch with another value, a key that is not `false`, a diagnostic file in the data volume or user-level `.ok/logs/projects/`, and the file `skill-install-events.jsonl` in the home directory. `scripts/tenant/telemetry.sh` compares the kit files and the upstream source with `scripts/tenant/telemetry.baseline`. |
 | Machine-local configuration | Operator action | Merge the machine-local configuration above into `/data/.ok/local/config.yml`. The kit does not apply these hardening values. |
 | Pinned MCP launcher and signature check | Operator action | Apply the launcher checklist on the editor's machine. Use a project-local install for the signature check. |
 | Non-root editor and MCP server | Operator action | Configure the editor's machine to run them without root privileges. |

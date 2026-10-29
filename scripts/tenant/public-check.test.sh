@@ -120,4 +120,24 @@ printf 'inserted\n' | cat - "$tmp/notes" > "$repo/notes.txt"
 git -C "$repo" add notes.txt
 expect_status 0 "$check" --staged
 expect_output 'public-check: allow list line 2: stale row, no marker match in notes.txt has this hash'
-echo "public-check test: ok (moved line, changed line, other rule, other file, duplicate row, invalid rows, stale row, tree and staged modes)"
+repo=$tmp/unstamped
+check=$repo/scripts/tenant/public-check.sh
+mkdir -p "$repo/deploy" "$repo/packages/cli" "$repo/scripts/tenant"
+git -C "$repo" init -q -b main
+printf 'ARG OK_VERSION=1.2.3\n' > "$repo/deploy/Dockerfile"
+printf '{\n  "version": "0.0.0-unknown"\n}\n' > "$repo/packages/cli/package.json"
+cp "$repo_root/scripts/tenant/public-check.sh" "$check"
+printf 'class-3\tmarker\tprivate-[a-z]+\n' > "$repo/scripts/tenant/public-check.rules"
+printf 'development/\n' > "$repo/scripts/tenant/public-check.development"
+: > "$repo/scripts/tenant/public-check.allow"
+commit upstream
+expect_status 2 "$check"
+git -C "$repo" tag v1.2.3
+expect_status 2 "$check"
+git -C "$repo" tag 1.2.3
+expect_status 0 "$check"
+git -C "$repo" switch -q -c fork
+printf 'value private-beta\n' > "$repo/notes.txt"
+expect_status 1 "$check"
+expect_output 'notes.txt:1 class-3'
+echo "public-check test: ok (exact allow rows, tree, staged, unstamped release markers, fork findings)"

@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 // oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — physical margin/padding/inset utilities predate the rule; drain by swapping ml/mr → ms/me, pl/pr → ps/pe, left/right → start/end, then deleting this line. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-physical-direction-utility
 
 import { AGENTS_SKILLS_ROOT } from '@inkeep/open-knowledge-core/constants/skills';
@@ -140,7 +141,6 @@ export function SkillTargetsPicker({ scope }: { scope: SkillScope }) {
                   <AgentBrandIcon host={f.host} aria-hidden className="size-4 shrink-0" />
                   <span className="min-w-0 flex-1 truncate font-mono text-xs">
                     {display}
-                    {}
                     {f.state === 'linked' || f.state === 'linked-parent' ? (
                       <span className="text-muted-foreground"> → {f.target ?? '?'}</span>
                     ) : null}
@@ -182,7 +182,6 @@ export function SkillTargetsPicker({ scope }: { scope: SkillScope }) {
                           <Trans>Link</Trans>
                         </Button>
                       </DropdownMenuTrigger>
-                      {}
                       <DropdownMenuContent align="end" className="w-auto">
                         {targets.map((o) => (
                           <DropdownMenuItem
@@ -213,7 +212,6 @@ export function SkillTargetsPicker({ scope }: { scope: SkillScope }) {
                     </Button>
                   ) : null}
                 </div>
-                {}
                 {following.length > 0 ? (
                   <p
                     className="mt-1 ml-6 text-muted-foreground text-xs"
@@ -225,7 +223,6 @@ export function SkillTargetsPicker({ scope }: { scope: SkillScope }) {
                     )} share this folder.`}
                   </p>
                 ) : null}
-                {}
                 {following.length > 0 ? (
                   <ul
                     className="mt-1 ml-2 space-y-1 border-border/60 border-l pl-3"
@@ -272,7 +269,6 @@ export function SkillTargetsPicker({ scope }: { scope: SkillScope }) {
           })}
         </ul>
       )}
-      {}
       <form
         className="flex items-center gap-2 pt-1"
         onSubmit={(e) => {

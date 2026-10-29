@@ -393,10 +393,28 @@ function ActivityEntryHost({
     element.className = 'relative h-full min-h-0';
     return element;
   });
+  const lastScrollTop = useRef<number | null>(null);
+
+  useLayoutEffect(() => {
+    const recordScroll = (event: Event) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && target.dataset.testid === 'editor-scroll-container') {
+        lastScrollTop.current = target.scrollTop;
+      }
+    };
+    host.addEventListener('scroll', recordScroll, true);
+    return () => host.removeEventListener('scroll', recordScroll, true);
+  }, [host]);
 
   useLayoutEffect(() => {
     if (hostMount === null) return;
     hostMount.append(host);
+    const scrollContainer = host.querySelector<HTMLElement>(
+      '[data-testid="editor-scroll-container"]',
+    );
+    if (scrollContainer && lastScrollTop.current !== null) {
+      scrollContainer.scrollTop = lastScrollTop.current;
+    }
     return () => host.remove();
   }, [host, hostMount]);
 
@@ -722,7 +740,7 @@ function WarmContentFallback({ html }: { html: string }) {
     <div className="tiptap-editor h-full pointer-events-none" aria-hidden="true">
       <div
         className="tiptap ProseMirror tiptap-editor-portal-content"
-        // biome-ignore lint/security/noDangerouslySetInnerHtml: editor.getHTML() routes through DOMSerializer.serializeFragment — attribute values via setAttribute(), text via createTextNode(); both escape correctly
+        // oxlint-disable-next-line react/no-danger -- editor.getHTML() routes through DOMSerializer.serializeFragment — attribute values via setAttribute(), text via createTextNode(); both escape correctly
         dangerouslySetInnerHTML={{ __html: html }}
       />
     </div>
@@ -847,7 +865,6 @@ function ActivityEntry({
 
   return (
     <Activity mode={isVisible ? 'visible' : 'hidden'} name={`editor:${entry.docName}`}>
-      {}
       <ScrollPreservingContainer
         isActive={isVisible}
         docName={entry.docName}
@@ -860,14 +877,12 @@ function ActivityEntry({
           <ServerRestartRecoveryPanel view={recoveryView} />
         ) : (
           <>
-            {}
             <DocumentErrorBoundary
               activeDocName={entry.docName}
               previousDocName={previousDocName}
               onNavigateBack={onNavigateBack}
               onRecycle={onRecycle}
             >
-              {}
               <Suspense
                 fallback={
                   warmHtml && isDualEditor ? (
@@ -901,7 +916,6 @@ function ActivityEntry({
                     <TextDocEditor docName={entry.docName} provider={entry.provider} />
                   ) : (
                     <div className="flex h-full flex-col">
-                      {}
                       {!effectiveIsSourceMode &&
                         (isManagedArtifactDocName(entry.docName) ||
                         parseProjectSkillContentDocName(entry.docName) ||
@@ -918,7 +932,6 @@ function ActivityEntry({
                             <PropertyPanel provider={entry.provider} />
                           </>
                         ))}
-                      {}
                       <div
                         ref={bodyAnchorRef}
                         aria-hidden

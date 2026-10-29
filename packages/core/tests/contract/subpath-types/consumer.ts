@@ -49,9 +49,14 @@ export type {
 export type { isSurfacedCheckpointKind } from '@inkeep/open-knowledge-core/checkpoint-kinds';
 export type {
   CLIENT_RUNTIME_VERSION_FALLBACK,
+  CLIENT_SURFACE_ATTRIBUTE,
+  ClientSurface,
+  ClientSurfaceReading,
   ClientVersionTokenFields,
   clientVersionHeaders,
   clientVersionTokenFields,
+  deriveClientSurface,
+  readClientSurface,
 } from '@inkeep/open-knowledge-core/client-version';
 export type {
   COMMAND_IDENTITIES,
@@ -201,6 +206,11 @@ export type {
 } from '@inkeep/open-knowledge-core/constants/menu-labels';
 export type { NativeMenuLabelKey } from '@inkeep/open-knowledge-core/constants/native-menu-labels';
 export type {
+  OK_USER_HOME_AUTH_FILE,
+  okUserHomeDisplayPath,
+} from '@inkeep/open-knowledge-core/constants/ok-dir';
+export type { okUserHomeDir } from '@inkeep/open-knowledge-core/constants/ok-user-home';
+export type {
   PREVIEW_EMBED_STARTERS,
   PreviewEmbedStarter,
 } from '@inkeep/open-knowledge-core/constants/preview-embed-starters';
@@ -313,9 +323,9 @@ export type {
   AssembleHandoffPromptInput,
   assembleHandoffPrompt,
   buildClaudeUrl,
-  buildCliLaunchArgString,
   buildCodexUrl,
   buildCursorUrl,
+  buildPosixCliLaunch,
   buildStartupInjectionBytes,
   buildWindowsCliLaunch,
   ComposeSelection,
@@ -754,6 +764,10 @@ export type {
   UninstallScreenSpec,
 } from '@inkeep/open-knowledge-core/uninstall-bridge';
 export type {
+  atomicWriteFile,
+  atomicWriteFileSync,
+} from '@inkeep/open-knowledge-core/util/atomic-yaml-write';
+export type {
   isHiddenDocName,
   isProjectSkillBundlePath,
 } from '@inkeep/open-knowledge-core/util/doc-name';
@@ -767,6 +781,10 @@ export type { rewriteEmbedUrl } from '@inkeep/open-knowledge-core/utils/embed-ur
 export type { extensionOf } from '@inkeep/open-knowledge-core/utils/extension';
 export type { formatFileSize } from '@inkeep/open-knowledge-core/utils/file-size';
 export type { getGitHubStars } from '@inkeep/open-knowledge-core/utils/github-stars';
+export type {
+  graphemePrefix,
+  graphemeSuffix,
+} from '@inkeep/open-knowledge-core/utils/grapheme-clip';
 export type { scanHeadingLine } from '@inkeep/open-knowledge-core/utils/heading-scan';
 export type {
   AGENT_ICON_COLORS,
@@ -790,6 +808,7 @@ export type {
   isExternalHref,
   resolveAssetProjectPath,
 } from '@inkeep/open-knowledge-core/utils/link-targets';
+export type { localIsoDate } from '@inkeep/open-knowledge-core/utils/local-iso-date';
 export type { isLoomUrl, parseLoomUrl } from '@inkeep/open-knowledge-core/utils/loom-embed';
 export type { parsePdfAnchor } from '@inkeep/open-knowledge-core/utils/pdf-anchor';
 export type { randomUUID } from '@inkeep/open-knowledge-core/utils/random-uuid';

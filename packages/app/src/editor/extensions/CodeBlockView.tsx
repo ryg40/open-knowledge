@@ -50,6 +50,7 @@ import {
   setMetaTitle,
   shouldShowPreview,
 } from './code-block-meta';
+import { PreviewFrame } from './PreviewFrame';
 import {
   buildPreviewIframeHeader,
   buildPreviewThemeMessage,
@@ -253,7 +254,7 @@ export function CodeBlockView({ node, updateAttributes, editor, getPos, selected
       onMouseLeave={() => setHovered(false)}
     >
       {previewActive ? (
-        // biome-ignore lint/a11y/noStaticElementInteractions: stopPropagation required so resize-handle drags don't bubble into PM
+        // oxlint-disable-next-line jsx-a11y/no-static-element-interactions -- stopPropagation required so resize-handle drags don't bubble into PM
         <div
           ref={previewWrapperRef}
           className={cn(
@@ -267,12 +268,10 @@ export function CodeBlockView({ node, updateAttributes, editor, getPos, selected
           }}
           onMouseDown={(e) => e.stopPropagation()}
         >
-          <iframe
+          <PreviewFrame
             title={t`HTML preview`}
-            ref={previewFrameRef}
-            sandbox="allow-scripts"
-            referrerPolicy="no-referrer"
-            srcDoc={buildPreviewIframeHeader(bakedTheme) + node.textContent}
+            frameRef={previewFrameRef}
+            html={buildPreviewIframeHeader(bakedTheme) + node.textContent}
             className="ok-codeblock-preview-frame"
             onLoad={() => {
               setBlockedRequests(null);
@@ -309,7 +308,6 @@ export function CodeBlockView({ node, updateAttributes, editor, getPos, selected
         />
       ) : null}
 
-      {}
       {title ? (
         <div
           className="ok-codeblock-title"
@@ -321,7 +319,6 @@ export function CodeBlockView({ node, updateAttributes, editor, getPos, selected
         </div>
       ) : null}
 
-      {}
       <pre
         className={cn(
           'ok-codeblock-pre m-0 overflow-x-auto px-5 py-4 font-mono text-sm leading-relaxed',
@@ -339,8 +336,7 @@ export function CodeBlockView({ node, updateAttributes, editor, getPos, selected
         />
       </pre>
 
-      {/* biome-ignore lint/a11y/noStaticElementInteractions: stopPropagation required inside PM NodeView */}
-      <div
+      <div // oxlint-disable-line jsx-a11y/no-static-element-interactions -- stopPropagation required inside PM NodeView
         className="ok-codeblock-chrome"
         contentEditable={false}
         onMouseDown={(e) => e.stopPropagation()}
@@ -524,11 +520,10 @@ export function CodeBlockView({ node, updateAttributes, editor, getPos, selected
           language={normalized === 'xml' ? 'html' : 'plain'}
           title={t`Edit source`}
           renderPreview={(value) => (
-            <iframe
+            <PreviewFrame
               title={t`HTML preview`}
-              sandbox="allow-scripts"
               className="size-full border-0"
-              srcDoc={buildPreviewIframeHeader(bakedTheme) + value}
+              html={buildPreviewIframeHeader(bakedTheme) + value}
             />
           )}
           onSave={handleEditSave}

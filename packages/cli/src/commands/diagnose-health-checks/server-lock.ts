@@ -1,6 +1,13 @@
 import { existsSync } from 'node:fs';
-import { resolveLockDir } from '@inkeep/open-knowledge-server';
-import { describeLockOwnershipRefusal, inspectLock, type LockState } from '../lock-state.ts';
+import { currentCliCommandName } from '@inkeep/open-knowledge-core';
+import { LOCK_FILE_ACCESS_REMEDY, resolveLockDir } from '@inkeep/open-knowledge-server';
+import {
+  describeForeignHostRemedy,
+  describeForeignOwner,
+  describeLockOwnershipRefusal,
+  inspectLock,
+  type LockState,
+} from '../lock-state.ts';
 import type { CheckContext, CheckDefinition, CheckResult } from './types.ts';
 
 interface ServerLockCheckDeps {
@@ -33,7 +40,7 @@ export function makeServerLockCheck(deps: ServerLockCheckDeps = {}): CheckDefini
             name: 'server-lock',
             status: 'fail',
             summary: `server lock held by pid ${state.lock.pid} on this host`,
-            remediation: 'Stop the other OpenKnowledge process or run `ok stop`.',
+            remediation: `Stop the other OpenKnowledge process or run \`${currentCliCommandName()} stop\`.`,
             detail: `lockPath: ${state.lockPath}; port: ${state.lock.port}; started: ${state.lock.startedAt}`,
           };
         case 'unverified-owner':
@@ -48,9 +55,8 @@ export function makeServerLockCheck(deps: ServerLockCheckDeps = {}): CheckDefini
           return {
             name: 'server-lock',
             status: 'warn',
-            summary: `lock claimed by ${state.lock.hostname} (foreign host)`,
-            remediation:
-              'Stop the server on its owning machine and confirm the directory is no longer in use before removing the lock.',
+            summary: `server lock ${describeForeignOwner(state.lock)}`,
+            remediation: describeForeignHostRemedy(state),
             detail: `lockPath: ${state.lockPath}; pid: ${state.lock.pid}`,
           };
         case 'dead-pid':
@@ -58,7 +64,15 @@ export function makeServerLockCheck(deps: ServerLockCheckDeps = {}): CheckDefini
             name: 'server-lock',
             status: 'warn',
             summary: `stale lock for non-existent pid ${state.lock.pid}`,
-            remediation: 'Run `ok clean` to prune.',
+            remediation: `Run \`${currentCliCommandName()} clean\` to prune.`,
+            detail: `lockPath: ${state.lockPath}`,
+          };
+        case 'reused-pid':
+          return {
+            name: 'server-lock',
+            status: 'warn',
+            summary: `stale lock; recorded pid ${state.lock.pid} now belongs to another process`,
+            remediation: `Run \`${currentCliCommandName()} clean\` to prune.`,
             detail: `lockPath: ${state.lockPath}`,
           };
         case 'read-error':
@@ -66,7 +80,7 @@ export function makeServerLockCheck(deps: ServerLockCheckDeps = {}): CheckDefini
             name: 'server-lock',
             status: 'fail',
             summary: 'server.lock could not be read',
-            remediation: 'Restore file and parent-directory access, then retry.',
+            remediation: LOCK_FILE_ACCESS_REMEDY,
             detail: `${state.lockPath}: ${state.error}`,
           };
         case 'corrupt':

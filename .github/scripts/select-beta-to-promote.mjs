@@ -10,6 +10,8 @@ import {
   withBumpVerdicts,
 } from '../../scripts/compute-stable-version.mjs';
 import { gitCleanEnv } from '../../scripts/git-clean-env.mjs';
+import { describeHold, evaluateTree, gitReader, mainHoldReport } from './release-hold.mjs';
+import { createShippedFixCheck, refusalHeadline } from './shipped-fix-containment.mjs';
 
 const BETA_TAG_RE = /^v\d+\.\d+\.\d+-beta\.\d+$/;
 const STABLE_TAG_RE = /^v\d+\.\d+\.\d+$/;
@@ -169,6 +171,83 @@ export async function evaluateFastTier({
 export function resolveTier({ armed, verdict, standardTarget, fastTarget }) {
   const tier = armed && verdict?.qualifies === true ? 'fast' : 'standard';
   return { tier, target: standardTarget, candidate: tier === 'fast' ? fastTarget : '' };
+}
+
+export function screenReleaseHold({ target, fastTierCandidate, evaluate, log = () => {} }) {
+  let screenedTarget = target;
+  if (target) {
+    const verdict = evaluate(target);
+    if (verdict.held) {
+      log(`::warning::Not dispatching ${target}: ${describeHold(verdict, target)} This tick dispatches nothing.`);
+      screenedTarget = '';
+    } else {
+      log(describeHold(verdict, target));
+    }
+  }
+  if (!fastTierCandidate) return { target: screenedTarget, fastTierCandidate };
+  let verdict;
+  try {
+    verdict = evaluate(fastTierCandidate);
+  } catch (err) {
+    log(
+      `::warning::Fast tier REFUSED for ${fastTierCandidate}: the release-hold check could not decide (${err.message}). Falling back to the 24h tier.`,
+    );
+    return { target: screenedTarget, fastTierCandidate: '' };
+  }
+  if (verdict.held) {
+    log(`::warning::Fast tier REFUSED for ${fastTierCandidate}: ${describeHold(verdict, fastTierCandidate)}`);
+    return { target: screenedTarget, fastTierCandidate: '' };
+  }
+  log(describeHold(verdict, fastTierCandidate));
+  return { target: screenedTarget, fastTierCandidate };
+}
+
+export function screenShippedFixes({
+  target,
+  fastTierCandidate,
+  dispatchWindowOpen,
+  evaluate,
+  log = () => {},
+}) {
+  let screenedTarget = target;
+  let screenedFast = fastTierCandidate;
+  if (target && dispatchWindowOpen) {
+    const verdict = evaluate(target);
+    if (!verdict.ok) {
+      log(
+        `::warning::Not dispatching ${target}: ${refusalHeadline(verdict, target)} ` +
+          'promote-stable would refuse it, and every older beta lacks the same fixes, so this tick dispatches nothing.',
+      );
+      screenedTarget = '';
+    }
+  }
+  if (fastTierCandidate) {
+    let verdict;
+    try {
+      verdict = evaluate(fastTierCandidate);
+    } catch (err) {
+      log(
+        `::warning::Fast tier REFUSED for ${fastTierCandidate}: the shipped-fix check could not decide (${err.message}). Falling back to the 24h tier.`,
+      );
+      return { target: screenedTarget, fastTierCandidate: '' };
+    }
+    if (!verdict.ok) {
+      log(
+        `::warning::Fast tier REFUSED for ${fastTierCandidate}: ${refusalHeadline(verdict, fastTierCandidate)} ` +
+          'promote-stable would refuse it, so it is not smoked.',
+      );
+      screenedFast = '';
+    }
+  }
+  return { target: screenedTarget, fastTierCandidate: screenedFast };
+}
+
+export function memoizeVerdicts(evaluate) {
+  const verdicts = new Map();
+  return (tag) => {
+    if (!verdicts.has(tag)) verdicts.set(tag, evaluate(tag));
+    return verdicts.get(tag);
+  };
 }
 
 function resolveLatestStableSha() {
@@ -398,11 +477,28 @@ async function main() {
     };
   }
 
-  const { tier: soakTier, target, candidate: fastTierCandidate } = resolveTier({
+  const resolved = resolveTier({
     armed,
     verdict,
     standardTarget,
     fastTarget,
+  });
+  const soakTier = resolved.tier;
+  const holdGit = gitReader();
+  console.log(mainHoldReport({ ref: 'HEAD', git: holdGit }));
+  const unheld = screenReleaseHold({
+    target: resolved.target,
+    fastTierCandidate: resolved.candidate,
+    evaluate: memoizeVerdicts((tag) => evaluateTree({ candidate: `refs/tags/${tag}`, git: holdGit })),
+    log: console.log,
+  });
+  const shippedFixCheck = createShippedFixCheck();
+  const { target, fastTierCandidate } = screenShippedFixes({
+    target: unheld.target,
+    fastTierCandidate: unheld.fastTierCandidate,
+    dispatchWindowOpen: process.env.DISPATCH_WINDOW_OPEN !== 'false',
+    evaluate: memoizeVerdicts((tag) => shippedFixCheck.evaluate(tag)),
+    log: console.log,
   });
   if (fastTierCandidate) {
     console.log(
@@ -428,7 +524,7 @@ async function main() {
       process.env.GITHUB_OUTPUT,
       [
         `target=${target}`,
-        `tier=${selectionTier}`,
+        `tier=${target ? selectionTier : ''}`,
         `fast_tier_candidate=${fastTierCandidate}`,
         `soak_tier=${soakTier}`,
         `fast_armed=${armed}`,

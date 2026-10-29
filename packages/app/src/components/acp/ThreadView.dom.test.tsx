@@ -30,6 +30,7 @@ import type {
   ThreadRenderModel,
 } from '@/lib/acp/thread-event-model';
 import { installPointerPositionTracker } from '@/lib/pointer-position';
+import { consumeWorkspaceHashWrite } from '@/lib/workspace-hash-writes';
 import {
   expectVisualClassTokens,
   expectVisualClassTokensAbsent,
@@ -120,6 +121,13 @@ vi.doMock('@/lib/acp/thread-client', () => ({
       this.code = code;
     }
   },
+  ThreadRetryError: class ThreadRetryError extends Error {
+    readonly code: string;
+    constructor(code: string, message: string) {
+      super(message);
+      this.code = code;
+    }
+  },
   ThreadContextWindowError: class ThreadContextWindowError extends Error {
     readonly code: string;
     constructor(code: string, message: string) {
@@ -169,7 +177,9 @@ const {
   subscribeStagedThreadDraft,
 } = await import('@/lib/acp/thread-draft-staging');
 const { launchAgentThread } = await import('@/lib/acp/launch-agent-thread');
-const { ThreadContextWindowError, ThreadResumeError } = await import('@/lib/acp/thread-client');
+const { ThreadContextWindowError, ThreadResumeError, ThreadRetryError } = await import(
+  '@/lib/acp/thread-client'
+);
 const { buildThreadRenderModel } = await import('@/lib/acp/thread-event-model');
 const {
   agentSettingsKey,
@@ -1322,6 +1332,32 @@ describe('ThreadView permissions', () => {
     rerender(view());
 
     expect(window.location.hash).toBe('#/notes/today');
+  });
+
+  test('follow-the-agent navigation is a hash change the workspace did not write, which the navigation handler treats as a deliberate open', async () => {
+    model = makeModel();
+    window.location.hash = '#/notes/yesterday';
+    const hashChanges: string[] = [];
+    const onHashChange = (event: HashChangeEvent) => hashChanges.push(event.newURL);
+    window.addEventListener('hashchange', onHashChange);
+    const view = () => <ThreadView info={makeInfo({ status: 'awaiting_permission' })} />;
+    const { rerender } = render(view());
+
+    model = makeModel({
+      items: [
+        toolCall({ toolKind: 'edit', rawInput: { docName: 'notes/today' } }),
+        permission({ toolCallId: 'c1' }),
+      ],
+    });
+    threadState = { info: undefined, events: [], lastSeq: 6, replayThroughSeq: 6 };
+    rerender(view());
+    threadState = { info: undefined, events: [], lastSeq: 7, replayThroughSeq: 7 };
+    rerender(view());
+
+    expect(window.location.hash).toBe('#/notes/today');
+    await waitFor(() => expect(hashChanges.at(-1)).toMatch(/#\/notes\/today$/));
+    window.removeEventListener('hashchange', onHashChange);
+    expect(consumeWorkspaceHashWrite(window.location.hash)).toBe(false);
   });
 
   test('stacks three-plus options top-to-bottom with the primary grant emphasized', () => {
@@ -2934,6 +2970,68 @@ describe('ThreadView retry', () => {
     expect(retryThread).toHaveBeenCalledWith('thread-1');
   });
 
+  test('a retry the agent fails is left to the thread notice, with no toast and no second message', async () => {
+    retryThread.mockRejectedValueOnce(
+      new ThreadRetryError('spawn-failed', 'harness not installed'),
+    );
+    model = makeModel({ turnActive: false, items: [failureNotice('connect')] });
+    render(<ThreadView info={makeInfo({ status: 'error' })} />);
+
+    await userEvent.click(screen.getByTestId('agent-thread-retry'));
+    await waitFor(() =>
+      expect(screen.getByTestId('agent-thread-retry').hasAttribute('disabled')).toBe(false),
+    );
+    expect(screen.getByTestId('agent-thread-notice').textContent).toContain(
+      "Claude couldn't start.",
+    );
+    expect(screen.queryByTestId('agent-thread-retry-failed')).toBeNull();
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  test('a retry that never reaches the agent says so in the pane, with the detail behind a disclosure and no toast', async () => {
+    retryThread.mockRejectedValueOnce(
+      new ThreadRetryError('install-failed', 'agent registry unavailable: fetch failed'),
+    );
+    model = makeModel({ turnActive: false, items: [failureNotice('connect')] });
+    render(<ThreadView info={makeInfo({ status: 'error' })} />);
+
+    await userEvent.click(screen.getByTestId('agent-thread-retry'));
+    const failed = await screen.findByTestId('agent-thread-retry-failed');
+    const alerts = within(failed).getAllByRole('alert');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.textContent).toBe("Couldn't restart Claude.");
+    expect(failed.textContent).not.toContain('fetch failed');
+    await userEvent.click(within(failed).getByRole('button', { name: 'Show details' }));
+    expect(screen.getByTestId('agent-thread-retry-failed-details').textContent).toBe(
+      'agent registry unavailable: fetch failed',
+    );
+    expect(toastError).not.toHaveBeenCalled();
+
+    retryThread.mockReturnValueOnce(new Promise(() => {}));
+    await userEvent.click(screen.getByTestId('agent-thread-retry'));
+    expect(screen.queryByTestId('agent-thread-retry-failed')).toBeNull();
+  });
+
+  test('a retry rejection that lands after the thread moved on never surfaces when the thread fails again', async () => {
+    const { promise: pendingRetry, reject: rejectRetry } = Promise.withResolvers<ThreadInfo>();
+    retryThread.mockReturnValueOnce(pendingRetry);
+    model = makeModel({ turnActive: false, items: [failureNotice('connect')] });
+    const view = render(<ThreadView info={makeInfo({ status: 'error' })} />);
+
+    await userEvent.click(screen.getByTestId('agent-thread-retry'));
+    view.rerender(<ThreadView info={makeInfo({ status: 'spawning' })} />);
+    await act(async () => {
+      rejectRetry(new ThreadRetryError('timeout', 'retry timed out'));
+    });
+    view.rerender(<ThreadView info={makeInfo({ status: 'error' })} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('agent-thread-retry').hasAttribute('disabled')).toBe(false),
+    );
+    expect(screen.queryByTestId('agent-thread-retry-failed')).toBeNull();
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
   test('a message stranded by a sign-in failure comes back once the thread can send again', async () => {
     model = makeModel({
       turnActive: false,
@@ -3714,7 +3812,7 @@ describe('ThreadView agent notices', () => {
     expect(card).toBe(screen.getByTestId('agent-thread-agent-notice'));
     expect(card.textContent).toContain('Warning');
     expect(card.className).toContain('border');
-    expect(card.className).toContain('amber');
+    expect(card.className).toContain('border-warning');
     const glyph = card.querySelector('svg');
     expect(glyph?.getAttribute('aria-hidden')).toBe('true');
     expect(screen.queryByTestId('agent-thread-agent-message')).toBeNull();
@@ -4220,19 +4318,18 @@ describe('ThreadView auth-required dead ends', () => {
 
     await userEvent.click(offerButton());
     expect(resumeThread).not.toHaveBeenCalled();
-    expect(createThread).toHaveBeenCalledWith({
-      agent: { source: 'registry', id: 'claude' },
-      prompt: undefined,
-    });
+    expect(createThread).toHaveBeenCalledWith(
+      {
+        agent: { source: 'registry', id: 'claude' },
+        prompt: undefined,
+      },
+      undefined,
+    );
   });
 
   test('a new chat that lost the race to another launch says so rather than going quiet', async () => {
-    let releaseCreate: (() => void) | undefined;
-    createThread.mockReturnValueOnce(
-      new Promise<void>((resolve) => {
-        releaseCreate = resolve;
-      }),
-    );
+    const { promise: pendingCreate, resolve: releaseCreate } = Promise.withResolvers<void>();
+    createThread.mockReturnValueOnce(pendingCreate);
     const inflight = launchAgentThread({ source: 'registry', id: 'claude' }, null, null, null);
     model = makeModel({ turnActive: false, items: [authNotice()] });
     render(<ThreadView info={makeInfo({ archived: true, status: 'exited', resumable: false })} />);
@@ -4246,7 +4343,7 @@ describe('ThreadView auth-required dead ends', () => {
     expect(createThread).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      releaseCreate?.();
+      releaseCreate();
       await inflight;
     });
   });
@@ -4302,6 +4399,7 @@ describe('ThreadView auth-required dead ends', () => {
     const seen = { text: null as string | null };
     stopStaging = subscribeStagedThreadDraft(threadId, (text) => {
       seen.text = text;
+      return true;
     });
     return seen;
   }
@@ -4315,10 +4413,13 @@ describe('ThreadView auth-required dead ends', () => {
     fireEvent.change(composer, { target: { value: 'draft I have not sent yet' } });
 
     await userEvent.click(offerButton());
-    expect(createThread).toHaveBeenCalledWith({
-      agent: { source: 'registry', id: 'claude' },
-      prompt: undefined,
-    });
+    expect(createThread).toHaveBeenCalledWith(
+      {
+        agent: { source: 'registry', id: 'claude' },
+        prompt: undefined,
+      },
+      undefined,
+    );
     await waitFor(() => expect(staged.text).toBe('draft I have not sent yet'));
     expect(composer.value).toBe('draft I have not sent yet');
   });
@@ -4338,10 +4439,13 @@ describe('ThreadView auth-required dead ends', () => {
     fireEvent.change(composer, { target: { value: 'half-finished instruction' } });
 
     await userEvent.click(screen.getByTestId('agent-thread-resume-fallback-new'));
-    expect(createThread).toHaveBeenCalledWith({
-      agent: { source: 'registry', id: 'claude' },
-      prompt: undefined,
-    });
+    expect(createThread).toHaveBeenCalledWith(
+      {
+        agent: { source: 'registry', id: 'claude' },
+        prompt: undefined,
+      },
+      undefined,
+    );
     await waitFor(() => expect(staged.text).toBe('half-finished instruction'));
     expect(composer.value).toBe('half-finished instruction');
   });
@@ -4362,10 +4466,13 @@ describe('ThreadView auth-required dead ends', () => {
 
     await userEvent.click(screen.getByTestId('agent-thread-resume-fallback-new'));
     await waitFor(() => expect(createThread).toHaveBeenCalledTimes(1));
-    expect(createThread).toHaveBeenLastCalledWith({
-      agent: { source: 'registry', id: 'claude' },
-      prompt: 'finish the migration',
-    });
+    expect(createThread).toHaveBeenLastCalledWith(
+      {
+        agent: { source: 'registry', id: 'claude' },
+        prompt: 'finish the migration',
+      },
+      undefined,
+    );
     expect(staged.text).toBeNull();
   });
 
@@ -4379,10 +4486,13 @@ describe('ThreadView auth-required dead ends', () => {
 
     await userEvent.click(offerButton());
     await waitFor(() => expect(createThread).toHaveBeenCalledTimes(1));
-    expect(createThread).toHaveBeenLastCalledWith({
-      agent: { source: 'registry', id: 'claude' },
-      prompt: undefined,
-    });
+    expect(createThread).toHaveBeenLastCalledWith(
+      {
+        agent: { source: 'registry', id: 'claude' },
+        prompt: undefined,
+      },
+      undefined,
+    );
     await waitFor(() => expect(staged.text).toBe('finish the migration'));
   });
 
@@ -4470,12 +4580,8 @@ describe('ThreadView auth-required dead ends', () => {
   test.each(IN_FLIGHT_CASES)(
     'the $kind offer is disabled and announced while it is in flight',
     async ({ info, items, spy, announcement }) => {
-      let release: (() => void) | undefined;
-      spy().mockReturnValueOnce(
-        new Promise<void>((resolve) => {
-          release = resolve;
-        }),
-      );
+      const { promise: pending, resolve: release } = Promise.withResolvers<void>();
+      spy().mockReturnValueOnce(pending);
       model = makeModel({ turnActive: false, items: [...items] });
       render(<ThreadView info={makeInfo(info)} />);
 
@@ -4488,7 +4594,7 @@ describe('ThreadView auth-required dead ends', () => {
       expect(spy()).toHaveBeenCalledTimes(1);
 
       await act(async () => {
-        release?.();
+        release();
       });
       await waitFor(() => expect(offerButton().hasAttribute('disabled')).toBe(false));
       expect(offerButton().getAttribute('aria-busy')).toBe('false');
@@ -4496,15 +4602,17 @@ describe('ThreadView auth-required dead ends', () => {
     },
   );
 
-  test('a failed retry says so', async () => {
-    retryThread.mockRejectedValueOnce(new Error('agent binary is missing'));
+  test('a failed retry says so in the pane, not in a toast', async () => {
+    retryThread.mockRejectedValueOnce(
+      new ThreadRetryError('install-failed', 'agent registry unavailable: fetch failed'),
+    );
     model = makeModel({ turnActive: false, items: [] });
     render(<ThreadView info={makeInfo({ archived: false, status: 'auth_required' })} />);
 
     await userEvent.click(offerButton());
-    await waitFor(() =>
-      expect(toastError).toHaveBeenCalledWith("Couldn't start Claude: agent binary is missing"),
-    );
+    const failed = await screen.findByTestId('agent-thread-retry-failed');
+    expect(failed.textContent).toContain("Couldn't restart Claude.");
+    expect(toastError).not.toHaveBeenCalled();
     expect(offerButton().hasAttribute('disabled')).toBe(false);
   });
 
@@ -4550,10 +4658,13 @@ describe('ThreadView auth-required dead ends', () => {
 
     await userEvent.click(screen.getByTestId('agent-thread-resume-fallback-new'));
     await waitFor(() => expect(createThread).toHaveBeenCalledTimes(1));
-    expect(createThread).toHaveBeenCalledWith({
-      agent: { source: 'registry', id: 'claude' },
-      prompt: undefined,
-    });
+    expect(createThread).toHaveBeenCalledWith(
+      {
+        agent: { source: 'registry', id: 'claude' },
+        prompt: undefined,
+      },
+      undefined,
+    );
   });
 
   test('a thread the server says it cannot resume leaves no control that still says resume', async () => {
@@ -4565,10 +4676,13 @@ describe('ThreadView auth-required dead ends', () => {
     expect(screen.queryByRole('button', { name: 'Resume chat' })).toBeNull();
     await userEvent.click(offerButton());
     expect(resumeThread).not.toHaveBeenCalled();
-    expect(createThread).toHaveBeenCalledWith({
-      agent: { source: 'registry', id: 'claude' },
-      prompt: undefined,
-    });
+    expect(createThread).toHaveBeenCalledWith(
+      {
+        agent: { source: 'registry', id: 'claude' },
+        prompt: undefined,
+      },
+      undefined,
+    );
   });
 
   test('one rejection does not retire a resume the server still says is available', async () => {
@@ -4614,12 +4728,8 @@ describe('ThreadView auth-required dead ends', () => {
     resumeThread.mockRejectedValueOnce(
       new ThreadResumeError('capacity', 'maximum of 8 concurrent agent threads'),
     );
-    let releaseCreate: (() => void) | undefined;
-    createThread.mockReturnValueOnce(
-      new Promise<void>((resolve) => {
-        releaseCreate = resolve;
-      }),
-    );
+    const { promise: pendingCreate, resolve: releaseCreate } = Promise.withResolvers<void>();
+    createThread.mockReturnValueOnce(pendingCreate);
     model = makeModel({ turnActive: false, items: [authNotice()] });
     render(<ThreadView info={makeInfo({ archived: true, status: 'exited' })} />);
 
@@ -4633,7 +4743,7 @@ describe('ThreadView auth-required dead ends', () => {
     expect(within(offerButton()).queryByRole('status')).toBeNull();
 
     await act(async () => {
-      releaseCreate?.();
+      releaseCreate();
     });
     await waitFor(() => expect(offerButton().hasAttribute('disabled')).toBe(false));
   });
@@ -4642,12 +4752,8 @@ describe('ThreadView auth-required dead ends', () => {
     resumeThread.mockRejectedValueOnce(
       new ThreadResumeError('capacity', 'maximum of 8 concurrent agent threads'),
     );
-    let releaseCreate: (() => void) | undefined;
-    createThread.mockReturnValueOnce(
-      new Promise<void>((resolve) => {
-        releaseCreate = resolve;
-      }),
-    );
+    const { promise: pendingCreate, resolve: releaseCreate } = Promise.withResolvers<void>();
+    createThread.mockReturnValueOnce(pendingCreate);
     model = makeModel({ turnActive: false, items: [authNotice()] });
     render(<ThreadView info={makeInfo({ archived: true, status: 'exited' })} />);
 
@@ -4664,18 +4770,14 @@ describe('ThreadView auth-required dead ends', () => {
     expect(offerButton().hasAttribute('disabled')).toBe(true);
 
     await act(async () => {
-      releaseCreate?.();
+      releaseCreate();
     });
     await waitFor(() => expect(createThread).toHaveBeenCalledTimes(1));
   });
 
   test('an unresumable chat keeps its new-chat offer through the launch it starts', async () => {
-    let releaseCreate: (() => void) | undefined;
-    createThread.mockReturnValueOnce(
-      new Promise<void>((resolve) => {
-        releaseCreate = resolve;
-      }),
-    );
+    const { promise: pendingCreate, resolve: releaseCreate } = Promise.withResolvers<void>();
+    createThread.mockReturnValueOnce(pendingCreate);
     model = makeModel({ turnActive: false, items: [authNotice()] });
     render(<ThreadView info={makeInfo({ archived: true, status: 'exited', resumable: false })} />);
 
@@ -4683,7 +4785,7 @@ describe('ThreadView auth-required dead ends', () => {
     expect(offerButton().getAttribute('data-auth-offer-kind')).toBe('new-chat');
 
     await act(async () => {
-      releaseCreate?.();
+      releaseCreate();
     });
     await waitFor(() => expect(createThread).toHaveBeenCalledTimes(1));
     expect(offerButton().getAttribute('data-auth-offer-kind')).toBe('new-chat');
@@ -4725,12 +4827,8 @@ describe('ThreadView auth-required dead ends', () => {
     resumeThread.mockRejectedValueOnce(
       new ThreadResumeError('resume-unsupported', 'this thread never completed an agent session'),
     );
-    let releaseCreate: (() => void) | undefined;
-    createThread.mockReturnValueOnce(
-      new Promise<void>((resolve) => {
-        releaseCreate = resolve;
-      }),
-    );
+    const { promise: pendingCreate, resolve: releaseCreate } = Promise.withResolvers<void>();
+    createThread.mockReturnValueOnce(pendingCreate);
     model = makeModel({ turnActive: false, items: [authNotice()] });
     render(<ThreadView info={makeInfo({ archived: true, status: 'exited' })} />);
 
@@ -4747,7 +4845,7 @@ describe('ThreadView auth-required dead ends', () => {
     expect(offerButton().hasAttribute('disabled')).toBe(true);
 
     await act(async () => {
-      releaseCreate?.();
+      releaseCreate();
     });
     await waitFor(() => expect(createThread).toHaveBeenCalledTimes(1));
   });
@@ -4812,13 +4910,13 @@ describe('ThreadView auth-required dead ends', () => {
     expect(surface.textContent).not.toContain('Retry to sign in');
     expect(SIGN_IN_INSTRUCTION.test(surface.textContent ?? '')).toBe(false);
     expect(offerButton().getAttribute('data-auth-offer-kind')).toBe('retry');
-    expect(within(surface).getByRole('button', { name: 'Retry' })).toBeTruthy();
+    expect(within(surface).getByRole('button', { name: 'Try again' })).toBeTruthy();
   });
 
   test('an empty transcript on a dead thread offers a way out instead of claiming it is connecting', () => {
     for (const [status, kind, label] of [
       ['exited', 'new-chat', 'New chat with Claude'],
-      ['error', 'retry', 'Retry'],
+      ['error', 'retry', 'Try again'],
     ] as const) {
       const view = render(<ThreadView info={makeInfo({ archived: false, status })} />);
       const surface = screen.getByTestId('agent-thread-transcript');
@@ -5147,7 +5245,7 @@ describe('ThreadView auth-required dead ends', () => {
     expect(prompt).not.toHaveBeenCalled();
   });
 
-  test('Already signed in? Retry re-sends the held message once the agent is ready', async () => {
+  test('Already signed in? Try again re-sends the held message once the agent is ready', async () => {
     retryThread.mockResolvedValueOnce(makeInfo({ status: 'ready' }));
     model = makeModel({
       turnActive: false,
@@ -6238,6 +6336,7 @@ describe('ThreadView context window', () => {
     await waitFor(() =>
       expect(createThread).toHaveBeenCalledWith(
         expect.objectContaining({ agent: { source: 'registry', id: 'codex-acp' } }),
+        undefined,
       ),
     );
   });
@@ -6409,14 +6508,14 @@ describe('ThreadView reporting a problem with the chat', () => {
     }
   }, 30_000);
 
-  test('the screenshot waits for the settings menu to close and marks no row', async () => {
+  test('the screenshot is shot before the report opens, with the settings menu marked as its launcher and no row marked', async () => {
     const stopPointerTracking = installPointerPositionTracker();
     window.dispatchEvent(
       new PointerEvent('pointermove', { clientX: 240, clientY: 160, bubbles: true }),
     );
     let captures = 0;
     let markersAtCapture = -1;
-    let menuAtCapture: boolean | null = null;
+    let reportOpenAtCapture: boolean | null = null;
     Object.assign(window, {
       okDesktop: {
         bugReport: {
@@ -6424,7 +6523,8 @@ describe('ThreadView reporting a problem with the chat', () => {
           captureScreenshot: () => {
             captures += 1;
             markersAtCapture = document.querySelectorAll('.ok-pointer-marker').length;
-            menuAtCapture = screen.queryByTestId('agent-thread-settings-popover') !== null;
+            reportOpenAtCapture =
+              screen.queryByRole('checkbox', { name: 'This conversation' }) !== null;
             return Promise.resolve(null);
           },
         },
@@ -6434,12 +6534,14 @@ describe('ThreadView reporting a problem with the chat', () => {
       model = makeModel({ items: [], turnActive: false });
       render(<ThreadView info={makeInfo({ status: 'ready' })} />);
       await userEvent.click(screen.getByRole('button', { name: /^Agent settings/ }));
+      const menu = await screen.findByTestId('agent-thread-settings-popover');
+      expect(menu.hasAttribute('data-bug-report-launcher')).toBe(true);
       await userEvent.click(await screen.findByTestId('agent-thread-report-problem'));
       await screen.findByRole('checkbox', { name: 'This conversation' }, { timeout: 15_000 });
 
       expect(captures).toBe(1);
       expect(markersAtCapture).toBe(0);
-      expect(menuAtCapture).toBe(false);
+      expect(reportOpenAtCapture).toBe(false);
     } finally {
       stopPointerTracking();
       Reflect.deleteProperty(window, 'okDesktop');

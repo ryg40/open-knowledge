@@ -151,6 +151,21 @@ scripts/tenant/telemetry.baseline	setup-product	8c9d0b7db9b992cecb9630b27123c569
 scripts/tenant/telemetry.baseline	setup-product	8d336dfd6bf86e02852b41b9acba7b6711187f65	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
 scripts/tenant/telemetry.baseline	setup-product	a3dd0d62054549e521597ed318ebcb2bcd227953	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
 scripts/tenant/telemetry.baseline	setup-product	e6879dae5a35eb8e494d4a514dc66b62d05d3f7f	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
-scripts/tenant/telemetry.baseline	setup-product	efd57f5fb86256190a27656b999f25f159172411	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
+scripts/tenant/telemetry.baseline	setup-product	34f9c3a691d56b89a5d0298ceeae43a811198609	Reviewed upstream source host count; the telemetry check records it without enabling that provider.
 scripts/tenant/telemetry.baseline	setup-product	f16d22fdc683927596a3604fae3ccd4fff124b99	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
 scripts/tenant/telemetry.baseline	setup-product	f5b39e5fed832fee1e47b52360bc37b0aa104311	Fact of the upstream source, listed for the telemetry check; not a setup choice or a session record.
+packages/app/src/editor/source-polish/view-plugin.test.ts	setup-product	11824a7d022d3bb68ca43b8046f1d2ffb710b89a	Upstream test code; a CodeMirror range iterator variable, not a product choice.
+packages/app/src/editor/source-polish/view-plugin.test.ts	setup-product	1268083f505cc2604753a78401fe1fdfb6b08ed5	Upstream test code; a CodeMirror range iterator variable, not a product choice.
+packages/app/src/editor/source-polish/view-plugin.test.ts	setup-product	1879978e471a87a9ce4a0e3b5f31a9e26029649f	Upstream test code; a CodeMirror range iterator variable, not a product choice.
+packages/app/src/editor/source-polish/view-plugin.test.ts	setup-product	4b0edb91b014f7ccc6a6757688b5158831e604f6	Upstream test code; a CodeMirror range iterator variable, not a product choice.
+packages/app/src/editor/source-polish/view-plugin.test.ts	setup-product	828b564e5862a185b9b85f673ec22fd89b668b67	Upstream test code; a CodeMirror range iterator variable, not a product choice.
+packages/app/src/editor/source-polish/view-plugin.test.ts	setup-product	e6d87c1ef9b0ea7af5c2eb88882804b50e8ab07f	Upstream test code; a CodeMirror range iterator variable, not a product choice.
+packages/app/src/editor/source-polish/view-plugin.test.ts	setup-product	f350724fa34d2f25dae8776f7ad54a09ef4ed210	Upstream test code; a CodeMirror range iterator variable, not a product choice.
+packages/cli/src/commands/sync.ts	url-host	36ceb31471dd1442f89d128a88b79b7d061095e3	Reviewed upstream CLI message template; host and CLI name are variables, not a private destination.
+packages/cli/src/commands/sync.ts	session-wording	d1130c2aec2e2fc8bdf1a80f757800b8bd807960	Upstream CLI status wording; not a session record.
+packages/desktop/src/main/main-thread-watchdog.test.ts	session-wording	040b64bc05b69a3b9843b09648539ef293d5bd78	Upstream test wording about a background thread of the watchdog; not a session record.
+packages/desktop/src/main/main-thread-watchdog.test.ts	session-wording	54f0028d5fd8c05de78cc2ca6ac5d80d217cab61	Upstream test wording about a background thread of the watchdog; not a session record.
+packages/desktop/src/main/main-thread-watchdog.test.ts	session-wording	caca8b25b65e057754088a6c64d73bda6bef55c3	Upstream test wording about a background thread of the watchdog; not a session record.
+packages/desktop/src/main/main-thread-watchdog.test.ts	session-wording	ccfbe253f8c79d0ff86b0a19078e4589d0e6f4fe	Upstream test wording about a background thread of the watchdog; not a session record.
+packages/desktop/src/main/main-thread-watchdog.test.ts	session-wording	d225dce52953f0fca08e6ca9f3d1b8f64a73bf2b	Upstream test wording about a background thread of the watchdog; not a session record.
+packages/desktop/src/main/main-thread-watchdog.test.ts	session-wording	e3c8e862da90791e63ab5ff43ac0016e4c8d5ef1	Upstream test wording about a background thread of the watchdog; not a session record.

@@ -27,12 +27,13 @@ export {
   withSkillPointer,
 } from './prompt-composer.ts';
 export {
-  buildClaudeLaunchCommand,
-  buildCliLaunchArgString,
-  buildCliLaunchCommand,
+  BRACKETED_PASTE_ENABLE_MARKER,
+  buildPosixCliLaunch,
   buildStartupInjectionBytes,
+  buildTerminalInputBytes,
   buildWindowsCliLaunch,
   composeWindowsShellLaunchArgs,
+  fishSingleQuote,
   isTerminalLaunchEnvName,
   isWindowsShellFamily,
   isWindowsShellLaunchFailureReason,

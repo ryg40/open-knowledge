@@ -2,17 +2,20 @@ import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, posix, resolve, sep, win32 } from 'node:path';
 import {
+  CHECKOUT_CLI_COMMAND,
   ALL_EDITOR_IDS as CORE_ALL_EDITOR_IDS,
   EDITOR_LABELS as CORE_EDITOR_LABELS,
   HOSTS_WITH_USER_SKILL_DIR as CORE_HOSTS_WITH_USER_SKILL_DIR,
   type EditorId as CoreEditorId,
+  currentCliCommandName,
   currentDesktopProduct,
   currentMcpServerName,
   DESKTOP_PRODUCTS,
   type DesktopProduct,
-  type DesktopProductName,
+  isDevChannel,
   mcpChainMarkerPrefix,
   OK_CHANNEL_ENV,
+  type PackagedDesktopProductName,
   piExtensionProjectPath,
   resolveDesktopProductName,
 } from '@inkeep/open-knowledge-core';
@@ -29,6 +32,11 @@ const DEV_MCP_ENV = {
   OK_LOG_FILE: '/tmp/ok-mcp.log',
 } as const;
 
+function devMcpEnv(): Record<string, string> {
+  const channel = resolveDesktopProductName();
+  return channel === 'stable' ? { ...DEV_MCP_ENV } : { ...DEV_MCP_ENV, [OK_CHANNEL_ENV]: channel };
+}
+
 const UNIX_CHAIN_REVISION = 2;
 const WIN_CHAIN_REVISION = 1;
 
@@ -44,7 +52,7 @@ function winChainSentinel(product: DesktopProduct): string {
   return `${mcpChainMarkerPrefix('windows-chain', product.mcpChainTag)}${WIN_CHAIN_REVISION}`;
 }
 
-function buildUnixChain(name: DesktopProductName): string {
+function buildUnixChain(name: PackagedDesktopProductName): string {
   const product = DESKTOP_PRODUCTS[name];
   const npxSpec = `${OK_PACKAGE_SPEC}@${product.npmDistTag}`;
   const channelLine = name === 'stable' ? '' : `\nexport ${OK_CHANNEL_ENV}=${name}`;
@@ -63,7 +71,7 @@ echo "OpenKnowledge: install OK Desktop or Node.js 24+, then restart your editor
 exit 127`;
 }
 
-function buildWinChain(name: DesktopProductName): string {
+function buildWinChain(name: PackagedDesktopProductName): string {
   const product = DESKTOP_PRODUCTS[name];
   const npxSpec = `${OK_PACKAGE_SPEC}@${product.npmDistTag}`;
   const cmd = `${product.cliCommandNames[0]}.cmd`;
@@ -96,6 +104,14 @@ foreach ($d in $dirs) {
 exit 127`;
 }
 
+export const DEV_CHANNEL_LAUNCHER_REFUSAL = `A dev build writes no MCP launcher for an installed OpenKnowledge channel, because that launcher runs a released CLI. Register this checkout by running \`${CHECKOUT_CLI_COMMAND} init --dev-mcp\` in the project, or set OK_CHANNEL=stable.`;
+
+function launcherChannel(): PackagedDesktopProductName {
+  const channel = resolveDesktopProductName();
+  if (channel === 'dev') throw new Error(DEV_CHANNEL_LAUNCHER_REFUSAL);
+  return channel;
+}
+
 export const CHAIN_VERSION_SENTINEL = unixChainSentinel(DESKTOP_PRODUCTS.stable);
 
 export const CHAIN_V2 = buildUnixChain('stable');
@@ -110,6 +126,10 @@ export function piExtensionOwnershipMarker(product: DesktopProduct): string {
 
 export function piExtensionVersionSentinel(product: DesktopProduct): string {
   return `${piExtensionOwnershipMarker(product)}-v1`;
+}
+
+export function piExtensionDevHeader(product: DesktopProduct): string {
+  return `${piExtensionOwnershipMarker(product)}-dev`;
 }
 
 export const PI_EXTENSION_OWNERSHIP_MARKER = piExtensionOwnershipMarker(DESKTOP_PRODUCTS.stable);
@@ -209,7 +229,7 @@ export function buildManagedServerEntry(options: McpInstallOptions = {}): Record
     return {
       command: DEV_MCP_SERVER_COMMAND,
       args: [resolveDevCliDistPath(), 'mcp'],
-      env: { ...DEV_MCP_ENV },
+      env: devMcpEnv(),
     };
   }
 
@@ -217,17 +237,12 @@ export function buildManagedServerEntry(options: McpInstallOptions = {}): Record
   if (platformName === 'win32') {
     return {
       command: 'powershell',
-      args: [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        buildWinChain(resolveDesktopProductName()),
-      ],
+      args: ['-NoProfile', '-NonInteractive', '-Command', buildWinChain(launcherChannel())],
     };
   }
   return {
     command: '/bin/sh',
-    args: ['-l', '-c', buildUnixChain(resolveDesktopProductName())],
+    args: ['-l', '-c', buildUnixChain(launcherChannel())],
   };
 }
 
@@ -237,7 +252,7 @@ function buildOpenCodeEntry(options: McpInstallOptions = {}): Record<string, unk
       type: 'local',
       enabled: true,
       command: [DEV_MCP_SERVER_COMMAND, resolveDevCliDistPath(), 'mcp'],
-      environment: { ...DEV_MCP_ENV },
+      environment: devMcpEnv(),
     };
   }
 
@@ -251,19 +266,19 @@ function buildOpenCodeEntry(options: McpInstallOptions = {}): Record<string, unk
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        buildWinChain(resolveDesktopProductName()),
+        buildWinChain(launcherChannel()),
       ],
     };
   }
   return {
     type: 'local',
     enabled: true,
-    command: ['/bin/sh', '-l', '-c', buildUnixChain(resolveDesktopProductName())],
+    command: ['/bin/sh', '-l', '-c', buildUnixChain(launcherChannel())],
   };
 }
 
 export function isOwnManagedEntry(entry: unknown): boolean {
-  if (typeof entry !== 'object' || entry === null) return false;
+  if (typeof entry !== 'object' || entry === null || isDevChannel()) return false;
   const e = entry as Record<string, unknown>;
   return (
     matchesCanonicalExactly(
@@ -369,20 +384,18 @@ type ManagedEntry = ReturnType<NonNullable<EditorMcpTarget['buildEntry']>>;
 
 export function droppedManagedKeys(
   existing: object | null | undefined,
-  canonical: ManagedEntry,
+  canonical: ManagedEntry | null,
 ): readonly string[] {
-  if (typeof existing !== 'object' || existing === null) return [];
+  if (canonical === null || typeof existing !== 'object' || existing === null) return [];
   const e = existing as Record<string, unknown>;
   return managedEntryKeys(canonical).filter(
     (key) => canonical[key] === undefined && e[key] !== undefined,
   );
 }
 
-export function canonicalEntryFor(
-  target: EditorMcpTarget,
-  cwd: string,
-): Record<string, unknown> | null {
-  return target.format === 'file' ? null : target.buildEntry(cwd, {});
+export function canonicalEntryFor(target: EditorMcpTarget, cwd: string): ManagedEntry | null {
+  if (target.format === 'file' || isDevChannel()) return null;
+  return target.buildEntry(cwd, {});
 }
 
 export function entryCarriesDroppedManagedKey(
@@ -709,7 +722,7 @@ export const EDITOR_TARGETS: Record<EditorId, EditorMcpTarget> & { pi: ManagedFi
     label: EDITOR_LABELS.pi,
     configPath: () => {
       throw new Error(
-        `Pi has no user-global MCP config; OK's integration is the project-scoped bridge extension at ${piExtensionProjectPath(currentDesktopProduct())} (run \`ok init\` in the project).`,
+        `Pi has no user-global MCP config; OK's integration is the project-scoped bridge extension at ${piExtensionProjectPath(currentDesktopProduct())} (run \`${currentCliCommandName()} init\` in the project).`,
       );
     },
     format: 'file',

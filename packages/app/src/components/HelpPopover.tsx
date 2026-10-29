@@ -22,6 +22,7 @@ import { SubscribeForm } from '@/components/SubscribeForm';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { useBugReport } from '@/lib/bug-report-capture';
 import type { OkAboutInfo } from '@/lib/desktop-bridge-types';
 import { dispatchExternalLinkClick } from '@/lib/external-link';
 import { feedbackNudgeStore } from '@/lib/feedback-nudge-store';
@@ -138,7 +139,7 @@ export const HelpPopover: FC = () => {
   const { t } = useLingui();
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [subscribeOpen, setSubscribeOpen] = useState(false);
-  const [reportBugOpen, setReportBugOpen] = useState(false);
+  const bugReport = useBugReport();
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [starCount, setStarCount] = useState<number | null>(null);
   const [about, setAbout] = useState<OkAboutInfo | null>(null);
@@ -203,6 +204,8 @@ export const HelpPopover: FC = () => {
         </Tooltip>
         <PopoverContent
           align="end"
+          aria-label={t`Resources`}
+          data-bug-report-launcher=""
           className="w-56 p-3 subtle-scrollbar max-h-(--radix-popover-content-available-height) overflow-y-auto data-[state=closed]:overflow-hidden"
         >
           {sections.map((section, index) => (
@@ -221,17 +224,14 @@ export const HelpPopover: FC = () => {
                       }
                     />
                   ))}
-                  {}
                   {section.key === 'resources' && (
                     <>
-                      {}
                       {hasDesktopBridge && (
                         <ActionRow
                           icon={Bug}
-                          onSelect={() => {
-                            setPopoverOpen(false);
-                            setReportBugOpen(true);
-                          }}
+                          onSelect={() =>
+                            bugReport.start({ launcherBorne: true }, () => setPopoverOpen(false))
+                          }
                         >
                           <Trans>Report a bug</Trans>
                         </ActionRow>
@@ -285,7 +285,6 @@ export const HelpPopover: FC = () => {
                         <Trans>Subscribe</Trans>
                       </Button>
                     </PopoverTrigger>
-                    {}
                     <PopoverContent side="left" align="center" sideOffset={20} className="w-80">
                       <SubscribeForm
                         source="resources_menu"
@@ -306,7 +305,7 @@ export const HelpPopover: FC = () => {
                 variant="ghost"
                 className={cn(
                   rowClassName,
-                  'h-auto w-full justify-start font-mono text-xs font-normal',
+                  'h-auto w-full flex-wrap justify-between gap-y-0.5 text-start font-mono text-xs font-normal whitespace-normal',
                 )}
                 onClick={() => {
                   setPopoverOpen(false);
@@ -314,8 +313,8 @@ export const HelpPopover: FC = () => {
                 }}
                 data-testid="help-popover-version"
               >
-                <span>v{appVersion}</span>{' '}
-                <span className="ml-auto font-sans text-muted-foreground">
+                <span className="min-w-0 max-w-full truncate">v{appVersion}</span>{' '}
+                <span className="font-sans text-muted-foreground">
                   <Trans>About & updates</Trans>
                 </span>
               </Button>
@@ -323,9 +322,8 @@ export const HelpPopover: FC = () => {
           ) : null}
         </PopoverContent>
       </Popover>
-      {}
       {hasDesktopBridge && (
-        <ReportBugDialog open={reportBugOpen} onOpenChange={setReportBugOpen} launcherBorne />
+        <ReportBugDialog capture={bugReport.capture} onClose={bugReport.close} />
       )}
       <FeedbackFormDialog
         open={feedbackOpen}

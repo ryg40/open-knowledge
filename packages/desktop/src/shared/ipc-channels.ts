@@ -39,10 +39,12 @@ import type {
   CopyImageRequest,
   CopyImageResult,
   OkHeadBranchInfo as HeadBranchInfo,
+  OkAssetOpenResult,
   OkAssetUploadResult,
   OkChromeColors,
   OkDesktopConfig,
   OkEditorActiveTargetSnapshot,
+  OkEditorViewMenuStateChange,
   OkEditorViewMenuStateSnapshot,
   OkLocalOpAuthReposResponse,
   OkLocalOpAuthStatusResponse,
@@ -67,6 +69,7 @@ import type {
   OkTerminalDockStateUpdate,
   OkTerminalDockStateWriteResult,
   OkThemeSource,
+  OkUpdateMode,
   OkUserConfigPatchResult,
   OkUserConfigSnapshot,
   OkSeedApplyOptions as SeedApplyOptions,
@@ -88,6 +91,7 @@ import type { EntryPoint } from './entry-point.ts';
 
 export type EditorActiveTargetSnapshot = OkEditorActiveTargetSnapshot;
 export type EditorViewMenuStateSnapshot = OkEditorViewMenuStateSnapshot;
+export type EditorViewMenuStateChange = OkEditorViewMenuStateChange;
 export type { SkillCostTiers };
 export type MenuDispatchRole = OkMenuDispatchRole;
 export type MenuDispatchCommand = OkMenuDispatchCommand;
@@ -369,6 +373,24 @@ interface DialogOpenFolderOpts {
   readonly defaultPath?: string;
 }
 
+export type OkUpdateDispatchRequest =
+  | { readonly kind: 'relaunch-now' }
+  | { readonly kind: 'check-now' }
+  | { readonly kind: 'whats-new-dismiss'; readonly version: string }
+  | { readonly kind: 'downloaded-dismiss'; readonly version: string }
+  | { readonly kind: 'set-mode'; readonly mode: OkUpdateMode };
+
+export type OkUpdateSetModeFailure = 'unrecognized-mode' | 'persist-failed';
+
+export type OkUpdateDispatchResult =
+  | { readonly kind: 'relaunch-now' }
+  | { readonly kind: 'check-now' }
+  | { readonly kind: 'whats-new-dismiss' }
+  | { readonly kind: 'downloaded-dismiss' }
+  | { readonly kind: 'set-mode'; readonly ok: true; readonly mode: OkUpdateMode }
+  | { readonly kind: 'set-mode'; readonly ok: false; readonly reason: OkUpdateSetModeFailure }
+  | { readonly kind: 'unknown'; readonly ok: false; readonly reason: 'unrecognized-kind' };
+
 export type UserConfigDispatchRequest =
   | { kind: 'set-language-preference'; preference: LanguagePreference }
   | { kind: 'read' }
@@ -393,9 +415,7 @@ export interface RequestChannels {
   'ok:shell:record-handoff': { args: [line: HandoffStatsLine]; result: undefined };
   'ok:shell:open-asset': {
     args: [relPath: string];
-    result:
-      | { ok: true }
-      | { ok: false; reason: 'extension-blocked' | 'path-escape' | 'not-found' | 'resolve-error' };
+    result: OkAssetOpenResult;
   };
   'ok:shell:reveal-asset': {
     args: [relPath: string];
@@ -553,9 +573,10 @@ export interface RequestChannels {
       | { ok: false; reason: 'no-project' | 'invalid-request' }
       | OkNoteWindowMainActionResult;
   };
-  'ok:update:relaunch-now': { args: []; result: undefined };
-  'ok:update:check-now': { args: []; result: undefined };
-  'ok:update:whats-new-dismiss': { args: [{ version: string }]; result: undefined };
+  'ok:update:dispatch': {
+    args: [request: OkUpdateDispatchRequest];
+    result: OkUpdateDispatchResult;
+  };
   'ok:state:query': { args: []; result: Required<OkStateSnapshot> };
   'ok:state:reset-incompatible': { args: []; result: undefined };
   'ok:theme:set-source': { args: [params: { source: OkThemeSource }]; result: { ok: true } };
@@ -648,7 +669,7 @@ export interface RequestChannels {
     result: undefined;
   };
   'ok:editor:view-menu-state-changed': {
-    args: [state: Partial<EditorViewMenuStateSnapshot>];
+    args: [state: EditorViewMenuStateChange];
     result: undefined;
   };
   'ok:editor:background-throttle': {

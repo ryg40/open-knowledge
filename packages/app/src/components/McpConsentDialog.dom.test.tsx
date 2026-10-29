@@ -86,14 +86,6 @@ const noneDetectedPayload: OkMcpWiringShowPayload = {
   globalSkills: [{ ...DISCOVERY_SKILL, paths: [] }],
 };
 
-function deferredResult() {
-  let resolve!: (result: OkMcpWiringResult) => void;
-  const promise = new Promise<OkMcpWiringResult>((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
-}
-
 interface RecordedConfirm {
   editorIds: readonly string[];
   pathInstall: boolean | undefined;
@@ -508,8 +500,8 @@ describe('McpConsentDialog AI-tools decision', () => {
   });
 
   test('failed Continue resets busy state, reports the error, and allows retry', async () => {
-    const first = deferredResult();
-    const second = deferredResult();
+    const first = Promise.withResolvers<OkMcpWiringResult>();
+    const second = Promise.withResolvers<OkMcpWiringResult>();
     const outcomes = [first, second];
     const harness = makeHarness({
       confirmResult: async () => outcomes.shift()?.promise ?? { ok: true },
@@ -572,6 +564,26 @@ describe('McpConsentDialog PATH consent row', () => {
     );
   });
 
+  test('names the Beta command throughout the row in a Beta window', async () => {
+    (window as unknown as { okDesktop?: unknown }).okDesktop = {
+      config: { ptyAvailable: true },
+      cliCommandName: 'ok-beta',
+    };
+    await renderDialog();
+
+    const checkbox = screen.getByTestId('mcp-consent-path-checkbox');
+    const row = checkbox.closest('label')?.textContent ?? '';
+    expect(row).toContain('Add the ok-beta command to your terminal');
+    expect(row).toContain('ok-beta opens a project, ok-beta init connects your agents.');
+    expect(row).not.toMatch(/\bok\b(?!-beta)/);
+
+    await userEvent.click(checkbox);
+    await userEvent.click(checkbox);
+    expect(screen.getByTestId('mcp-consent-path-warning').textContent).toMatch(
+      /^ok-beta won't run in external terminals/,
+    );
+  });
+
   test('mentions the built-in terminal only when the desktop bridge reports PTY support', async () => {
     (window as unknown as { okDesktop?: unknown }).okDesktop = {
       config: { ptyAvailable: true },
@@ -596,6 +608,25 @@ describe('McpConsentDialog PATH consent row', () => {
         { editorIds: [], pathInstall: true, skills: undefined },
       ]);
     });
+  });
+
+  test('alreadyInstalled names the Beta command in a Beta window', async () => {
+    (window as unknown as { okDesktop?: unknown }).okDesktop = {
+      config: { ptyAvailable: false },
+      cliCommandName: 'ok-beta',
+    };
+    await renderDialog(
+      makeHarness({
+        snapshot: {
+          ...payload,
+          pathInstall: { ...payload.pathInstall, alreadyInstalled: true },
+        },
+      }),
+    );
+
+    expect(screen.getByTestId('mcp-consent-path-status').textContent).toBe(
+      'Already set up — ok-beta is available in your terminal',
+    );
   });
 
   test('alreadyInstalled renders an informational row and solicits no decision', async () => {
@@ -660,7 +691,7 @@ describe('McpConsentDialog dismissal', () => {
   });
 
   test('failed skip resets busy state and reports the error', async () => {
-    const first = deferredResult();
+    const first = Promise.withResolvers<OkMcpWiringResult>();
     const harness = makeHarness({ skipResult: async () => first.promise });
     await renderDialog(harness);
 
@@ -815,7 +846,7 @@ describe('McpConsentDialog surface by origin', () => {
   });
 
   test('no dismiss surface can fire while a request is in flight', async () => {
-    const pending = deferredResult();
+    const pending = Promise.withResolvers<OkMcpWiringResult>();
     const harness = await renderDialog(
       makeHarness({
         snapshot: { ...payload, origin: 'reconfigure' },
@@ -842,7 +873,7 @@ describe('McpConsentDialog surface by origin', () => {
   });
 
   test('the close X is visibly inert while a request is in flight', async () => {
-    const pending = deferredResult();
+    const pending = Promise.withResolvers<OkMcpWiringResult>();
     await renderDialog(
       makeHarness({
         snapshot: { ...payload, origin: 'reconfigure' },

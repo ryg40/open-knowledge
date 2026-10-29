@@ -4,6 +4,11 @@ import react from '@vitejs/plugin-react';
 import { playwright } from '@vitest/browser-playwright';
 import { configDefaults, defineConfig, type ViteUserConfig } from 'vitest/config';
 import { okVitestBase } from '../../test-support/vitest.base';
+import { babelOutputCache } from './tests/foundation/babel-output-cache';
+import {
+  BROWSER_OPTIMIZE_DEPS_INCLUDE,
+  dependencyReloadGuard,
+} from './tests/foundation/browser-dependency-optimizer';
 import { runBrowserFixture } from './tests/foundation/browser-fixture-command';
 import { withMockContracts } from './tests/foundation/browser-mock-provider';
 import {
@@ -17,6 +22,7 @@ import {
   browserNodeSubstitutes,
   NODE_MODULES,
 } from './tests/foundation/browser-node-compat';
+import { buildAppStylesheet } from './tests/foundation/build-app-stylesheet';
 import { chromiumGcLaunchEnvGuard } from './tests/foundation/chromium-gc-launch-env';
 import { RENDERER_DEDUPE } from './vite.dedupe';
 import { RENDERER_BABEL_OPTIONS } from './vite.react-babel';
@@ -29,6 +35,19 @@ const BROWSER_FILE_BRIDGE_ROOTS = [
   fileURLToPath(new URL('../../test-support/', import.meta.url)),
 ];
 
+export const APP_BROWSER_BABEL_OUTPUT = babelOutputCache();
+
+export function appBrowserBabelPasses() {
+  return [
+    babel({ ...RENDERER_BABEL_OPTIONS, exclude: [...BROWSER_PRODUCT_MODULE_EXCLUDES] }),
+    babel({
+      plugins: RENDERER_BABEL_OPTIONS.plugins,
+      include: [...BROWSER_TEST_MODULES],
+      exclude: [NODE_MODULES],
+    }),
+  ];
+}
+
 export const APP_BROWSER_SETUP_FILES = [
   fileURLToPath(new URL('./tests/foundation/browser-setup.ts', import.meta.url)),
 ];
@@ -39,22 +58,18 @@ export const appBrowserVitestConfig = {
   plugins: [
     ...okVitestBase.plugins,
     chromiumGcLaunchEnvGuard(),
+    dependencyReloadGuard(),
     browserCiValue(process.env),
     browserNodeSubstitutes(BROWSER_FILE_BRIDGE_ROOTS),
     react(),
-    babel({ ...RENDERER_BABEL_OPTIONS, exclude: [...BROWSER_PRODUCT_MODULE_EXCLUDES] }),
-    babel({
-      plugins: RENDERER_BABEL_OPTIONS.plugins,
-      include: [...BROWSER_TEST_MODULES],
-      exclude: [NODE_MODULES],
-    }),
+    ...appBrowserBabelPasses().map((pass, index) => APP_BROWSER_BABEL_OUTPUT.wrap(pass, index)),
   ],
   resolve: {
     conditions: ['module', 'browser', 'development'],
     alias: [{ find: /^@\//, replacement: srcDir }],
     dedupe: [...RENDERER_DEDUPE],
   },
-  optimizeDeps: { force: true },
+  optimizeDeps: { force: true, include: [...BROWSER_OPTIMIZE_DEPS_INCLUDE] },
   test: {
     testTimeout: okVitestBase.test.testTimeout,
     hookTimeout: okVitestBase.test.hookTimeout,
@@ -69,6 +84,7 @@ export const appBrowserVitestConfig = {
       '.excalidraw-assets-staging-*',
     ],
     setupFiles: APP_BROWSER_SETUP_FILES,
+    globalSetup: [fileURLToPath(new URL('./scripts/compile-i18n-catalogs.ts', import.meta.url))],
     reporters: [...configDefaults.reporters, 'json'],
     outputFile: { json: 'test-results/vitest-browser.json' },
     isolate: true,
@@ -78,7 +94,12 @@ export const appBrowserVitestConfig = {
       headless: true,
       screenshotFailures: false,
       instances: [{ browser: 'chromium' }],
-      commands: { runBrowserFixture, installNetworkGuard, takeBlockedNetworkRequests },
+      commands: {
+        runBrowserFixture,
+        installNetworkGuard,
+        takeBlockedNetworkRequests,
+        buildAppStylesheet,
+      },
     },
   },
 } satisfies ViteUserConfig;

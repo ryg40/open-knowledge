@@ -147,10 +147,21 @@ type EntryDescriptor =
   | { kind: 'reconcile' }
   | { kind: 'upstream' }
   | { kind: 'recovered' }
+  | { kind: 'merge-version'; side: 'ours' | 'theirs' }
   | { kind: 'edit' };
 
 function classifyEntry(entry: TimelineEntry): EntryDescriptor {
-  if (entry.type === 'checkpoint') return { kind: 'recovered' };
+  if (entry.type === 'checkpoint') {
+    const checkpoint = entry.checkpoint;
+    if (
+      checkpoint?.kind === 'external-change-both-kept' ||
+      checkpoint?.kind === 'external-change-kept-live' ||
+      checkpoint?.kind === 'external-change-no-engine'
+    ) {
+      return { kind: 'merge-version', side: checkpoint.metadata.side };
+    }
+    return { kind: 'recovered' };
+  }
   if (entry.type === 'upstream') return { kind: 'upstream' };
   const msg = entry.message;
   const rollback = /^rollback: .+ to ([0-9a-f]{7,40})$/.exec(msg);
@@ -167,7 +178,18 @@ function docLeaf(path: string): string {
 }
 
 function displayAuthor(entry: TimelineEntry): string {
-  if (entry.type === 'checkpoint') return t`Recovered content`;
+  if (entry.type === 'checkpoint') {
+    if (entry.checkpoint?.kind === 'external-change-both-kept') {
+      return t`Before an outside change was merged`;
+    }
+    if (
+      entry.checkpoint?.kind === 'external-change-kept-live' ||
+      entry.checkpoint?.kind === 'external-change-no-engine'
+    ) {
+      return t`Not merged`;
+    }
+    return t`Recovered content`;
+  }
   if (entry.type === 'upstream') return t`Upstream sync`;
   if (entry.contributors.length === 1) return entry.contributors[0].name;
   if (entry.contributors.length > 1) return entry.contributors.map((c) => c.name).join(', ');
@@ -348,6 +370,14 @@ function EntryDetail({
 
   if (descriptor.kind === 'recovered') return null;
 
+  if (descriptor.kind === 'merge-version') {
+    return (
+      <p className="truncate text-xs text-muted-foreground">
+        {descriptor.side === 'ours' ? t`Version in OpenKnowledge` : t`Outside version`}
+      </p>
+    );
+  }
+
   if (allDocs.length > 0) {
     return (
       <p className="truncate text-xs text-muted-foreground" title={allDocs.join(', ')}>
@@ -505,11 +535,9 @@ function EntryRow({
             }
           }}
         >
-          {}
           <span className="mt-0.5 shrink-0">{leadingIcon}</span>
 
           <div className="min-w-0 flex-1 space-y-0.5">
-            {}
             <div className="flex items-center gap-1.5">
               <span className="truncate text-xs text-foreground">{authorName}</span>
               <time
@@ -519,7 +547,6 @@ function EntryRow({
               >
                 {relative}
               </time>
-              {}
               <span aria-hidden="true" className="h-3 w-px shrink-0 bg-border" />
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -547,7 +574,6 @@ function EntryRow({
               </Tooltip>
             </div>
 
-            {}
             {allSummaries.length > 0 && <SummaryBullets summaries={allSummaries} />}
             <EntryDetail
               descriptor={descriptor}
@@ -667,15 +693,12 @@ export function TimelineContent({ docName }: TimelineContentProps) {
 
   return (
     <div className="flex h-full flex-col">
-      {}
       <PanelHeader>
         <PanelTitle>
           <Trans>Timeline</Trans>
         </PanelTitle>
       </PanelHeader>
-      {}
       <div className="flex-1 overflow-y-auto subtle-scrollbar scroll-fade-mask">
-        {}
         {loading && (
           <div
             className="flex flex-col gap-1 p-2"
@@ -695,14 +718,12 @@ export function TimelineContent({ docName }: TimelineContentProps) {
           </div>
         )}
 
-        {}
         {!loading && error && (
           <div className="px-4 py-3">
             <p className="text-xs text-destructive">{error}</p>
           </div>
         )}
 
-        {}
         {!loading && !error && entries.length === 0 && (
           <div className="px-4 py-8 text-center">
             <p className="text-xs text-muted-foreground">
@@ -711,7 +732,6 @@ export function TimelineContent({ docName }: TimelineContentProps) {
           </div>
         )}
 
-        {}
         {!loading && !error && entries.length > 0 && (
           <div className="flex flex-col gap-1 p-2">
             {entries.map((entry, index) => (

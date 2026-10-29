@@ -20,6 +20,7 @@ import {
   applySkillBundleFileWrite,
   applySkillDelete,
   applySkillWrite,
+  skillMutationErrorStatus,
 } from '../content/skills-write.ts';
 import type { extractActorIdentity } from '../extract-actor-identity.ts';
 import { sanitizeFilename } from '../filename-sanitize.ts';
@@ -98,6 +99,7 @@ export interface SkillImportService {
     ref?: string;
     publisher?: string;
     upstreamSkill?: string;
+    subpath?: string;
     actor: ActorIdentity;
     skipProjection?: boolean;
   }): Promise<SkillImportOutcome>;
@@ -110,7 +112,8 @@ export function createSkillImportService(deps: SkillImportDeps): SkillImportServ
 
   return {
     async runSkillImport(params) {
-      const { acquiredDir, scope, sourceLabel, ref, publisher, upstreamSkill, actor } = params;
+      const { acquiredDir, scope, sourceLabel, ref, publisher, upstreamSkill, subpath, actor } =
+        params;
       if (!deps.projectDir) {
         return {
           ok: false,
@@ -202,6 +205,7 @@ export function createSkillImportService(deps: SkillImportDeps): SkillImportServ
       const skillBody = acquiredDoc.body;
       const pack = packMarkerOf(acquiredDoc.frontmatter);
       const wr = applySkillWrite({
+        boundary: importBase,
         skillsRoot: importRoot,
         name: targetName,
         body: skillBody,
@@ -212,18 +216,21 @@ export function createSkillImportService(deps: SkillImportDeps): SkillImportServ
         },
       });
       if (!wr.ok) {
+        const status = skillMutationErrorStatus(wr.error.code);
         return {
           ok: false,
-          status: 400,
-          urn: 'urn:ok:error:invalid-request',
-          title: 'Failed to write imported skill.',
+          status,
+          urn:
+            status === 500 ? 'urn:ok:error:internal-server-error' : 'urn:ok:error:invalid-request',
+          title: wr.error.message,
           detail: wr.error.code,
-          cause: new Error(wr.error.message),
+          cause: wr.error.cause ?? new Error(wr.error.message),
         };
       }
       const warnings = [...wr.warnings];
       for (const f of acquired.files) {
         const br = applySkillBundleFileWrite({
+          boundary: importBase,
           skillsRoot: importRoot,
           name: targetName,
           relPath: f.relPath,
@@ -233,12 +240,14 @@ export function createSkillImportService(deps: SkillImportDeps): SkillImportServ
         });
         if (!br.ok) {
           const rollback = applySkillDelete({ skillsRoot: importRoot, name: targetName });
+          const status = rollback.ok ? skillMutationErrorStatus(br.error.code) : 500;
           return {
             ok: false,
-            status: rollback.ok ? 400 : 500,
-            urn: rollback.ok
-              ? 'urn:ok:error:invalid-request'
-              : 'urn:ok:error:internal-server-error',
+            status,
+            urn:
+              status === 400
+                ? 'urn:ok:error:invalid-request'
+                : 'urn:ok:error:internal-server-error',
             title: 'Failed to write the complete imported skill bundle.',
             detail: `${f.relPath}: ${br.error.code}`,
             cause: new Error(
@@ -277,6 +286,7 @@ export function createSkillImportService(deps: SkillImportDeps): SkillImportServ
           publisher,
           importedAt: new Date().toISOString(),
           ...(upstreamSkill !== undefined ? { skill: upstreamSkill } : {}),
+          ...(subpath !== undefined ? { subpath } : {}),
         }),
       );
 

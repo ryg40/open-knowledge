@@ -22,8 +22,8 @@ name: Select beta to promote
 # This workflow does NOT reimplement promotion. It dispatches promote-stable.yml
 # with an EXPLICIT beta_tag (the selected beta); promote-stable computes the
 # stable version from the changeset delta over the latest stable, tags it,
-# creates the Release, and cascades npm --tag latest + signed stable DMG +
-# main-reset unchanged. "OK desktop to stable" is covered for free via the
+# creates the Release, and cascades npm --tag latest + signed stable DMG
+# unchanged. "OK desktop to stable" is covered for free via the
 # promote-stable -> desktop-release cascade (latest-mac.yml + DMG). NOTE:
 # promote-stable's fully-cut guard runs only on its blank/auto path, so the
 # explicit dispatch bypasses it; this script performs the unshipped + fully-cut
@@ -115,8 +115,8 @@ permissions:
   # actions:write is required to dispatch promote-stable.yml (workflow_dispatch
   # via the API) and covers the read for the in-flight `gh run list` check.
   # contents:read to read tags. No id-token and no App token here — promote-stable
-  # mints its own App token for the identity-asserting work (tag push, cross-repo
-  # main-reset dispatch), so this evaluator stays minimally scoped.
+  # mints its own App token for the identity-asserting work (the tag push), so
+  # this evaluator stays minimally scoped.
   contents: read
   actions: write
 
@@ -152,7 +152,7 @@ env:
 jobs:
   read-bumps:
     name: Read changeset bumps (no credential)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -168,13 +168,14 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: "24"
+          node-version-file: .node-version
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          cache: false
 
       - name: Install root dependencies for the Changesets reader
-        run: |
-          set -euo pipefail
-          corepack enable
-          pnpm install --frozen-lockfile --filter=. --ignore-scripts
+        run: pnpm install --frozen-lockfile --filter=. --ignore-scripts
 
       - name: Read the bump of every changeset an unshipped beta adds
         id: bumps
@@ -183,7 +184,7 @@ jobs:
   evaluate:
     name: Evaluate 24h soak + business-hours gate
     needs: read-bumps
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     cache-mode: read
     timeout-minutes: 10
     outputs:
@@ -238,7 +239,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: "24"
+          node-version-file: .node-version
           package-manager-cache: false
 
       - name: Select the beta to promote
@@ -259,6 +260,7 @@ jobs:
           # expected steady state until an operator provisions the secret.
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           BUMP_VERDICTS: ${{ needs.read-bumps.outputs.bump_verdicts }}
+          DISPATCH_WINDOW_OPEN: ${{ steps.hours.outputs.open }}
         # Writes target=, tier=, soak_tier= (plus the predicate inputs) to
         # GITHUB_OUTPUT; an empty target => no-op. Exits non-zero (fails the job)
         # on any non-404 gh/git infra error — a fail-loud retry-next-tick, never
@@ -333,7 +335,7 @@ jobs:
           SELF_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           gh workflow run promote-stable.yml -f beta_tag="$TARGET" -f dispatched_by="$SELF_URL"
-          echo "::notice::Dispatched promote-stable for ${TARGET} (it computes the stable version from the changeset delta, then npm --tag latest + stable DMG + main-reset)."
+          echo "::notice::Dispatched promote-stable for ${TARGET} (it computes the stable version from the changeset delta, then npm --tag latest + stable DMG)."
           # Link this run to the promote-stable run it just created. `gh workflow
           # run` does not return the new run id, so resolve it (best-effort) as the
           # newest workflow_dispatch run of promote-stable created after SINCE.
@@ -390,13 +392,18 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: "24"
+          node-version-file: .node-version
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          cache: false
 
       - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the workspace packages the smoke harness imports
         run: |
-          set -euo pipefail
-          corepack enable
-          pnpm install --frozen-lockfile
+          pnpm exec turbo run build --filter=@inkeep/open-knowledge-server --cache=local:,remote:
 
       - name: Download the candidate's DMG
         id: download
@@ -431,11 +438,21 @@ jobs:
           echo "::notice::Fast tier refused for ${CANDIDATE} (verdict=${VERDICT:-unknown}). The 24h tier is unaffected; this beta promotes normally once it has soaked."
           echo "Fast tier refused for ${CANDIDATE}; verdict=${VERDICT:-unknown}. The aggregate incident reporter owns Slack notifications." >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Upload per-test results
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ok-per-test-results-select-beta-to-promote-attempt${{ github.run_attempt }}
+          path: packages/desktop/test-results/desktop-smoke-packaged-results.json
+          retention-days: 14
+          if-no-files-found: warn
+
   dispatch-fast-tier-candidate:
     name: Dispatch the smoke-proven fast-tier candidate
     needs: [evaluate, smoke-fast-tier-candidate]
     if: needs.smoke-fast-tier-candidate.outputs.verdict == 'pass'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     cache-mode: none
     timeout-minutes: 10
     steps:
@@ -477,7 +494,7 @@ jobs:
     name: Remember the candidate's failed smoke
     needs: [evaluate, smoke-fast-tier-candidate]
     if: always() && needs.smoke-fast-tier-candidate.outputs.verdict == 'fail'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -505,7 +522,7 @@ jobs:
   aggregate-smoke-alarm:
     name: Aggregate DMG-smoke alarm
     if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -523,7 +540,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: "24"
+          node-version-file: .node-version
           package-manager-cache: false
 
       - name: Evaluate the aggregate alarm
@@ -541,7 +558,7 @@ jobs:
     name: Read the smoke incident acknowledgement (no credential)
     needs: aggregate-smoke-alarm
     if: needs.aggregate-smoke-alarm.outputs.observed == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     outputs:
@@ -576,7 +593,7 @@ jobs:
     name: Page the release channel about the fast-tier gate
     needs: [aggregate-smoke-alarm, read-smoke-incident]
     if: needs.aggregate-smoke-alarm.outputs.observed == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     cache-mode: write-only
     timeout-minutes: 10
     permissions:
@@ -590,7 +607,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: "24"
+          node-version-file: .node-version
           package-manager-cache: false
 
       - name: Write the handed-over acknowledgement

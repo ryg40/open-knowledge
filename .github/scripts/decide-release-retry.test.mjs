@@ -7,6 +7,7 @@ import { afterAll, describe, expect, test } from 'vitest';
 import { parse } from 'yaml';
 import { classifyFailedJob, decideRetry, RETRYABLE_OUTCOMES } from './decide-release-retry.mjs';
 import { STOP_OUTCOMES } from './retry-transient.mjs';
+import { refusalHeadline } from './shipped-fix-containment.mjs';
 
 const failure = (message) => ({ level: 'failure', message });
 const notice = (message) => ({ level: 'notice', message });
@@ -123,7 +124,7 @@ describe('decideRetry', () => {
     const jobs = [
       ...timedOut,
       {
-        name: 'build-linux (stable, ubuntu-latest)',
+        name: 'build-linux (stable, ubuntu-26.04)',
         conclusion: 'failure',
         annotations: [failure('Failed to FinalizeArtifact: Unable to make request: ETIMEDOUT')],
       },
@@ -206,7 +207,7 @@ describe('decideRetry', () => {
   test('re-runs a timed-out job, which GitHub reports as cancelled', () => {
     const jobs = [
       {
-        name: 'build-linux (stable, ubuntu-latest)',
+        name: 'build-linux (stable, ubuntu-26.04)',
         conclusion: 'cancelled',
         annotations: [
           failure('The job has exceeded the maximum execution time of 45m0s'),
@@ -220,6 +221,62 @@ describe('decideRetry', () => {
   test('counts a cancelled job as failed', () => {
     const jobs = [{ name: 'build-macos (stable)', conclusion: 'cancelled', annotations: [EXIT_1] }];
     expect(decideRetry({ ...stable, jobs }).action).toBe('page');
+  });
+});
+
+describe('a stable the shipped-fix check refused is paged, never re-run', () => {
+  const headline = refusalHeadline(
+    {
+      uncovered: [
+        {
+          sha: 'a66f9e77679cb6fad68eb0b8bdd8ff5b54edca49',
+          subject: 'fix(ok): keep the update-ready notice reachable (#5610)',
+          pr: '5610',
+          stables: ['v0.82.3'],
+        },
+      ],
+    },
+    'v0.83.0',
+  );
+
+  test('a prepare refusal is not a retryable cause, even beside a retryable packaging stop', () => {
+    const jobs = [
+      {
+        name: 'prepare',
+        conclusion: 'failure',
+        annotations: [failure(headline), failure('Process completed with exit code 2.')],
+      },
+      {
+        name: 'build-macos (stable)',
+        conclusion: 'failure',
+        annotations: [EXIT_1, stop('attempt-timeout', 'control:attempt-timeout')],
+      },
+      { name: 'publish-assets', conclusion: 'skipped', annotations: [] },
+    ];
+    expect(classifyFailedJob(jobs[0].annotations)).toEqual({ retryable: false, cause: headline });
+    expect(decideRetry({ ...stable, jobs })).toEqual({
+      action: 'page',
+      reason:
+        'prepare: v0.83.0 lacks 1 fix that a published stable already shipped: #5610 (v0.82.3).',
+    });
+  });
+
+  test('a finalize refusal right before publishing is paged too', () => {
+    const jobs = [
+      { name: 'prepare', conclusion: 'success', annotations: [] },
+      { name: 'build-macos (stable)', conclusion: 'success', annotations: [] },
+      { name: 'publish-assets', conclusion: 'success', annotations: [] },
+      {
+        name: 'finalize',
+        conclusion: 'failure',
+        annotations: [failure(headline), failure('Process completed with exit code 2.')],
+      },
+    ];
+    expect(decideRetry({ ...stable, jobs })).toEqual({
+      action: 'page',
+      reason:
+        'finalize: v0.83.0 lacks 1 fix that a published stable already shipped: #5610 (v0.82.3).',
+    });
   });
 });
 

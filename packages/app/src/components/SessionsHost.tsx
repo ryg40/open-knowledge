@@ -1,7 +1,11 @@
 // oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — physical margin/padding/inset utilities predate the rule; drain by swapping ml/mr → ms/me, pl/pr → ps/pe, left/right → start/end, then deleting this line. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-physical-direction-utility
 
 import type { AttachmentPart, ThreadInfo } from '@inkeep/open-knowledge-core/acp/thread-protocol';
-import { TERMINAL_CLIS, type TerminalCli } from '@inkeep/open-knowledge-core/handoff';
+import {
+  buildTerminalInputBytes,
+  TERMINAL_CLIS,
+  type TerminalCli,
+} from '@inkeep/open-knowledge-core/handoff';
 import type { TerminalPlacement } from '@inkeep/open-knowledge-core/terminal-layout';
 import { useLingui } from '@lingui/react/macro';
 import { SquareTerminalIcon } from 'lucide-react';
@@ -19,6 +23,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { toast } from 'sonner';
+import { ChatHistorySideMenuItem } from '@/components/acp/ChatHistorySideMenuItem';
 import { RegisteredAgentIcon } from '@/components/acp/RegisteredAgentIcon';
 import {
   ThreadHistoryPanel,
@@ -40,6 +45,7 @@ import { useEnabledOverrides } from '@/lib/acp/enabled-agents';
 import { hasInflightThreadLaunch, launchAgentThread } from '@/lib/acp/launch-agent-thread';
 import {
   enabledTerminalClis,
+  LAUNCHER_KIND_PANE,
   type LauncherSelection,
   resolveLauncherSelection,
 } from '@/lib/acp/launcher-selection';
@@ -67,6 +73,7 @@ import {
   type ThreadDraftContent,
 } from '@/lib/acp/thread-draft-staging';
 import { threadHasUserMessage } from '@/lib/acp/thread-event-model';
+import { usePreferredSessionSelection } from '@/lib/acp/use-preferred-session-selection';
 import type { OkDesktopBridge, OkTerminalRestartSnapshot } from '@/lib/desktop-bridge-types';
 import { emitDiagnosticBreadcrumb } from '@/lib/diagnostic-breadcrumb';
 import {
@@ -81,7 +88,9 @@ import { matchesPrimaryModifier, type ShortcutPlatform } from '@/lib/keyboard-sh
 import { subscribeLocalMenuAction } from '@/lib/local-menu-action-bus';
 import type { NewSessionChoice } from '@/lib/new-session-choice';
 import { isOverlayLayerOpen } from '@/lib/overlay-layers';
+import { paneVisibilityStore } from '@/lib/pane-visibility-store';
 import { RESTORE_SETTLE_TIMEOUT_MS } from '@/lib/restore-settle-timeout';
+import { useChatHistorySide } from '@/lib/sidebar-side-store';
 import { usePreferBareTerminal, writePreferBareTerminal } from '@/lib/terminal-new-tab-store';
 import {
   parseStickyCliId,
@@ -108,6 +117,7 @@ import {
   subscribeToActiveTerminalInput,
 } from './handoff/terminal-input-events';
 import { requestTerminalLaunch } from './handoff/terminal-launch-events';
+import { isBracketedPasteEnabled } from './handoff/terminal-paste-mode';
 import { TerminalGate } from './TerminalGate';
 import { TerminalNewChatButton } from './TerminalNewChatButton';
 import {
@@ -214,6 +224,16 @@ function focusInsideHost(hostEl: HTMLElement | null): boolean {
   return hostEl?.contains(document.activeElement) ?? false;
 }
 
+function focusRemainsUsable(element: Element | null): boolean {
+  return (
+    element instanceof HTMLElement &&
+    element !== document.body &&
+    element.isConnected &&
+    element.closest('[inert]') == null &&
+    element.getClientRects().length > 0
+  );
+}
+
 function focusAvailableButton(candidate: HTMLButtonElement | null): HTMLButtonElement | null {
   if (
     candidate == null ||
@@ -270,10 +290,10 @@ function threadTabState(info: ThreadInfo): ThreadTabState {
 }
 
 const THREAD_TAB_DOT_CLASSES: Record<ThreadTabState, string> = {
-  working: 'bg-sky-500 animate-pulse',
-  'needs-you': 'bg-amber-500',
-  ready: 'bg-emerald-500',
-  stopped: 'bg-red-500',
+  working: 'bg-info animate-pulse',
+  'needs-you': 'bg-warning',
+  ready: 'bg-success',
+  stopped: 'bg-destructive',
   closed: 'bg-muted-foreground',
 };
 
@@ -349,14 +369,10 @@ function terminalTabIcon(): ReactNode {
 }
 
 const THREAD_TINT_RINGS: readonly string[] = [
-  'ring-violet-400/60',
-  'ring-fuchsia-400/60',
-  'ring-pink-400/60',
-  'ring-cyan-400/60',
-  'ring-teal-400/60',
-  'ring-lime-400/60',
-  'ring-yellow-400/60',
-  'ring-stone-400/60',
+  'ring-identity-1/60',
+  'ring-identity-2/60',
+  'ring-identity-3/60',
+  'ring-identity-4/60',
 ];
 
 function threadTintClass(threadId: string): string {
@@ -404,16 +420,19 @@ interface SessionsHostSharedProps {
   readonly terminalCapable?: boolean;
   readonly terminalPlacement?: TerminalPlacement;
   readonly onTerminalPlacementChange?: (placement: TerminalPlacement) => void;
-  readonly reserveRightRevealTabGutter?: boolean;
   readonly terminalRestoreRevealNonce?: number;
   readonly visible: boolean;
-  readonly onVisibleChange: (visible: boolean) => void;
+  readonly wideVisible?: boolean;
+  readonly onVisibleChange: (visible: boolean, reason?: 'session-close') => void;
+  readonly onPreferredSessionHostReady?: () => void;
   readonly launch?: TerminalLaunchIntent | null;
   readonly commandLaunch?: { readonly id: TerminalCommandId; readonly nonce: number } | null;
   readonly threadLaunch?: ThreadLaunchIntent | null;
+  readonly focusRevealRequestNonce?: number;
   readonly installedClis?: Partial<Record<TerminalCli, boolean>>;
   readonly container: HTMLElement | null;
   readonly isShowing: boolean;
+  readonly revealFocusHold?: boolean;
   readonly onRequestEditorFocus: () => void;
 }
 
@@ -430,12 +449,6 @@ type SessionsHostProps = SessionsHostSharedProps &
   );
 
 const REVEAL_FOCUS_LANDING_TIMEOUT_MS = 5_000;
-
-const TERMINAL_DOCK_KINDS: Record<Exclude<LauncherSelection['kind'], 'thread' | 'none'>, true> = {
-  cli: true,
-  terminal: true,
-  desktop: true,
-};
 
 function closeHistory(
   setOpen: (open: boolean) => void,
@@ -459,17 +472,20 @@ export function SessionsHost({
   surface,
   terminalPlacement = 'bottom',
   onTerminalPlacementChange,
-  reserveRightRevealTabGutter,
   terminalRestoreRevealNonce = 0,
   visible,
+  wideVisible = visible,
   onVisibleChange,
+  onPreferredSessionHostReady,
   agentsVisibilityRestoreSettled,
   launch = null,
   commandLaunch = null,
   threadLaunch = null,
+  focusRevealRequestNonce = 0,
   installedClis,
   container,
   isShowing,
+  revealFocusHold = false,
   onRequestEditorFocus,
 }: SessionsHostProps) {
   const { t } = useLingui();
@@ -480,7 +496,7 @@ export function SessionsHost({
   const terminalAvailable = hostTerminals && terminalCapable && bridge?.terminal != null;
   const edge: SessionPanelEdge = hostThreads ? 'right' : terminalPlacement;
   const persistSurface: DockSurface = hostThreads ? 'agents' : 'terminal';
-  const persistedPanelLevel = hostThreads && visible;
+  const persistedPanelLevel = hostThreads && wideVisible;
   const persistsOrder = !isWindow;
   const shortcutPlatform: ShortcutPlatform | undefined =
     bridge?.platform === 'darwin'
@@ -500,12 +516,18 @@ export function SessionsHost({
   const hostStateReportsRef = useRef(0);
 
   useLayoutEffect(() => {
+    if (hostEl == null) return;
+    return () => hostEl.remove();
+  }, [hostEl]);
+
+  useLayoutEffect(() => {
     if (hostEl == null || container == null) return;
     if (hostEl.parentElement !== container) container.appendChild(hostEl);
     setAttachedHostEl(hostEl);
   }, [hostEl, container]);
 
   const [historyOpen, setHistoryOpen] = useState(false);
+  const chatHistorySide = useChatHistorySide();
   const { mode: historyMode, remeasure: remeasureHistoryMode } = useHistoryPresentationMode(
     container,
     hostThreads,
@@ -567,6 +589,11 @@ export function SessionsHost({
   const lastHandledThreadNonceRef = useRef<number | null>(null);
   const settingsShownForNonceRef = useRef<number | null>(null);
   const seedOwedRef = useRef(false);
+  const seededThreadLaunchRef = useRef<{
+    agentKey: string;
+    connectionGeneration: number;
+  } | null>(null);
+  const seededThreadIdRef = useRef<string | null>(null);
   const initialVisibleSeedAttemptedRef = useRef(false);
   const [emptyAgentLaunchState, setEmptyAgentLaunchState] = useState<EmptyAgentLaunchState>('idle');
   const pendingAgentLaunchRequestRef = useRef<AgentPaneLaunchRequest | null>(null);
@@ -583,9 +610,21 @@ export function SessionsHost({
   const persistSuppressedRef = useRef<() => boolean>(() => false);
   const lastHandledCommandNonceRef = useRef<number | null>(null);
   const prevVisibleRef = useRef(isWindow ? false : visible);
+  const revealFocusRequestedRef = useRef(false);
+  const revealFocusRequestNonceRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (revealFocusRequestNonceRef.current === focusRevealRequestNonce) return;
+    revealFocusRequestNonceRef.current = focusRevealRequestNonce;
+    if (focusRevealRequestNonce > 0) revealFocusRequestedRef.current = true;
+  }, [focusRevealRequestNonce]);
   const consumedRestoreRevealNonceRef = useRef(terminalRestoreRevealNonce);
   const ptyIdBySessionRef = useRef(new Map<string, string>());
   const stripLaunchNonceRef = useRef(0);
+
+  const revealFocusHoldRef = useRef(revealFocusHold);
+  useLayoutEffect(() => {
+    revealFocusHoldRef.current = revealFocusHold;
+  }, [revealFocusHold]);
 
   useLayoutEffect(() => {
     const revealing = isShowing && !revealFocusWasShowingRef.current;
@@ -705,7 +744,7 @@ export function SessionsHost({
     const snapshot = buildTerminalRestartSnapshot(sessionsRef.current, activeSessionIdRef.current);
     if (hostThreads) {
       writeDockSessionOrder(bridge, 'agents', { order, activeKey }, snapshot);
-      writeAgentsPanelLevel(bridge, visible);
+      writeAgentsPanelLevel(bridge, wideVisible);
     } else {
       writeDockSessionOrder(bridge, 'terminal', { order, activeKey }, snapshot);
     }
@@ -786,7 +825,10 @@ export function SessionsHost({
     openSession({ prompt: null, cli, nonce: stripLaunchNonceRef.current }, null, provenance);
   }
 
-  function launchAgentForPane(request: AgentPaneLaunchRequest) {
+  function launchAgentForPane(
+    request: AgentPaneLaunchRequest,
+    onCreated?: (info: ThreadInfo) => void,
+  ) {
     const {
       agent,
       prompt = null,
@@ -808,6 +850,7 @@ export function SessionsHost({
       titleHint,
       stageDraft,
       attachments,
+      onCreated,
     ).then((outcome) => {
       if (outcome === 'deduped') {
         toast.error(t`Already starting a chat with this agent — try again in a moment.`);
@@ -865,7 +908,21 @@ export function SessionsHost({
   function seedOnReveal(): boolean {
     if (hostThreads) {
       if (newSessionChoice.kind !== 'agent' || newSessionChoice.agent == null) return false;
-      void launchAgentForPane({ agent: newSessionChoice.agent });
+      const agent = newSessionChoice.agent;
+      const seededLaunch = {
+        agentKey: `${agent.source}:${agent.id}`,
+        connectionGeneration: getAgentThreadClient().getConnectionGeneration(),
+      };
+      seededThreadIdRef.current = null;
+      seededThreadLaunchRef.current = seededLaunch;
+      void launchAgentForPane({ agent }, (info) => {
+        if (seededThreadLaunchRef.current !== seededLaunch) return;
+        seededThreadIdRef.current = info.threadId;
+        seededThreadLaunchRef.current = null;
+      }).then((outcome) => {
+        if (outcome !== 'started' && seededThreadLaunchRef.current === seededLaunch)
+          seededThreadLaunchRef.current = null;
+      });
       return true;
     }
     if (newSessionChoice.kind === 'terminal') openSession(null, null, 'restore-seed');
@@ -900,23 +957,15 @@ export function SessionsHost({
     bareTerminalFallback: false,
   });
 
-  const preferredSessionSelection = resolveLauncherSelection({
-    sticky: stickyAgentId,
-    effectiveThreadAgent: effectiveDefaultAgent,
-    enabledClis: enabledTerminalClis(enabledOverrides, installedClis ?? {}),
-    enabledDesktopTargets: [],
+  const preferredSessionSelection = usePreferredSessionSelection({
     installedClis: installedClis ?? {},
     terminalAvailable: terminalCapable,
     threadsAvailable: !isWindow,
-    desktopSelectable: false,
-    preferBareTerminal,
-    bareTerminalFallback: true,
   });
 
   function claimsSessionKind(kind: LauncherSelection['kind']): boolean {
     if (isWindow) return true;
-    const agentsPanelKind = kind === 'thread' || kind === 'none';
-    return hostThreads ? agentsPanelKind : kind in TERMINAL_DOCK_KINDS;
+    return LAUNCHER_KIND_PANE[kind] === (hostThreads ? 'agents' : 'terminal');
   }
 
   function publishReusableSessionFrom(sessionList: readonly SessionDescriptor[], activeId: string) {
@@ -955,9 +1004,14 @@ export function SessionsHost({
     publishReusableSessionFrom(sessions, activeSessionId);
   }, [activeSessionId, sessions, openThreadTabs]);
 
+  function requestHostPaneReveal() {
+    if (!visible) onVisibleChange(true);
+    else if (hostThreads) paneVisibilityStore.request('agents', true);
+  }
+
   function revealForReuse() {
     dismissCoveringHistory();
-    if (!visible) onVisibleChange(true);
+    requestHostPaneReveal();
   }
 
   function dispatchAskAi({ text, newTab, submit, target }: ActiveTerminalInputDetail) {
@@ -965,21 +1019,23 @@ export function SessionsHost({
     if (target === 'agents') {
       if (!hostThreads) return;
     } else if (!claimsSessionKind(selection.kind)) return;
-    if (!visible) onVisibleChange(true);
+    requestHostPaneReveal();
     dismissCoveringHistory();
     const activeId = activeSessionIdRef.current;
     const active = sessionsRef.current.find((s) => s.id === activeId);
     if (!newTab && active != null) {
       if (active.kind === 'thread') {
         stageThreadDraft(active.threadId, text);
-        revealForReuse();
         queueMicrotask(() => focusSession(active));
         return;
       }
       const livePtyId = ptyIdBySessionRef.current.get(active.id);
       const terminal = bridge?.terminal;
       if (livePtyId != null && terminal != null && active.launch?.cli != null) {
-        terminal.input(livePtyId, text);
+        terminal.input(
+          livePtyId,
+          buildTerminalInputBytes(text, isBracketedPasteEnabled(livePtyId)),
+        );
         revealForReuse();
         queueMicrotask(() => focusTerminalSession(activeId));
         return;
@@ -1134,7 +1190,7 @@ export function SessionsHost({
   }
   function launchPreferredSession() {
     if (!claimsSessionKind(preferredSessionSelection.kind)) return;
-    if (!visible) onVisibleChange(true);
+    requestHostPaneReveal();
     launchSelectedNewTab();
   }
 
@@ -1146,6 +1202,7 @@ export function SessionsHost({
   const dispatchAskAiRef = useRef(dispatchAskAi);
   const revealForReuseRef = useRef(revealForReuse);
   const launchPreferredSessionRef = useRef(launchPreferredSession);
+  const preferredSessionKindRef = useRef(preferredSessionSelection.kind);
 
   function closeSession(id: string) {
     const current = sessionsRef.current;
@@ -1168,7 +1225,7 @@ export function SessionsHost({
       setSessions(current.filter((s) => s.id !== id));
     }
     if (isLast) {
-      onVisibleChange(false);
+      onVisibleChange(false, 'session-close');
       onRequestEditorFocus();
     }
   }
@@ -1191,6 +1248,7 @@ export function SessionsHost({
     dispatchAskAiRef.current = dispatchAskAi;
     revealForReuseRef.current = revealForReuse;
     launchPreferredSessionRef.current = launchPreferredSession;
+    preferredSessionKindRef.current = preferredSessionSelection.kind;
     noteUserArrangementRef.current = noteUserArrangement;
     moveActiveSessionRef.current = moveActiveSession;
     activeSessionIdRef.current = activeSessionId;
@@ -1318,18 +1376,52 @@ export function SessionsHost({
   const liveThreadIds = openThreadTabs
     .filter((info) => info.archived !== true)
     .map((info) => info.threadId);
-  const prevLiveThreadIdsRef = useRef<readonly string[]>(liveThreadIds);
+  const prevLiveThreadIdsRef = useRef<readonly string[]>(
+    initialRosterThreadIds === null ? liveThreadIds : [...initialRosterThreadIds],
+  );
+  const initialRosterWasUnknownRef = useRef(initialRosterThreadIds === null);
   useEffect(() => {
     if (!hostThreads) return;
     if (!agentsVisibilityRestoreSettled) return;
     const previous = prevLiveThreadIdsRef.current;
     prevLiveThreadIdsRef.current = liveThreadIds;
-    const added = liveThreadIds.filter((id) => !previous.includes(id));
-    if (added.length === 0 || visible) return;
-    const absorbsReloadSnapshot = added.every((id) => initialRosterThreadIds?.has(id) === true);
+    const rosterWasUnknown = initialRosterWasUnknownRef.current;
+    const rosterIsKnown = initialRosterThreadIds !== null;
+    initialRosterWasUnknownRef.current = !rosterIsKnown;
+    const added =
+      rosterWasUnknown && rosterIsKnown
+        ? liveThreadIds.filter((id) => !initialRosterThreadIds.has(id))
+        : liveThreadIds.filter((id) => !previous.includes(id));
+    if (added.length === 0) return;
+    const seededLaunch = seededThreadLaunchRef.current;
+    const seededThreadId = added.find((id) => {
+      if (id === seededThreadIdRef.current) return true;
+      if (
+        seededLaunch === null ||
+        seededLaunch.connectionGeneration !== getAgentThreadClient().getConnectionGeneration()
+      )
+        return false;
+      const info = openThreadTabs.find((thread) => thread.threadId === id);
+      return (
+        initialRosterThreadIds?.has(id) !== true &&
+        info !== undefined &&
+        `${info.agent.source}:${info.agent.id}` === seededLaunch.agentKey
+      );
+    });
+    if (seededThreadId !== undefined) {
+      seededThreadIdRef.current = seededThreadId;
+      seededThreadLaunchRef.current = null;
+    }
+    if (visible) return;
+    const newArrival = added.filter((id) => id !== seededThreadId);
+    if (newArrival.length === 0) return;
+    const absorbsReloadSnapshot = newArrival.every(
+      (id) => initialRosterThreadIds?.has(id) === true,
+    );
     if (!absorbsReloadSnapshot) onVisibleChange(true);
   }, [
     liveThreadIds,
+    openThreadTabs,
     hostThreads,
     agentsVisibilityRestoreSettled,
     visible,
@@ -1387,6 +1479,14 @@ export function SessionsHost({
       !(hostThreads && hasInflightThreadLaunch())
     ) {
       if (restoredVisibility && !restoreAbandonedRef.current) return;
+      if (hostThreads) {
+        if (initialRosterThreadIds === null) return;
+        initialVisibleSeedAttemptedRef.current = true;
+        if (openThreadTabs.length > 0) {
+          seedOwedRef.current = false;
+          return;
+        }
+      }
       seedOwedRef.current = !seedOnRevealRef.current();
       return;
     }
@@ -1409,7 +1509,12 @@ export function SessionsHost({
       return;
     }
     if (!seedOwedRef.current) return;
-    if (!visible || sessions.length > 0 || threadLaunchPending) {
+    if (
+      !visible ||
+      sessions.length > 0 ||
+      threadLaunchPending ||
+      (hostThreads && openThreadTabs.length > 0)
+    ) {
       seedOwedRef.current = false;
       return;
     }
@@ -1667,8 +1772,20 @@ export function SessionsHost({
   }, [hostThreads]);
 
   useEffect(() => {
-    return subscribeToPreferredSessionRequests(() => launchPreferredSessionRef.current());
-  }, []);
+    const unsubscribe = subscribeToPreferredSessionRequests(
+      () => launchPreferredSessionRef.current(),
+      window,
+      () => {
+        if (isWindow) return true;
+        return (
+          LAUNCHER_KIND_PANE[preferredSessionKindRef.current] ===
+          (hostThreads ? 'agents' : 'terminal')
+        );
+      },
+    );
+    onPreferredSessionHostReady?.();
+    return unsubscribe;
+  }, [hostThreads, isWindow, onPreferredSessionHostReady]);
 
   useEffect(() => {
     if (!hostTerminals) return;
@@ -1762,6 +1879,22 @@ export function SessionsHost({
   useEffect(() => {
     if (!isShowing || attachedHostEl == null) return;
     const focusOrigin = document.activeElement;
+    const focusRevealRequested = revealFocusRequestedRef.current;
+    revealFocusRequestedRef.current = false;
+    const focusOriginPane =
+      focusOrigin instanceof HTMLElement
+        ? focusOrigin.getAttribute('data-header-pane-button')
+        : null;
+    const focusOriginIsOtherPaneButton =
+      !focusRevealRequested &&
+      hostThreads &&
+      focusRemainsUsable(focusOrigin) &&
+      focusOriginPane !== null &&
+      focusOriginPane !== 'agents';
+    if (revealFocusHoldRef.current && focusRemainsUsable(focusOrigin)) {
+      revealFocusRef.current = null;
+      return;
+    }
     const initialTargetId = revealFocusRef.current?.pendingThreadId ?? activeSessionIdRef.current;
     const initialActive = sessionsRef.current.find((s) => s.id === initialTargetId);
     let initialFallbackLanding = false;
@@ -1775,12 +1908,12 @@ export function SessionsHost({
       initialFallbackLanding = fallback != null && document.activeElement === fallback;
     }
     const emptySurfaceLanding =
-      hostThreads && initialActive == null
+      hostThreads && initialActive == null && !focusOriginIsOtherPaneButton
         ? (focusAvailableButton(emptyAgentActionButtonRef.current) ??
           focusAvailableButton(emptyAgentStateFallbackButton(attachedHostEl)))
         : null;
     revealFocusRef.current = { pendingThreadId: revealFocusRef.current?.pendingThreadId ?? null };
-    let landed = initialFallbackLanding;
+    let landed = focusOriginIsOtherPaneButton || initialFallbackLanding;
     let attemptedFallback: HTMLElement | null = null;
     let retryFrame: number | null = null;
     let retired = false;
@@ -1793,6 +1926,16 @@ export function SessionsHost({
       const targetId = revealFocusRef.current?.pendingThreadId ?? activeSessionIdRef.current;
       const active = sessionsRef.current.find((s) => s.id === targetId);
       if (active == null) return;
+      if (
+        focusOriginIsOtherPaneButton &&
+        document.activeElement === focusOrigin &&
+        focusRemainsUsable(focusOrigin)
+      ) {
+        const revealFocus = revealFocusRef.current;
+        if (revealFocus != null) revealFocus.pendingThreadId = active.id;
+        landed = true;
+        return;
+      }
       const focused = document.activeElement;
       const fallback = fallbackSessionFocusElement(active);
       if (
@@ -1943,7 +2086,7 @@ export function SessionsHost({
     />
   ) : null;
 
-  const trailingControls = hostThreads ? (
+  const historyToggle = hostThreads ? (
     <ThreadHistoryToggle
       open={historyOpen}
       panelId={historyPanelId}
@@ -2074,7 +2217,10 @@ export function SessionsHost({
         if (session != null) queueMicrotask(() => focusSession(session));
       }}
       newButton={newButton}
-      trailingControls={trailingControls}
+      leadingControls={chatHistorySide === 'start' ? historyToggle : null}
+      trailingControls={chatHistorySide === 'end' ? historyToggle : null}
+      rowMenu={hostThreads ? <ChatHistorySideMenuItem side={chatHistorySide} /> : undefined}
+      rowMenuFocusFallback={hostThreads ? historyToggleRef : undefined}
       onClose={closeSession}
       onRename={renameSession}
       onReorder={reorderSessions}
@@ -2083,15 +2229,6 @@ export function SessionsHost({
       }}
       edge={edge}
       onPlacementChange={surface === 'terminal-dock' ? onTerminalPlacementChange : undefined}
-      reserveRightRevealTabGutter={reserveRightRevealTabGutter}
-      onCollapse={
-        isWindow
-          ? undefined
-          : () => {
-              onVisibleChange(false);
-              onRequestEditorFocus();
-            }
-      }
       draggable={isWindow}
       className="h-full"
     >
@@ -2103,6 +2240,29 @@ export function SessionsHost({
     </TerminalTabStrip>
   );
 
+  const historySurface = historyOpen ? (
+    <div
+      className={cn(
+        'z-20 h-full max-w-full bg-sidebar',
+        historyMode === 'cover'
+          ? 'absolute inset-0 w-full shadow-xl [-webkit-app-region:no-drag]'
+          : cn(
+              'w-(--history-panel-width) shrink-0',
+              chatHistorySide === 'start' ? 'border-e' : 'border-s',
+            ),
+      )}
+      style={
+        {
+          '--history-panel-width': `${HISTORY_PANEL_WIDTH_PX}px`,
+        } as CSSProperties
+      }
+      data-testid="agent-thread-history-surface"
+      data-side={chatHistorySide}
+    >
+      {historyPanel}
+    </div>
+  ) : null;
+
   const sessionViews = showStrip ? (
     hostThreads ? (
       <ThreadHistorySearchProvider scope={threadScope}>
@@ -2110,6 +2270,7 @@ export function SessionsHost({
           className="relative flex h-full min-h-0 min-w-0 overflow-hidden"
           data-testid="agent-panel-layout"
         >
+          {chatHistorySide === 'start' ? historySurface : null}
           <div
             className="flex min-h-0 min-w-0 flex-1 flex-col"
             data-testid="agent-panel-session-surface"
@@ -2117,24 +2278,7 @@ export function SessionsHost({
           >
             {sessionStrip}
           </div>
-          {historyOpen ? (
-            <div
-              className={cn(
-                'z-20 h-full max-w-full bg-background',
-                historyMode === 'cover'
-                  ? 'absolute inset-0 w-full shadow-xl'
-                  : 'w-(--history-panel-width) shrink-0 border-s',
-              )}
-              style={
-                {
-                  '--history-panel-width': `${HISTORY_PANEL_WIDTH_PX}px`,
-                } as CSSProperties
-              }
-              data-testid="agent-thread-history-surface"
-            >
-              {historyPanel}
-            </div>
-          ) : null}
+          {chatHistorySide === 'end' ? historySurface : null}
         </div>
       </ThreadHistorySearchProvider>
     ) : (
@@ -2199,7 +2343,7 @@ function ThreadConnectionBanner() {
   const { t } = useLingui();
   return (
     <div
-      className="shrink-0 border-amber-500/30 border-b bg-amber-500/5 px-3 py-1 text-amber-700 text-xs dark:text-amber-400"
+      className="shrink-0 border-warning/30 border-b bg-warning/5 px-3 py-1 text-warning text-xs"
       data-testid="agent-thread-reconnecting"
     >
       {t`Reconnecting to the agent service…`}

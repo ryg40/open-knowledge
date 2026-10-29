@@ -15,6 +15,7 @@ import {
   ServerCapabilityMismatchError,
   SyncTimeoutError,
 } from '@/editor/sync-promise';
+import { useBugReport } from '@/lib/bug-report-capture';
 import { recallComponentStack, rememberComponentStack } from '@/lib/component-stack-registry';
 import { restartCollabServer } from '@/lib/restart-collab-server';
 
@@ -109,7 +110,7 @@ function DocumentErrorFallback({
   const { title, summary } = errorCopy(error);
   const canGoBack = !!previousDocName && !!onNavigateBack;
   const retryRef = useRef<HTMLButtonElement>(null);
-  const [reportOpen, setReportOpen] = useState(false);
+  const bugReport = useBugReport();
   const [restarting, setRestarting] = useState(false);
   const bridge = typeof window !== 'undefined' ? window.okDesktop : undefined;
   const restartBridge = bridge && isServerReachError(error) ? bridge : null;
@@ -125,7 +126,6 @@ function DocumentErrorFallback({
       data-slot="document-error-boundary"
       className="flex h-full flex-col items-center justify-center gap-8 p-8 text-center"
     >
-      {}
       <OkBlobRunnerEasterEgg keyboard={isServerReachError(error)} />
       <div className="flex flex-col items-center gap-1">
         <h2 id="document-error-title" className="text-2xl font-light tracking-tighter text-balance">
@@ -163,7 +163,7 @@ function DocumentErrorFallback({
           <Button
             variant="ghost"
             className="font-mono uppercase"
-            onClick={() => setReportOpen(true)}
+            onClick={() => bugReport.start({ launcherBorne: false })}
           >
             <Trans>Report this error</Trans>
           </Button>
@@ -186,8 +186,8 @@ function DocumentErrorFallback({
       </div>
       {bridge ? (
         <ReportBugDialog
-          open={reportOpen}
-          onOpenChange={setReportOpen}
+          capture={bugReport.capture}
+          onClose={bugReport.close}
           crashContext={{
             source: 'document view',
             docName: errorDocName(error) ?? activeDocName,

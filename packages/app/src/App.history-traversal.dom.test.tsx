@@ -2,6 +2,7 @@ import { cleanup, render, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { ResolvedNavigationTarget } from '@/components/navigation-targets';
+import { TooltipProvider } from '@/components/ui/tooltip';
 import {
   createEmptyEditorWorkspace,
   type EditorWorkspaceState,
@@ -9,6 +10,7 @@ import {
   transitionEditorWorkspace,
 } from '@/editor/editor-panes';
 import { tabIdForNavigationTarget } from '@/editor/editor-tabs';
+import { previewOpenDisposition } from '@/editor/preview-open-disposition';
 import {
   hashFromDocName,
   hashFromSkillPreview,
@@ -91,21 +93,15 @@ function applyOpen(target: ResolvedNavigationTarget, options: OpenOptions = {}) 
 }
 
 function clickDocRow(docName: string, previewTabsEnabled: boolean) {
-  applyOpen(
-    { kind: 'doc', target: docName, docName },
-    {
-      disposition: previewTabsEnabled ? 'preview' : 'permanent',
-      consumeActiveNewTab: true,
-    },
-  );
-  pushHashWithoutNavigation(hashFromDocName(docName));
+  const disposition = previewOpenDisposition(previewTabsEnabled);
+  applyOpen({ kind: 'doc', target: docName, docName }, { disposition, consumeActiveNewTab: true });
+  pushHashWithoutNavigation(hashFromDocName(docName), disposition);
 }
 
 function clickSkillPreviewRow(preview: SkillPreviewHashTarget, previewTabsEnabled: boolean) {
-  applyOpen(previewTarget(preview), {
-    tabBehavior: previewTabsEnabled ? 'replace-active' : 'append',
-  });
-  pushHashWithoutNavigation(hashFromSkillPreview(preview));
+  const disposition = previewOpenDisposition(previewTabsEnabled);
+  applyOpen(previewTarget(preview), { disposition });
+  pushHashWithoutNavigation(hashFromSkillPreview(preview), disposition);
 }
 
 let pages = new Set<string>();
@@ -189,6 +185,7 @@ vi.doMock('@/editor/EditorLifecycleFlush', () => ({ EditorLifecycleFlush: () => 
 vi.doMock('@/editor/BackgroundThrottleReporter', () => ({
   BackgroundThrottleReporter: () => null,
 }));
+vi.doMock('@/editor/StaleTabReloadPrompt', () => ({ StaleTabReloadPrompt: () => null }));
 vi.doMock('@/components/McpConsentDialog', () => ({ McpConsentDialog: () => null }));
 vi.doMock('@/components/CommandPalette', () => ({ CommandPalette: () => null }));
 vi.doMock('@/components/AuthModal', () => ({ AuthModal: () => null }));
@@ -235,7 +232,7 @@ describe('history traversal and the preview tab slot', () => {
   });
 
   test('three sidebar preview clicks keep the strip at one tab', async () => {
-    const view = render(<App />);
+    const view = render(<App />, { wrapper: TooltipProvider });
     for (const doc of ['page-a', 'page-b', 'page-c']) {
       clickDocRow(doc, true);
       view.rerender(<App />);
@@ -247,7 +244,7 @@ describe('history traversal and the preview tab slot', () => {
   });
 
   test('back to a doc opened as a preview reuses the preview slot instead of appending', async () => {
-    const view = render(<App />);
+    const view = render(<App />, { wrapper: TooltipProvider });
     for (const doc of ['page-a', 'page-b', 'page-c']) {
       clickDocRow(doc, true);
       view.rerender(<App />);
@@ -270,7 +267,7 @@ describe('history traversal and the preview tab slot', () => {
   });
 
   test('a re-render between a traversal popstate and its hashchange reuses the preview slot', async () => {
-    const view = render(<App />);
+    const view = render(<App />, { wrapper: TooltipProvider });
     for (const doc of ['page-a', 'page-b', 'page-c']) {
       clickDocRow(doc, true);
       view.rerender(<App />);
@@ -296,7 +293,7 @@ describe('history traversal and the preview tab slot', () => {
   });
 
   test('a skill preview stays one reusable tab across a click away and back', async () => {
-    const view = render(<App />);
+    const view = render(<App />, { wrapper: TooltipProvider });
 
     clickSkillPreviewRow(SKILL_PREVIEW, true);
     view.rerender(<App />);
@@ -315,7 +312,7 @@ describe('history traversal and the preview tab slot', () => {
   });
 
   test('a bundle file clicked inside a preview moves the selection on the same tab', async () => {
-    const view = render(<App />);
+    const view = render(<App />, { wrapper: TooltipProvider });
 
     clickSkillPreviewRow(EXPLORE_PREVIEW, true);
     view.rerender(<App />);
@@ -334,7 +331,7 @@ describe('history traversal and the preview tab slot', () => {
 
   test('back to a doc whose tab is still open activates it without appending', async () => {
     mergedConfig = { editor: { previewTabs: false } };
-    const view = render(<App />);
+    const view = render(<App />, { wrapper: TooltipProvider });
 
     clickDocRow('page-a', false);
     view.rerender(<App />);
@@ -350,7 +347,7 @@ describe('history traversal and the preview tab slot', () => {
   });
 
   test('with preview tabs off, back to a closed doc appends instead of taking a slot', async () => {
-    const view = render(<App />);
+    const view = render(<App />, { wrapper: TooltipProvider });
 
     clickDocRow('page-a', true);
     view.rerender(<App />);

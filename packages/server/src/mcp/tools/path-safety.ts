@@ -1,4 +1,5 @@
-import { isAbsolute, relative, resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { escapesRoot } from '../../path-utils.ts';
 
 interface ContainmentOk {
   ok: true;
@@ -12,11 +13,6 @@ interface ContainmentErr {
 }
 
 type ContainmentResult = ContainmentOk | ContainmentErr;
-
-export function escapesRoot(rel: string): boolean {
-  const forwardSlashed = rel.replace(/\\/g, '/');
-  return forwardSlashed === '..' || forwardSlashed.startsWith('../') || isAbsolute(rel);
-}
 
 export function resolveWithinRoot(root: string, candidate: string): ContainmentResult {
   if (typeof root !== 'string' || !isAbsolute(root)) {
@@ -40,5 +36,5 @@ export function resolveWithinRoot(root: string, candidate: string): ContainmentR
       reason: `path "${candidate}" escapes the configured root`,
     };
   }
-  return { ok: true, abs, rel };
+  return { ok: true, abs, rel: rel.split(sep).join('/') };
 }

@@ -3,7 +3,7 @@
 import type { ShareFreshness } from '@inkeep/open-knowledge-core/schemas/api';
 import { Trans, useLingui } from '@lingui/react/macro';
 import { CircleHelp, Share2 } from 'lucide-react';
-import { type Ref, useEffect, useRef, useState } from 'react';
+import { type Ref, useEffect, useId, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { CopyButton } from '@/components/CopyButton';
 import { Button } from '@/components/ui/button';
@@ -29,6 +29,7 @@ export interface ShareButtonProps {
 
 export function ShareButton({ input, onClickWhenNoRemote, triggerRef }: ShareButtonProps) {
   const { t } = useLingui();
+  const headingId = useId();
   const { status } = useGitSyncStatusDetailed();
   const [busy, setBusy] = useState(false);
   const [sharePopover, setSharePopover] = useState<{
@@ -98,7 +99,6 @@ export function ShareButton({ input, onClickWhenNoRemote, triggerRef }: ShareBut
         if (!open) setSharePopover(null);
       }}
     >
-      {}
       <PopoverAnchor asChild>
         <Button
           ref={triggerRef}
@@ -110,17 +110,20 @@ export function ShareButton({ input, onClickWhenNoRemote, triggerRef }: ShareBut
           className="gap-1.5 text-muted-foreground px-1.5"
           data-testid="share-button"
         >
-          <Share2 className="size-3.5" aria-hidden />
+          <Share2 className="size-4" aria-hidden />
           <Trans>Share</Trans>
         </Button>
       </PopoverAnchor>
       <PopoverContent
         align="end"
+        aria-labelledby={headingId}
         className={cn('flex flex-col gap-2', showFreshnessRow ? 'w-96' : 'w-80')}
         data-testid="share-button-popover"
       >
-        {}
-        <p className="font-mono tracking-wide uppercase text-muted-foreground text-xs">
+        <p
+          id={headingId}
+          className="font-mono tracking-wide uppercase text-muted-foreground text-xs"
+        >
           <Trans>Share</Trans>
         </p>
         {sharePopover?.autoCopyFailed ? (
@@ -143,7 +146,6 @@ export function ShareButton({ input, onClickWhenNoRemote, triggerRef }: ShareBut
             data-testid="share-button-url"
             aria-label={t`Share URL`}
           />
-          {}
           <div className="absolute inset-y-0 right-1 flex items-center">
             <div className="rounded-md bg-background/50 backdrop-blur-sm">
               <CopyButton

@@ -388,7 +388,7 @@ function SyncSectionContent({
                     href={status.remote.webUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-foreground hover:text-primary hover:underline inline-flex items-center gap-0.5"
+                    className="inline-flex items-center gap-0.5 text-primary underline-offset-2 hover:underline"
                     aria-label={t`Open ${status.remote.label} on GitHub (opens in a new tab)`}
                     data-testid="settings-sync-remote-link"
                   >
@@ -434,7 +434,6 @@ function SyncSectionContent({
             {genuineReadOnlyDenied ? (
               <Tooltip>
                 <TooltipTrigger asChild>
-                  {}
                   <span className="inline-flex">
                     <ToggleGroupItem
                       value="full"
@@ -524,7 +523,6 @@ function SyncSectionContent({
             <SyncRefusedSymlinks paths={status.refusedSymlinkPaths} />
           </div>
         )}
-        {}
         {status.pushPermission?.checkStatus === 'denied' &&
         (parkedOnNotFound || showSwitchToPullOnly || showDeniedHint) ? (
           <div className="mt-2 space-y-1" data-testid="settings-sync-identity">
@@ -551,7 +549,6 @@ function SyncSectionContent({
           </div>
         )}
       </div>
-      {}
       {mode !== 'off' && (
         <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
           <CollapsibleTrigger asChild>
@@ -651,7 +648,6 @@ function SyncSectionContent({
       )}
       <div className="rounded-md border p-3 space-y-2" data-testid="settings-sync-default">
         <div className="space-y-0.5">
-          {}
           <div className="flex items-center gap-2">
             <div id="settings-sync-default-label" className="text-sm font-medium">
               <Trans>Shared default</Trans>

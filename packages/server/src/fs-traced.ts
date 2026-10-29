@@ -1,16 +1,23 @@
-import type { RmOptions, WriteFileOptions } from 'node:fs';
+import type { BigIntStats, RmOptions, WriteFileOptions } from 'node:fs';
 import {
   appendFileSync,
   chmodSync,
+  closeSync,
+  constants,
   cpSync,
+  fstatSync,
   linkSync,
   mkdirSync,
+  openSync,
+  readFileSync,
   renameSync,
   rmdirSync,
   rmSync,
   symlinkSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { appendFile, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, sep } from 'node:path';
@@ -55,6 +62,11 @@ function buildAttrs(operation: string, path: string, extra?: Attributes): Attrib
 export const tracedChmodSync: typeof chmodSync = (path, mode) =>
   withSpanSync('fs.chmodSync', { attributes: buildAttrs('chmodSync', String(path)) }, () =>
     chmodSync(path, mode),
+  );
+
+export const tracedUtimesSync: typeof utimesSync = (path, atime, mtime) =>
+  withSpanSync('fs.utimesSync', { attributes: buildAttrs('utimesSync', String(path)) }, () =>
+    utimesSync(path, atime, mtime),
   );
 
 function byteLength(data: string | Uint8Array | ArrayBufferView): number {
@@ -144,6 +156,35 @@ export function tracedAppendFileSync(
   );
 }
 
+export function tracedAppendNoFollowSync(path: string, data: string, mode: number): void {
+  withSpanSync(
+    'fs.appendFileSync',
+    { attributes: buildAttrs('appendFileSync', path, { 'fs.bytes': byteLength(data) }) },
+    () => {
+      const fd = openSync(
+        path,
+        constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0),
+        mode,
+      );
+      try {
+        const bytes = Buffer.from(data, 'utf8');
+        let offset = 0;
+        while (offset < bytes.length) {
+          const written = writeSync(fd, bytes, offset, bytes.length - offset);
+          if (written <= 0) {
+            throw Object.assign(new Error(`no bytes written appending to ${path}`), {
+              code: 'EIO',
+            });
+          }
+          offset += written;
+        }
+      } finally {
+        closeSync(fd);
+      }
+    },
+  );
+}
+
 export function tracedMkdirSync(
   path: string,
   options?: Parameters<typeof mkdirSync>[1],
@@ -177,10 +218,51 @@ export function tracedCpSync(
   );
 }
 
+function tracedOpenSync(path: string, flags: string, mode: number): number {
+  return withSpanSync('fs.openSync', { attributes: buildAttrs('openSync', path) }, () =>
+    openSync(path, flags, mode),
+  );
+}
+
+export interface ObservedFileRead {
+  readonly bytes: Buffer;
+  readonly before: BigIntStats;
+  readonly after: BigIntStats;
+}
+
+export function tracedReadObservedSync(path: string): ObservedFileRead {
+  return withSpanSync(
+    'fs.readObservedSync',
+    { attributes: buildAttrs('readObservedSync', path) },
+    () => {
+      const fd = openSync(path, 'r');
+      try {
+        const before = fstatSync(fd, { bigint: true });
+        const bytes = readFileSync(fd);
+        const after = fstatSync(fd, { bigint: true });
+        return { bytes, before, after };
+      } finally {
+        closeSync(fd);
+      }
+    },
+  );
+}
+
 export function tracedUnlinkSync(path: string): void {
   withSpanSync('fs.unlinkSync', { attributes: buildAttrs('unlinkSync', path) }, () => {
     unlinkSync(path);
   });
+}
+
+export function tracedOpenUnlinkedSync(path: string): number {
+  const fd = tracedOpenSync(path, 'wx+', 0o600);
+  try {
+    tracedUnlinkSync(path);
+    return fd;
+  } catch (err) {
+    closeSync(fd);
+    throw err;
+  }
 }
 
 export function tracedLinkSync(existingPath: string, newPath: string): void {

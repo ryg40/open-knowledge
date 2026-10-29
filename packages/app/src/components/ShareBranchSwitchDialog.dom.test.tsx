@@ -159,6 +159,22 @@ function projectBranchSwitchPayload(): Extract<
   };
 }
 
+async function findEnabledButton(testId: string): Promise<HTMLButtonElement> {
+  const btn = (await screen.findByTestId(testId)) as HTMLButtonElement;
+  await waitFor(() => {
+    expect(btn.disabled).toBe(false);
+  });
+  return btn;
+}
+
+function findEnabledSwitchButton(): Promise<HTMLButtonElement> {
+  return findEnabledButton('share-branch-switch-switch');
+}
+
+function findEnabledWorktreeButton(): Promise<HTMLButtonElement> {
+  return findEnabledButton('share-branch-switch-worktree');
+}
+
 describe('ShareBranchSwitchDialog — payload gating', () => {
   afterEach(() => {
     cleanup();
@@ -357,13 +373,15 @@ describe('ShareBranchSwitchDialog — Switch path (runCheckout + CC1 gate)', () 
     render(<ShareBranchSwitchDialog bridge={bridge} store={store} />);
 
     const switchBtn = await screen.findByTestId('share-branch-switch-switch');
-    const describedBy = switchBtn.getAttribute('aria-describedby');
-    expect((switchBtn as HTMLButtonElement).disabled).toBe(true);
-    expect(switchBtn.getAttribute('aria-disabled')).toBe('true');
-    expect(describedBy).toBe('share-receive-branch-conflict-files');
-    const conflictList = document.getElementById(describedBy ?? '');
-    expect(conflictList?.textContent).toContain('docs/notes.md');
-    expect(conflictList?.textContent).toContain('package.json');
+    await waitFor(() => {
+      const describedBy = switchBtn.getAttribute('aria-describedby');
+      expect((switchBtn as HTMLButtonElement).disabled).toBe(true);
+      expect(switchBtn.getAttribute('aria-disabled')).toBe('true');
+      expect(describedBy).toBe('share-receive-branch-conflict-files');
+      const conflictList = document.getElementById(describedBy ?? '');
+      expect(conflictList?.textContent).toContain('docs/notes.md');
+      expect(conflictList?.textContent).toContain('package.json');
+    });
   });
 
   test('Switch click runs checkout, awaits CC1, then warm-focus-dispatches with pendingDeepLinkDoc + pendingBranch', async () => {
@@ -379,7 +397,7 @@ describe('ShareBranchSwitchDialog — Switch path (runCheckout + CC1 gate)', () 
     store.install({ bridge: fakeBridgeForStore });
     render(<ShareBranchSwitchDialog bridge={bridge} store={store} />);
 
-    const switchBtn = await screen.findByTestId('share-branch-switch-switch');
+    const switchBtn = await findEnabledSwitchButton();
     await act(async () => {
       fireEvent.click(switchBtn);
       await Promise.resolve();
@@ -415,10 +433,7 @@ describe('ShareBranchSwitchDialog — Switch path (runCheckout + CC1 gate)', () 
 
   test('Switch does not navigate or warm-focus until CC1 resolves', async () => {
     const store = createShareReceiveStore();
-    let resolveCc1: (result: { ok: true }) => void = () => {};
-    const cc1Promise = new Promise<{ ok: true }>((resolve) => {
-      resolveCc1 = resolve;
-    });
+    const { promise: cc1Promise, resolve: resolveCc1 } = Promise.withResolvers<{ ok: true }>();
     const { bridge, calls } = makeBridge({
       awaitBranchSwitched: vi.fn(() => cc1Promise),
     });
@@ -433,7 +448,7 @@ describe('ShareBranchSwitchDialog — Switch path (runCheckout + CC1 gate)', () 
     window.location.hash = '#before-switch';
     render(<ShareBranchSwitchDialog bridge={bridge} store={store} />);
 
-    const switchBtn = await screen.findByTestId('share-branch-switch-switch');
+    const switchBtn = await findEnabledSwitchButton();
     await act(async () => {
       fireEvent.click(switchBtn);
       await Promise.resolve();
@@ -466,7 +481,7 @@ describe('ShareBranchSwitchDialog — Switch path (runCheckout + CC1 gate)', () 
     store.install({ bridge: fakeBridgeForStore });
     render(<ShareBranchSwitchDialog bridge={bridge} store={store} />);
 
-    const switchBtn = await screen.findByTestId('share-branch-switch-switch');
+    const switchBtn = await findEnabledSwitchButton();
     await act(async () => {
       fireEvent.click(switchBtn);
       await Promise.resolve();
@@ -500,7 +515,7 @@ describe('ShareBranchSwitchDialog — Switch path (runCheckout + CC1 gate)', () 
     store.install({ bridge: fakeBridgeForStore });
     render(<ShareBranchSwitchDialog bridge={bridge} store={store} />);
 
-    const switchBtn = await screen.findByTestId('share-branch-switch-switch');
+    const switchBtn = await findEnabledSwitchButton();
     await act(async () => {
       fireEvent.click(switchBtn);
       await Promise.resolve();
@@ -536,7 +551,7 @@ describe('ShareBranchSwitchDialog — Switch path (runCheckout + CC1 gate)', () 
     store.install({ bridge: fakeBridgeForStore });
     render(<ShareBranchSwitchDialog bridge={bridge} store={store} />);
 
-    const switchBtn = await screen.findByTestId('share-branch-switch-switch');
+    const switchBtn = await findEnabledSwitchButton();
     await act(async () => {
       fireEvent.click(switchBtn);
       await Promise.resolve();
@@ -566,7 +581,7 @@ describe('ShareBranchSwitchDialog — Switch path (runCheckout + CC1 gate)', () 
     store.install({ bridge: fakeBridgeForStore });
     render(<ShareBranchSwitchDialog bridge={bridge} store={store} />);
 
-    const switchBtn = await screen.findByTestId('share-branch-switch-switch');
+    const switchBtn = await findEnabledSwitchButton();
     await act(async () => {
       fireEvent.click(switchBtn);
       await Promise.resolve();
@@ -641,7 +656,7 @@ describe('ShareBranchSwitchDialog — Switch path (runCheckout + CC1 gate)', () 
       store.install({ bridge: fakeBridgeForStore });
       render(<ShareBranchSwitchDialog bridge={bridge} store={store} />);
 
-      const switchBtn = await screen.findByTestId('share-branch-switch-switch');
+      const switchBtn = await findEnabledSwitchButton();
       await act(async () => {
         fireEvent.click(switchBtn);
         await Promise.resolve();
@@ -694,7 +709,7 @@ describe('ShareBranchSwitchDialog — Switch path (runCheckout + CC1 gate)', () 
       store.install({ bridge: fakeBridgeForStore });
       render(<ShareBranchSwitchDialog bridge={bridge} store={store} />);
 
-      const firstSwitch = await screen.findByTestId('share-branch-switch-switch');
+      const firstSwitch = await findEnabledSwitchButton();
       await act(async () => {
         fireEvent.click(firstSwitch);
         await Promise.resolve();
@@ -733,7 +748,7 @@ describe('ShareBranchSwitchDialog — Switch path (runCheckout + CC1 gate)', () 
     store.install({ bridge: fakeBridgeForStore });
     render(<ShareBranchSwitchDialog bridge={bridge} store={store} />);
 
-    const switchBtn = await screen.findByTestId('share-branch-switch-switch');
+    const switchBtn = await findEnabledSwitchButton();
     await act(async () => {
       fireEvent.click(switchBtn);
       await Promise.resolve();
@@ -1011,14 +1026,6 @@ describe('ShareBranchSwitchDialog — worktree leg', () => {
     return { payload, emit: (p: OkShareReceivedPayload) => emitShare(p) };
   }
 
-  async function findEnabledWorktreeButton(): Promise<HTMLButtonElement> {
-    const btn = (await screen.findByTestId('share-branch-switch-worktree')) as HTMLButtonElement;
-    await waitFor(() => {
-      expect(btn.disabled).toBe(false);
-    });
-    return btn;
-  }
-
   const variantFixtures = [
     { kind: 'A', label: 'target on current branch, clean tree', shareTargetExists: true },
     { kind: 'B', label: 'target missing, clean tree', shareTargetExists: false },
@@ -1176,8 +1183,7 @@ describe('ShareBranchSwitchDialog — worktree leg', () => {
     store.install({ bridge: fakeBridgeForStore });
     render(<ShareBranchSwitchDialog bridge={bridge} store={store} />);
 
-    const worktreeBtn = await screen.findByTestId('share-branch-switch-worktree');
-    expect((worktreeBtn as HTMLButtonElement).disabled).toBe(false);
+    const worktreeBtn = await findEnabledWorktreeButton();
     await act(async () => {
       fireEvent.click(worktreeBtn);
       await Promise.resolve();
@@ -1212,12 +1218,11 @@ describe('ShareBranchSwitchDialog — worktree leg', () => {
     const store = createShareReceiveStore();
     let resolveCheckout: (result: WorktreeCreateResult) => void = () => {};
     const { bridge, calls } = makeBridge({
-      checkout: vi.fn(
-        () =>
-          new Promise<WorktreeCreateResult>((resolve) => {
-            resolveCheckout = resolve;
-          }),
-      ),
+      checkout: vi.fn(() => {
+        const { promise, resolve } = Promise.withResolvers<WorktreeCreateResult>();
+        resolveCheckout = resolve;
+        return promise;
+      }),
     });
     renderDialog(bridge, store);
 
@@ -1430,12 +1435,11 @@ describe('ShareBranchSwitchDialog — worktree leg', () => {
     const store = createShareReceiveStore();
     let resolveCheckout: (result: WorktreeCreateResult) => void = () => {};
     const { bridge, calls } = makeBridge({
-      checkout: vi.fn(
-        () =>
-          new Promise<WorktreeCreateResult>((resolve) => {
-            resolveCheckout = resolve;
-          }),
-      ),
+      checkout: vi.fn(() => {
+        const { promise, resolve } = Promise.withResolvers<WorktreeCreateResult>();
+        resolveCheckout = resolve;
+        return promise;
+      }),
     });
     const { emit } = renderDialog(bridge, store);
 

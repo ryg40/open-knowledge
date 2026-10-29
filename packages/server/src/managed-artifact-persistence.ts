@@ -4,7 +4,7 @@
  * re-canonicalize the markdown that gets projected verbatim into an agent's context).
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, relative, resolve, sep } from 'node:path';
 import {
@@ -27,8 +27,15 @@ import {
 import type * as Y from 'yjs';
 import type { DeriveLossDetectOptions } from './bridge-loss-detector.ts';
 import { applyDiskContentToDoc, FILE_WATCHER_ORIGIN } from './disk-content-intake.ts';
+import type { FileObservation } from './disk-receipts.ts';
+import { backUpDisplacedVersion } from './edit-backups.ts';
+import {
+  reportReconcileBothKept,
+  reportReconcileCheckFailed,
+  reportReconcileKeptLive,
+} from './external-change.ts';
 import { externalSkillAbsPath } from './external-skill-registry.ts';
-import { tracedAtomicFs, tracedMkdir, tracedUnlinkSync } from './fs-traced.ts';
+import { tracedAtomicFs, tracedMkdir } from './fs-traced.ts';
 import {
   globalSkillGraphRoots,
   knownSkillRootsFor,
@@ -36,7 +43,22 @@ import {
   resolveGlobalNativeSkillDir,
 } from './in-place-skills.ts';
 import { getLogger } from './logger.ts';
-import { incrementManagedArtifactReconcile } from './metrics.ts';
+import type { MergeHistoryRecorder } from './merge-history.ts';
+import {
+  incrementManagedArtifactMerge,
+  incrementManagedArtifactReconcile,
+  incrementStoreRestatRefused,
+  type ManagedArtifactMergeOutcome,
+} from './metrics.ts';
+import { reconcile } from './reconciliation.ts';
+import { heldFor, heldNotUtf8, type SaveHold } from './save-hold.ts';
+import {
+  type ObservedTextRead,
+  readObservedText,
+  restatFile,
+  StoreRestatFailedError,
+  StoreRestatRefusedError,
+} from './store-compare.ts';
 
 const log = getLogger('managed-artifact-persistence');
 
@@ -52,9 +74,53 @@ export interface ManagedArtifactCtx {
     liveContent: string,
     diskContent: string,
   ) => DeriveLossDetectOptions | undefined;
+  history: Pick<MergeHistoryRecorder, 'bothKept' | 'keptLive' | 'noticeBackup'> | null;
 }
 
-export type StoreManagedArtifactOutcome = 'persisted' | 'no-op' | 'reconciled' | 'write-failed';
+type SettledMergeOutcome = Exclude<ManagedArtifactMergeOutcome, 'held'>;
+
+export type ManagedArtifactDrop =
+  | 'dropped-legacy-name'
+  | 'dropped-unresolvable'
+  | 'dropped-container-gone'
+  | 'dropped-intake-landed';
+
+export type StoreManagedArtifactOutcome =
+  | 'persisted'
+  | 'no-op'
+  | 'write-failed'
+  | 'outside-taken-in'
+  | ManagedArtifactDrop
+  | SettledMergeOutcome
+  | SaveHold;
+
+export function storeManagedArtifactWroteFile(outcome: StoreManagedArtifactOutcome): boolean {
+  if (typeof outcome === 'object') return false;
+  switch (outcome) {
+    case 'persisted':
+    case 'merged':
+    case 'both-kept':
+    case 'kept-live':
+    case 'stash-fallback':
+      return true;
+    case 'no-op':
+    case 'write-failed':
+    case 'applied':
+    case 'unchanged':
+    case 'outside-taken-in':
+    case 'dropped-legacy-name':
+    case 'dropped-unresolvable':
+    case 'dropped-container-gone':
+    case 'dropped-intake-landed':
+      return false;
+    default:
+      return assertNeverStoreOutcome(outcome);
+  }
+}
+
+function assertNeverStoreOutcome(outcome: never): never {
+  throw new Error(`unhandled skill store outcome: ${String(outcome)}`);
+}
 
 type ManagedArtifactLocation = Pick<ManagedArtifactCtx, 'projectDir' | 'homedirOverride'>;
 
@@ -252,30 +318,6 @@ export function loadManagedArtifactDoc(
   ctx.lkgCache.set(documentName, raw);
 }
 
-const DISCARDED_EDIT_STASH_MAX = 5;
-
-async function stashDiscardedEdit(
-  documentName: string,
-  content: string,
-  ctx: Pick<ManagedArtifactCtx, 'homedirOverride'>,
-): Promise<void> {
-  try {
-    const safe = documentName.replace(/[^A-Za-z0-9._-]+/g, '__');
-    const dir = resolve(okUserHomeDir(homeFor(ctx)), 'edit-backups', 'discarded', safe);
-    await tracedMkdir(dir, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    await atomicWriteFile(resolve(dir, `${stamp}.md`), content, { fs: tracedAtomicFs });
-    const entries = readdirSync(dir).sort();
-    for (const old of entries.slice(0, Math.max(0, entries.length - DISCARDED_EDIT_STASH_MAX))) {
-      try {
-        tracedUnlinkSync(resolve(dir, old));
-      } catch {}
-    }
-  } catch (e) {
-    log.warn({ documentName, err: e }, 'discarded-edit stash failed');
-  }
-}
-
 async function backupExternalSkillOnce(
   filePath: string,
   ext: { name: string; rel: string | null },
@@ -294,6 +336,176 @@ async function backupExternalSkillOnce(
   }
 }
 
+function applyToLive(
+  document: Y.Doc,
+  documentName: string,
+  ours: string,
+  text: string,
+  ctx: ManagedArtifactCtx,
+): void {
+  const detect = ctx.beforeReconcileDivergence?.(document, documentName, ours, text);
+  document.transact(() => {
+    applyDiskContentToDoc(document, text, undefined, documentName, undefined, detect);
+  }, FILE_WATCHER_ORIGIN);
+}
+
+function agree(documentName: string, text: string, ctx: ManagedArtifactCtx): void {
+  ctx.setReconciledBase(documentName, text);
+  ctx.lkgCache.set(documentName, text);
+}
+
+class LiveMovedOnError extends Error {
+  constructor(docName: string) {
+    super(`the version of ${docName} here changed while the merge was being written`);
+    this.name = 'LiveMovedOnError';
+  }
+}
+
+type CheckedWrite = 'written' | 'moved' | 'unreadable';
+
+async function writeChecked(
+  filePath: string,
+  documentName: string,
+  text: string,
+  observation: FileObservation | null,
+  beforeCommit?: () => boolean,
+): Promise<CheckedWrite> {
+  try {
+    await atomicWriteFile(filePath, text, {
+      fs: tracedAtomicFs,
+      beforeRename: () => {
+        const restat = restatFile(filePath, observation);
+        if (restat.kind === 'failed') throw new StoreRestatFailedError(documentName, restat.error);
+        if (restat.kind === 'moved') throw new StoreRestatRefusedError(documentName);
+        if (beforeCommit !== undefined && !beforeCommit()) throw new LiveMovedOnError(documentName);
+      },
+    });
+    return 'written';
+  } catch (err) {
+    if (err instanceof StoreRestatRefusedError) {
+      incrementStoreRestatRefused();
+      return 'moved';
+    }
+    if (err instanceof LiveMovedOnError) return 'moved';
+    if (err instanceof StoreRestatFailedError) return 'unreadable';
+    throw err;
+  }
+}
+
+type OutsideVersionResult = SettledMergeOutcome | SaveHold | 'retry';
+
+type OutsideRead = Extract<ObservedTextRead, { kind: 'read' }>;
+
+async function takeOutsideVersion(
+  document: Y.Doc,
+  documentName: string,
+  disk: OutsideRead,
+  filePath: string,
+  ctx: ManagedArtifactCtx,
+  site: 'store' | 'intake',
+): Promise<OutsideVersionResult> {
+  const reportSite = site === 'store' ? 'skill-store' : 'skill-intake';
+  const settle = (outcome: SettledMergeOutcome): SettledMergeOutcome => {
+    incrementManagedArtifactMerge(site, outcome);
+    return outcome;
+  };
+  const hold = (held: SaveHold): SaveHold => {
+    incrementManagedArtifactMerge(site, 'held');
+    return held;
+  };
+  if (!disk.lossless) {
+    log.info(
+      { documentName },
+      'the file changed outside to bytes that are not valid UTF-8; nothing was applied or written so they stay on disk',
+    );
+    return hold(heldNotUtf8(filePath, disk.observation));
+  }
+  const ours = document.getText('source').toString();
+  const base = ctx.getReconciledBase(documentName) ?? ctx.lkgCache.get(documentName) ?? '';
+  if (ours === base) {
+    applyToLive(document, documentName, ours, disk.text, ctx);
+    agree(documentName, disk.text, ctx);
+    return settle('applied');
+  }
+  const merge = reconcile({ docName: documentName, base, ours, theirs: disk.text });
+  switch (merge.kind) {
+    case 'noop':
+      return settle('unchanged');
+    case 'clean':
+      applyToLive(document, documentName, ours, merge.newContent, ctx);
+      agree(documentName, merge.newContent, ctx);
+      return settle('applied');
+    case 'merged':
+    case 'both-kept': {
+      const written = await writeChecked(
+        filePath,
+        documentName,
+        merge.newContent,
+        disk.observation,
+        () => {
+          if (document.getText('source').toString() !== ours) return false;
+          applyToLive(document, documentName, ours, merge.newContent, ctx);
+          return true;
+        },
+      );
+      if (written === 'moved') return 'retry';
+      if (written === 'unreadable') return hold(heldFor('unreadable'));
+      agree(documentName, merge.newContent, ctx);
+      if (merge.kind === 'merged') return settle('merged');
+      ctx.history?.bothKept(documentName, { ours, theirs: disk.text }, merge.kept);
+      reportReconcileBothKept(documentName, merge.kept, reportSite);
+      return settle('both-kept');
+    }
+    case 'refused': {
+      reportReconcileCheckFailed(documentName, merge, reportSite);
+      const saved =
+        ctx.history !== null &&
+        (await ctx.history.keptLive(
+          documentName,
+          { side: 'theirs', bytes: disk.text },
+          merge.reason,
+        ));
+      const backup = saved
+        ? null
+        : await backUpDisplacedVersion(homeFor(ctx), null, documentName, disk.text, 'SKILL.md');
+      if (!saved && backup === null) {
+        log.warn(
+          { documentName, reason: merge.reason },
+          'the outside version could not be merged or kept in history or the backup folder; nothing was written so it stays on disk',
+        );
+        return hold(heldFor('no-history-or-backup'));
+      }
+      if (backup !== null) ctx.history?.noticeBackup(documentName, 'theirs', merge.reason, backup);
+      const reread = readObservedText(filePath);
+      if (reread.kind !== 'read' || reread.text !== disk.text) return 'retry';
+      const written = await writeChecked(
+        filePath,
+        documentName,
+        document.getText('source').toString(),
+        reread.observation,
+      );
+      if (written === 'moved') return 'retry';
+      if (written === 'unreadable') return hold(heldFor('unreadable'));
+      agree(documentName, document.getText('source').toString(), ctx);
+      if (saved) {
+        reportReconcileKeptLive(documentName, merge.reason, reportSite);
+        return settle('kept-live');
+      }
+      log.warn(
+        { documentName, reason: merge.reason, backup: backup?.display },
+        'the outside version could not be merged or saved to history; it was kept in the backup folder and the version here stays',
+      );
+      return settle('stash-fallback');
+    }
+    default: {
+      const unhandled: never = merge;
+      throw new Error(`unhandled reconcile outcome: ${String(unhandled)}`);
+    }
+  }
+}
+
+const MAX_OUTSIDE_VERSIONS_PER_STORE = 3;
+
 /** Serializes from `Y.Text('source')` (verbatim — precedent #38). */
 export async function storeManagedArtifactDoc(
   document: Y.Doc,
@@ -302,27 +514,32 @@ export async function storeManagedArtifactDoc(
   ctx: ManagedArtifactCtx,
 ): Promise<StoreManagedArtifactOutcome> {
   const parsedStore = parseManagedArtifactName(documentName);
-  if (parsedStore?.kind === 'skill' && parsedStore.scope === 'project') return 'no-op';
+  if (parsedStore?.kind === 'skill' && parsedStore.scope === 'project') {
+    return 'dropped-legacy-name';
+  }
 
-  if (documentName.startsWith(MANAGED_ARTIFACT_PREFIX_TEMPLATE)) return 'no-op';
+  if (documentName.startsWith(MANAGED_ARTIFACT_PREFIX_TEMPLATE)) return 'dropped-legacy-name';
 
   const extStore = parseExternalSkillDocName(documentName);
-  if (extStore && externalSkillAbsPath(extStore.name, extStore.rel) === null) return 'no-op';
+  if (extStore && externalSkillAbsPath(extStore.name, extStore.rel) === null) {
+    return 'dropped-unresolvable';
+  }
 
-  if (lastTransactionOrigin === FILE_WATCHER_ORIGIN) return 'no-op';
+  const current = document.getText('source').toString() === ctx.lkgCache.get(documentName);
+  if (lastTransactionOrigin === FILE_WATCHER_ORIGIN) {
+    return current ? 'outside-taken-in' : 'dropped-intake-landed';
+  }
 
-  const content = document.getText('source').toString();
-  const lkg = ctx.lkgCache.get(documentName);
-  if (content === lkg) return 'no-op';
+  if (current) return 'no-op';
 
   const containerDir = managedArtifactContainerDir(documentName, ctx);
-  if (containerDir === null) return 'no-op';
+  if (containerDir === null) return 'dropped-unresolvable';
   if (!existsSync(containerDir)) {
     log.warn(
       { documentName, containerDir },
       'store: artifact container is gone (deleted or moved); dropping the write rather than resurrecting it',
     );
-    return 'no-op';
+    return 'dropped-container-gone';
   }
 
   const filePath = managedArtifactAbsPath(documentName, ctx);
@@ -331,35 +548,58 @@ export async function storeManagedArtifactDoc(
     await tracedMkdir(resolve(filePath, '..'), { recursive: true });
     if (extStore) await backupExternalSkillOnce(filePath, extStore, ctx);
     return await withFileLock(`${filePath}.lock`, async () => {
-      if (existsSync(filePath)) {
-        let disk: string | null = null;
-        try {
-          disk = readFileSync(filePath, 'utf-8');
-        } catch (readErr) {
-          if ((readErr as NodeJS.ErrnoException).code !== 'ENOENT') {
-            log.warn(
-              { documentName, err: readErr },
-              'store: pre-write disk read failed (non-ENOENT); proceeding to write',
-            );
-          }
-          disk = null;
+      for (let round = 0; round < MAX_OUTSIDE_VERSIONS_PER_STORE; round++) {
+        const content = document.getText('source').toString();
+        const lkg = ctx.lkgCache.get(documentName);
+        if (content === lkg) return 'no-op';
+        const disk = readObservedText(filePath);
+        if (disk.kind === 'failed') {
+          incrementManagedArtifactMerge('store', 'held');
+          log.warn(
+            { documentName, err: disk.error },
+            'store: the file could not be read for the compare before the write; nothing was written',
+          );
+          return heldFor('unreadable');
         }
-        if (disk !== null && disk !== lkg && disk !== content) {
+        const base = ctx.getReconciledBase(documentName) ?? lkg;
+        if (
+          disk.kind === 'read' &&
+          disk.text !== lkg &&
+          disk.text !== base &&
+          disk.text !== content
+        ) {
           incrementManagedArtifactReconcile();
-          const detect = ctx.beforeReconcileDivergence?.(document, documentName, content, disk);
-          await stashDiscardedEdit(documentName, content, ctx);
-          document.transact(() => {
-            applyDiskContentToDoc(document, disk, undefined, documentName, undefined, detect);
-          }, FILE_WATCHER_ORIGIN);
-          ctx.setReconciledBase(documentName, disk);
-          ctx.lkgCache.set(documentName, disk);
-          return 'reconciled';
+          const outcome = await takeOutsideVersion(
+            document,
+            documentName,
+            disk,
+            filePath,
+            ctx,
+            'store',
+          );
+          if (outcome === 'retry') continue;
+          return outcome;
         }
+        const written = await writeChecked(
+          filePath,
+          documentName,
+          content,
+          disk.kind === 'read' ? disk.observation : null,
+        );
+        if (written === 'moved') continue;
+        if (written === 'unreadable') {
+          incrementManagedArtifactMerge('store', 'held');
+          return heldFor('unreadable');
+        }
+        agree(documentName, content, ctx);
+        return 'persisted';
       }
-      await atomicWriteFile(filePath, content, { fs: tracedAtomicFs });
-      ctx.lkgCache.set(documentName, content);
-      ctx.setReconciledBase(documentName, content);
-      return 'persisted';
+      incrementManagedArtifactMerge('store', 'held');
+      log.warn(
+        { documentName, rounds: MAX_OUTSIDE_VERSIONS_PER_STORE },
+        'store: the file kept changing outside while it was being saved; nothing more was written',
+      );
+      return heldFor('keeps-changing');
     });
   } catch (e) {
     if (e instanceof FileLockTimeoutError) {
@@ -371,21 +611,44 @@ export async function storeManagedArtifactDoc(
   }
 }
 
-export type ApplyExternalManagedArtifactChangeOutcome = 'applied' | 'no-op';
+export type ApplyExternalManagedArtifactChangeOutcome = 'no-op' | ManagedArtifactMergeOutcome;
 
-export function applyExternalManagedArtifactChange(
+export async function applyExternalManagedArtifactChange(
   document: Y.Doc | null,
   documentName: string,
   raw: string,
   ctx: ManagedArtifactCtx,
-): ApplyExternalManagedArtifactChangeOutcome {
+): Promise<ApplyExternalManagedArtifactChangeOutcome> {
   if (!document) return 'no-op';
   const lkg = ctx.lkgCache.get(documentName);
   if (lkg !== undefined && lkg === raw) return 'no-op';
-  document.transact(() => {
-    applyDiskContentToDoc(document, raw, undefined, documentName);
-  }, FILE_WATCHER_ORIGIN);
-  ctx.setReconciledBase(documentName, raw);
-  ctx.lkgCache.set(documentName, raw);
-  return 'applied';
+  if (document.getText('source').toString() === raw) {
+    agree(documentName, raw, ctx);
+    return 'no-op';
+  }
+  const filePath = managedArtifactAbsPath(documentName, ctx);
+  try {
+    return await withFileLock(`${filePath}.lock`, async () => {
+      const disk = readObservedText(filePath);
+      if (disk.kind !== 'read' || disk.text !== raw) return 'no-op';
+      const outcome = await takeOutsideVersion(
+        document,
+        documentName,
+        disk,
+        filePath,
+        ctx,
+        'intake',
+      );
+      if (outcome === 'retry') return 'no-op';
+      return typeof outcome === 'object' ? 'held' : outcome;
+    });
+  } catch (e) {
+    if (!(e instanceof FileLockTimeoutError)) throw e;
+    incrementManagedArtifactMerge('intake', 'held');
+    log.warn(
+      { documentName, err: e },
+      'intake: the file lock timed out, so the outside change was not taken in; the next save compares it',
+    );
+    return 'held';
+  }
 }

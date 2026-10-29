@@ -49,6 +49,8 @@ export {
   detectFmRegion,
   diffLinesFast,
   docEdgeRunsDiffer,
+  documentBodyLineEnding,
+  dominantLineEnding,
   emitToleranceFire,
   type FmBoundarySlotSplit,
   type FmEditError,
@@ -67,11 +69,14 @@ export {
   type FrontmatterDocProvider,
   type FrontmatterSnapshot,
   findDroppedContent,
+  findDroppedSourceContentInRange,
   findFirstDivergenceIndex,
   fnv1aDigest,
   fragmentHoldsPendingContent,
   type InvariantViolation,
   isParseEquivalentBridge,
+  type LfProjection,
+  type LineEnding,
   locateBridgeDivergence,
   MAX_FM_REGION_BYTES,
   type MergeBoundarySpace,
@@ -84,6 +89,7 @@ export {
   parseFencedFmRegion,
   parseFmRegion,
   pendingContentLines,
+  projectToLf,
   readFmKeys,
   readFmMap,
   readFmRegionWithError,
@@ -96,6 +102,7 @@ export {
   type SynthesisedConflictMarkers,
   type SynthesisedConflictRegion,
   setToleranceTelemetryHook,
+  spellLineEndings,
   splitFmBoundarySlot,
   structuralDivergence,
   synthesiseConflictMarkers,
@@ -154,12 +161,17 @@ export {
 } from './checkpoint-kinds.ts';
 export {
   CLIENT_RUNTIME_VERSION_FALLBACK,
+  CLIENT_SURFACE_ATTRIBUTE,
   CLIENT_VERSION_HEADER,
   type ClientKind,
+  type ClientSurface,
+  type ClientSurfaceReading,
   type ClientVersionInput,
   type ClientVersionTokenFields,
   clientVersionHeaders,
   clientVersionTokenFields,
+  deriveClientSurface,
+  readClientSurface,
 } from './client-version.ts';
 export {
   COMMAND_IDENTITIES,
@@ -173,6 +185,9 @@ export {
   type CommandPalettePresence,
   type CommandStateToggle,
   type ContextualTargetKind,
+  DOCK_MOVE_COMMANDS,
+  type DockMoveCommand,
+  type DockMoveSide,
   evaluateCommandAvailability,
   type MenuPlatform,
   type MenuSection,
@@ -301,6 +316,14 @@ export {
 } from './config/resolve-server-config.ts';
 export type { Err, Ok, Result } from './config/result.ts';
 export {
+  ATTACHMENT_FOLDER_PATH_VARIABLES,
+  type AttachmentFolderPathInputIssue,
+  type AttachmentFolderPathPart,
+  type AttachmentFolderPathVariableIssue,
+  attachmentFolderForDocument,
+  attachmentFolderPathInputIssue,
+  attachmentFolderPathVariableIssue,
+  attachmentFolderSegmentMatcher,
   type Config,
   type ConfigPatch,
   ConfigSchema,
@@ -315,6 +338,7 @@ export {
   DEFAULT_SPANS_MAX_BYTES,
   DEFAULT_TELEMETRY_ATTRIBUTE_DENYLIST,
   DEFAULT_TUNNEL_PORT,
+  describeAttachmentFolderPathVariableIssue,
   IDLE_SHUTDOWN_DURATION_RE,
   isLoopbackEmbeddingsUrl,
   isValidAttachmentFolderPath,
@@ -325,6 +349,7 @@ export {
   MIN_EMBEDDINGS_MAX_BATCH_CHARS,
   MIN_EMBEDDINGS_MAX_BATCH_SIZE,
   normalizeAttachmentFolderPath,
+  parseAttachmentFolderPath,
 } from './config/schema.ts';
 export { getLeafFieldMeta, resolveLeafSchema } from './config/schema-leaf.ts';
 export { CONFIG_SCHEMA_MAJOR, CONFIG_SCHEMA_MAJOR_PATH } from './config/schema-version.ts';
@@ -386,7 +411,16 @@ export {
   stripMdExt,
   templateContentDocName,
 } from './constants/cc1.ts';
-export { CHROME_BG_DARK, CHROME_BG_LIGHT } from './constants/chrome.ts';
+export {
+  APP_HEADER_HEIGHT,
+  APP_HEADER_HEIGHT_PX,
+  CHROME_BG_DARK,
+  CHROME_BG_LIGHT,
+  REDUCED_CHROME_HEADER_HEIGHT,
+  REDUCED_CHROME_HEADER_HEIGHT_PX,
+  SIDEBAR_BG_DARK,
+  SIDEBAR_BG_LIGHT,
+} from './constants/chrome.ts';
 export {
   CODE_FILE_BARE_NAMES_TO_LANGUAGE,
   CODE_FILE_EXTENSIONS_TO_LANGUAGE,
@@ -459,6 +493,7 @@ export {
   DEFAULT_SIGTERM_GRACE_MS,
   DEFAULT_SIGTERM_POLL_MS,
   formatSpawnAttemptHeader,
+  PROJECT_DIAGNOSTIC_FILES,
   SERVER_CRASH_LOG,
   SERVER_EXIT_LOG,
   SPAWN_ATTEMPT_MARKER,
@@ -546,16 +581,31 @@ export {
   type PreviewThemeToken,
 } from './constants/preview-theme-tokens.ts';
 export {
+  CHECKOUT_CLI_COMMAND,
+  currentCliCommandName,
   currentDesktopProduct,
   currentMcpServerName,
   DESKTOP_PRODUCTS,
+  DEV_CHANNEL,
+  DEV_FALLBACK_CLI_REFUSAL,
   type DesktopProduct,
   type DesktopProductName,
+  defaultToDevChannel,
   desktopChannelLabel,
   desktopWindowsExecutableName,
   desktopWindowsInstallDirNames,
+  envWithoutDevChannel,
+  type HostCliInvocation,
+  isDevChannel,
   OK_CHANNEL_ENV,
+  OkCliCommand,
+  type OkCliRefusal,
+  type OkCliRunnerInvocation,
+  type OkCliSpawn,
+  PACKAGED_DESKTOP_PRODUCT_NAMES,
+  type PackagedDesktopProductName,
   PRODUCT_NAME,
+  type ResolveOkCliCommandInput,
   resolveDesktopProductName,
 } from './constants/product.ts';
 export { isReservedLogDoc } from './constants/reserved-docs.ts';
@@ -594,6 +644,7 @@ export {
   ALLOWED_VIDEO_MIME_TYPES,
   ASSET_EXTENSIONS,
   AUDIO_EXTENSIONS,
+  BESIDE_DOCUMENT_ATTACHMENT_FOLDER_PATH,
   CODE_FILE_EXTENSIONS,
   DEFAULT_ATTACHMENT_FOLDER_PATH,
   DEFAULT_DEDUP_MODE,
@@ -694,6 +745,7 @@ export {
   FrontmatterTypeSchema,
   type FrontmatterValue,
   FrontmatterValueSchema,
+  frontmatterRecord,
   frontmatterValuesEqual,
   inferType,
   isFrontmatterValueEmpty,
@@ -720,7 +772,6 @@ export {
   FrontmatterDeltaSchema,
   type PropertyChange,
 } from './frontmatter-diff.ts';
-export { parseBranchList } from './git/branch-list-parser.ts';
 export {
   agentToolDirs,
   augmentAgentSpawnPath,
@@ -765,13 +816,13 @@ export {
   type AssembleHandoffPromptInput,
   assembleHandoffPrompt,
   assertNeverUrnIpcLookup,
-  buildClaudeLaunchCommand,
+  BRACKETED_PASTE_ENABLE_MARKER,
   buildClaudeUrl,
-  buildCliLaunchArgString,
-  buildCliLaunchCommand,
   buildCodexUrl,
   buildCursorUrl,
+  buildPosixCliLaunch,
   buildStartupInjectionBytes,
+  buildTerminalInputBytes,
   buildWindowsCliLaunch,
   type ComposeSelection,
   type CreateScenario,
@@ -789,6 +840,7 @@ export {
   composeThreadBareLaunchPrompt,
   composeWindowsShellLaunchArgs,
   type DocContext,
+  fishSingleQuote,
   type HandoffFailureReason,
   type HandoffOutcome,
   type HandoffPayload,
@@ -1134,6 +1186,7 @@ export {
   builtInComponents,
   type ComponentRegistry,
   createRegistry,
+  propDescription,
   wildcardMeta,
 } from './registry/index.ts';
 export { JSX_SRC_REF_TAGS, type JsxSrcRefTagSpec } from './registry/jsx-src-ref-tags.ts';
@@ -1169,6 +1222,10 @@ export {
   AdvisoryWarningSchema,
   AdvisoryWarningsSchema,
   AGENT_WRITE_BATCH_MAX_DOCS,
+  AGENT_WRITE_NEXT_STEP_MEANINGS,
+  AGENT_WRITE_NEXT_STEPS,
+  AGENT_WRITE_OUTCOME_MEANINGS,
+  AGENT_WRITE_OUTCOMES,
   type AgentActivitySuccess,
   AgentActivitySuccessSchema,
   type AgentBurstDiffSuccess,
@@ -1209,6 +1266,9 @@ export {
   AgentWriteMdRequestSchema,
   type AgentWriteMdSuccess,
   AgentWriteMdSuccessSchema,
+  type AgentWriteNextStep,
+  type AgentWriteOutcome,
+  type AgentWriteOutcomeFields,
   type AgentWriteRequest,
   AgentWriteRequestSchema,
   type AgentWriteSuccess,
@@ -1216,6 +1276,9 @@ export {
   type Anchor,
   type ApiConfigSuccess,
   ApiConfigSuccessSchema,
+  type AttachmentFolderUploadIssue,
+  AttachmentFolderUploadIssueSchema,
+  agentWriteOutcomeWireFields,
   assertNeverProblemType,
   assertNeverSemanticProviderErrorReason,
   assertNeverSemanticQueryOutcome,
@@ -1275,6 +1338,7 @@ export {
   CreatePageRequestSchema,
   type CreatePageSuccess,
   CreatePageSuccessSchema,
+  canonicalTemplateName,
   classifyGitAuthError,
   classifySemanticProviderError,
   containsXmlTag,
@@ -1291,14 +1355,24 @@ export {
   DeleteSuccessSchema,
   type DiskEditReconciledWarning,
   DiskEditReconciledWarningSchema,
+  DismissDocNoticeRequestSchema,
+  DismissDocNoticeSuccessSchema,
   type DispatchPayload,
   DispatchPayloadSchema,
+  DOCUMENT_REFRESH_MAX_DOCS,
+  DocNoticesSuccessSchema,
+  type DocNoticeWire,
+  DocNoticeWireSchema,
   type DocumentListEntry,
   DocumentListEntrySchema,
   type DocumentListSuccess,
   DocumentListSuccessSchema,
   type DocumentReadSuccess,
   DocumentReadSuccessSchema,
+  type DocumentRefreshRequest,
+  DocumentRefreshRequestSchema,
+  type DocumentRefreshSuccess,
+  DocumentRefreshSuccessSchema,
   type DuplicatePathRequest,
   DuplicatePathRequestSchema,
   type DuplicatePathSuccess,
@@ -1335,6 +1409,7 @@ export {
   FrontmatterPatchRequestSchema,
   type FrontmatterPatchSuccess,
   FrontmatterPatchSuccessSchema,
+  findTemplateByName,
   GIT_STATUS_CODES,
   type GitAuthFailureSubclass,
   type GitHubReferencePreview,
@@ -1370,8 +1445,11 @@ export {
   type InstallSkillSuccess,
   InstallSkillSuccessSchema,
   interpretSkillMoveFailure,
+  isAgentWriteNextStep,
+  isAgentWriteOutcome,
   isBranchNotFoundGitError,
   isLoginFixableGitAuthError,
+  isReconcileMergeOutcome,
   isSemanticSearchOffered,
   isSkillMoveRetainedDestinationCode,
   isSkillMoveStateCode,
@@ -1445,6 +1523,8 @@ export {
   MetricsReconciliationSuccessSchema,
   type MetricsWatcherRecentSuccess,
   MetricsWatcherRecentSuccessSchema,
+  type NormalizedAgentWriteOutcome,
+  normalizeAgentWriteOutcome,
   normalizeApiWarnings,
   type OrphanEntry,
   OrphanEntrySchema,
@@ -1473,9 +1553,11 @@ export {
   PushPermissionSchema,
   type PushPermissionWire,
   QueueSuccessSchema,
+  RECONCILE_MERGE_OUTCOMES,
   RECONCILE_REASONS,
   REFUSED_SYMLINK_PATHS_CAP,
   RESOLVE_STRATEGIES,
+  type ReconcileMergeOutcome,
   ReconcileReasonSchema,
   type ReconcileReasonWire,
   type RenamedAssetMapping,
@@ -1772,6 +1854,7 @@ export {
   type TagsListSuccess,
   TagsListSuccessSchema,
   TEMPLATE_NAME_REGEX,
+  TEMPLATE_NAME_RULE,
   type TemplateDeleteSuccess,
   TemplateDeleteSuccessSchema,
   type TemplateFrontmatter,
@@ -1809,6 +1892,7 @@ export {
   TrashCleanupRequestSchema,
   type TrashCleanupSuccess,
   TrashCleanupSuccessSchema,
+  templateRenameTarget,
   UNREADABLE_WARNINGS_TEXT,
   type UploadAssetSuccess,
   UploadAssetSuccessSchema,
@@ -2007,6 +2091,7 @@ export {
   TERMINAL_PLACEMENTS,
   type TerminalPlacement,
 } from './terminal-layout.ts';
+export { TEST_LOOP_CORE_MARKER } from './test-loop-marker.ts';
 export type {
   AnsiSlotName,
   Base16Palette,
@@ -2088,6 +2173,7 @@ export {
   isValidDocName,
   validateDocName,
 } from './util/doc-name.ts';
+export { isMarkdownSkillFilePath, skillFilePathSegments } from './util/skill-file-path.ts';
 export { applyByPrefixSuffix } from './utils/apply-by-prefix-suffix.ts';
 export { toDesktopAssetHref } from './utils/asset-href.ts';
 export { ChunkedInsertError, chunkedYTextInsert } from './utils/chunked-insert.ts';
@@ -2096,6 +2182,7 @@ export { isEmbedUrlRewritable, rewriteEmbedUrl } from './utils/embed-url-rewrite
 export { extensionOf } from './utils/extension.ts';
 export { formatFileSize } from './utils/file-size.ts';
 export { getGitHubStars } from './utils/github-stars.ts';
+export { graphemePrefix, graphemeSuffix } from './utils/grapheme-clip.ts';
 export { scanHeadingLine } from './utils/heading-scan.ts';
 export {
   AGENT_COLORS,
@@ -2129,6 +2216,7 @@ export {
   type ResolveAssetProjectPathOptions,
   resolveAssetProjectPath,
 } from './utils/link-targets.ts';
+export { localIsoDate } from './utils/local-iso-date.ts';
 export {
   isLoomUrl,
   type ParsedLoomUrl,

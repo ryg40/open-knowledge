@@ -172,6 +172,8 @@ describe('directory identity across server components', () => {
       writeFileSync(join(contentDir, `${docName}.md`), seed);
       const state = new DocumentDurabilityState();
       const persistence = createPersistenceExtension({
+        mergeHistory: null,
+        ingestDiskAtStore: null,
         contentDir,
         projectDir,
         gitEnabled: false,
@@ -209,6 +211,8 @@ describe('directory identity across server components', () => {
       writeFileSync(outsidePath, seed);
       const state = new DocumentDurabilityState();
       const persistence = createPersistenceExtension({
+        mergeHistory: null,
+        ingestDiskAtStore: null,
         contentDir,
         projectDir,
         gitEnabled: false,
@@ -246,6 +250,8 @@ describe('directory identity across server components', () => {
       const shadow = await initShadowRepo(projectDir);
       const state = new DocumentDurabilityState();
       const persistence = createPersistenceExtension({
+        mergeHistory: null,
+        ingestDiskAtStore: null,
         contentDir,
         projectDir,
         gitEnabled: true,
@@ -577,6 +583,8 @@ describe('one directory identity for watcher keys and linked documents', () => {
         symlinkSync(target, join(canonicalContentDir, `${docName}.md`));
       }
       const loader = createPersistenceExtension({
+        mergeHistory: null,
+        ingestDiskAtStore: null,
         contentDir,
         projectDir,
         gitEnabled: false,
@@ -584,6 +592,8 @@ describe('one directory identity for watcher keys and linked documents', () => {
       });
       const storeState = new DocumentDurabilityState();
       const storer = createPersistenceExtension({
+        mergeHistory: null,
+        ingestDiskAtStore: null,
         contentDir,
         projectDir,
         gitEnabled: false,
@@ -606,6 +616,7 @@ describe('one directory identity for watcher keys and linked documents', () => {
         const document = new Y.Doc();
         try {
           composeAndWriteRawBody(document, edited, 'agent');
+          storeState.setReconciledBase(documentName, original);
           storeState.markAgentWriteStore(documentName);
           await storer.forceStore(document, documentName);
         } finally {

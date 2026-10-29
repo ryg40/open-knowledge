@@ -282,6 +282,27 @@ describe('exclusions', () => {
     expect(getMetrics().persistenceStalenessDetected).toBe(0);
   });
 
+  test('retries the held save of a file it does not otherwise watch, and only a held one', async () => {
+    await rig.watchdog.dispose();
+    const held = new Set(['diagram.mmd', '__config__/project']);
+    const retried: string[] = [];
+    rig = makeRig({
+      isHeldSaveDue: (name) => held.has(name),
+      retryHeldSave: async (_document, name) => {
+        retried.push(name);
+      },
+    });
+    for (const name of ['diagram.mmd', '__config__/project', 'notes.txt', '__system__']) {
+      rig.docs.set(name, makeDoc('held text\n'));
+    }
+
+    await rig.watchdog.sweep();
+
+    expect(retried.sort()).toEqual(['__config__/project', 'diagram.mmd']);
+    expect(rig.forceCalls).toEqual([]);
+    expect(getMetrics().heldSaveRetries).toBe(2);
+  });
+
   test('skips docs frozen by lifecycle status', async () => {
     for (const status of MAP_FROZEN_STATUSES) {
       const doc = seedWedgedDoc(rig, `lifecycle-${status}`);
@@ -346,10 +367,7 @@ describe('exclusions', () => {
   });
 
   test('dispose drains an in-flight sweep and stops it before the next doc', async () => {
-    let releaseFirstStore: (() => void) | undefined;
-    const gate = new Promise<void>((resolve) => {
-      releaseFirstStore = resolve;
-    });
+    const { promise: gate, resolve: releaseFirstStore } = Promise.withResolvers<void>();
     const blockingRig = makeRig({
       forceStore: async (_document, documentName) => {
         blockingRig.forceCalls.push(documentName);
@@ -362,33 +380,29 @@ describe('exclusions', () => {
 
       const sweepPromise = blockingRig.watchdog.sweep();
       const disposePromise = blockingRig.watchdog.dispose();
-      releaseFirstStore?.();
+      releaseFirstStore();
       await disposePromise;
       await sweepPromise;
 
       expect(blockingRig.forceCalls).toEqual(['doc-a']);
     } finally {
-      releaseFirstStore?.();
+      releaseFirstStore();
       await blockingRig.watchdog.dispose();
     }
   });
 });
 
 describe('external-edit stand-down (disk authority)', () => {
-  test('does not overwrite disk bytes the base does not account for', async () => {
+  test('forces the store when disk differs from the base, leaving the merge to the store compare', async () => {
     seedWedgedDoc(rig, 'external-doc');
     rig.disk.set('external-doc', '# external native edit\n');
 
     await rig.watchdog.sweep();
 
-    expect(rig.forceCalls).toEqual([]);
+    expect(rig.forceCalls).toEqual(['external-doc']);
     expect(getMetrics().persistenceStalenessDetected).toBe(1);
-    expect(getMetrics().persistenceStalenessForcedStores).toBe(0);
-    expect(getMetrics().persistenceStalenessStoodDown).toBe(1);
-    expect(rig.disk.get('external-doc')).toBe('# external native edit\n');
-
-    await rig.watchdog.sweep();
-    expect(getMetrics().persistenceStalenessStoodDown).toBe(1);
+    expect(getMetrics().persistenceStalenessForcedStores).toBe(1);
+    expect(getMetrics().persistenceStalenessStoodDown).toBe(0);
   });
 
   test('does not resurrect a file deleted out-of-band', async () => {
@@ -452,14 +466,14 @@ describe('external-edit stand-down (disk authority)', () => {
 
   test('a stand-down re-arms when the memory content changes', async () => {
     const doc = seedWedgedDoc(rig, 'rearm-doc');
-    rig.disk.set('rearm-doc', '# external native edit\n');
+    rig.disk.delete('rearm-doc');
 
     await rig.watchdog.sweep();
     await rig.watchdog.sweep();
     expect(rig.forceCalls).toEqual([]);
     expect(getMetrics().persistenceStalenessDetected).toBe(1);
 
-    rig.bases.set('rearm-doc', '# external native edit\n');
+    rig.disk.set('rearm-doc', '# old on disk\n');
     doc.getText('source').delete(0, doc.getText('source').length);
     doc.getText('source').insert(0, '# newer memory edit\n');
 
@@ -546,6 +560,55 @@ describe('in-flight suppression against the real durability state', () => {
     } finally {
       await local.watchdog.dispose();
       vi.useRealTimers();
+    }
+  });
+});
+
+describe('a stalled held-save retry does not wedge the sweep', () => {
+  test('a retry that never settles times out as a failed attempt, later documents still sweep, and neither the next sweep nor dispose waits on it', async () => {
+    const retried: string[] = [];
+    const local = makeRig({
+      forceStoreTimeoutMs: 50,
+      isHeldSaveDue: (name) => name === 'stuck.mmd',
+      retryHeldSave: (_document, name) => {
+        retried.push(name);
+        return new Promise<void>(() => {});
+      },
+    });
+    local.docs.set('stuck.mmd', makeDoc('held text\n'));
+    seedWedgedDoc(local, 'z-healthy-doc');
+
+    await local.watchdog.sweep();
+
+    expect(retried).toEqual(['stuck.mmd']);
+    expect(local.bases.get('z-healthy-doc')).toBe('# edited in memory\n');
+    expect(getMetrics().heldSaveRetryFailures).toBe(1);
+
+    await local.watchdog.sweep();
+
+    expect(retried).toEqual(['stuck.mmd']);
+    await expect(local.watchdog.dispose()).resolves.toBeUndefined();
+  });
+
+  test('a retry that throws is counted as a failed attempt and tried again at the next sweep', async () => {
+    let attempts = 0;
+    const local = makeRig({
+      isHeldSaveDue: () => true,
+      retryHeldSave: async () => {
+        attempts++;
+        throw new Error('injected retry failure');
+      },
+    });
+    try {
+      local.docs.set('diagram.mmd', makeDoc('held text\n'));
+
+      await local.watchdog.sweep();
+      await local.watchdog.sweep();
+
+      expect(attempts).toBe(2);
+      expect(getMetrics().heldSaveRetryFailures).toBe(2);
+    } finally {
+      await local.watchdog.dispose();
     }
   });
 });

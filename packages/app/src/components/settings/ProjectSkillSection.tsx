@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 import { Trans, useLingui } from '@lingui/react/macro';
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -20,7 +21,6 @@ export function ProjectSkillSection() {
   const heading = (
     <div>
       <h4 className="text-sm font-medium">
-        {}
         <Trans comment="Heading above the project's own skill row, in Settings → This project → Skills Studio">
           Skills from OpenKnowledge
         </Trans>
@@ -55,7 +55,6 @@ export function ProjectSkillSection() {
         data-testid="settings-project-skill"
       >
         {heading}
-        {}
         <div
           role="status"
           aria-live="polite"

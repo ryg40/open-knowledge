@@ -3,7 +3,7 @@
 import type { FrontmatterDelta } from '@inkeep/open-knowledge-core/frontmatter-diff';
 import { Plural, Trans, useLingui } from '@lingui/react/macro';
 import { PanelRightClose, PanelRightOpen, X } from 'lucide-react';
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useEffectEvent, useRef, useState } from 'react';
 import { PropertyDiffBlock } from '@/components/PropertyDiffBlock';
 import { computeRenderedDiff, RenderedDiffView } from '@/components/RenderedDiffView';
 import { Button } from '@/components/ui/button';
@@ -36,25 +36,60 @@ interface AgentDiffPaneProps {
   view: AgentDiffView;
   isPanelCollapsed: boolean;
   onTogglePanel: () => void;
+  onDestinationComplete?: (target?: HTMLElement) => void;
+  onDestinationFailed?: () => void;
 }
 
-export function AgentDiffPane({ view, isPanelCollapsed, onTogglePanel }: AgentDiffPaneProps) {
+export function AgentDiffPane({
+  view,
+  isPanelCollapsed,
+  onTogglePanel,
+  onDestinationComplete,
+  onDestinationFailed,
+}: AgentDiffPaneProps) {
   const { t } = useLingui();
   const { agentId, agentName, agentColor, agentIcon, docName, keptCount } = view;
   const [cache] = useState(() => new LruStringCache(VERSION_DIFF_CACHE_LIMIT));
   const diffBodyRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
   const [renderMode, setRenderMode] = useState<'rendered' | 'source'>('rendered');
   const [result, setResult] = useState<{
     status: 'loading' | 'ready' | 'error';
+    key: string | null;
     diff: string;
     before: string;
     after: string;
     properties: FrontmatterDelta;
-  }>({ status: 'loading', diff: '', before: '', after: '', properties: EMPTY_DELTA });
+  }>({ status: 'loading', key: null, diff: '', before: '', after: '', properties: EMPTY_DELTA });
+
+  const currentKey = `${agentId}\0${docName}\0${keptCount}`;
+  const completeDestination = useEffectEvent(() => {
+    onDestinationComplete?.(closeButtonRef.current ?? undefined);
+  });
+  const failDestination = useEffectEvent(() => onDestinationFailed?.());
+  const settledRequestRef = useRef<AgentDiffView | null>(null);
+  useEffect(() => {
+    if (settledRequestRef.current === view) return;
+    if (result.key !== currentKey) return;
+    if (result.status === 'ready') {
+      settledRequestRef.current = view;
+      completeDestination();
+    } else if (result.status === 'error') {
+      settledRequestRef.current = view;
+      failDestination();
+    }
+  }, [result, currentKey, view]);
 
   useEffect(() => {
     let cancelled = false;
-    setResult({ status: 'loading', diff: '', before: '', after: '', properties: EMPTY_DELTA });
+    setResult({
+      status: 'loading',
+      key: null,
+      diff: '',
+      before: '',
+      after: '',
+      properties: EMPTY_DELTA,
+    });
     const key = `${agentId}\0${docName}\0${keptCount}`;
     const cached = cache.get(key);
     if (cached !== undefined) {
@@ -64,14 +99,14 @@ export function AgentDiffPane({ view, isPanelCollapsed, onTogglePanel }: AgentDi
         after: string;
         properties: FrontmatterDelta;
       };
-      setResult({ status: 'ready', ...parsed });
+      setResult({ status: 'ready', key, ...parsed });
       return;
     }
     fetchAgentBurstDiff(agentId, docName, keptCount)
       .then((data) => {
         if (cancelled) return;
         cache.set(key, JSON.stringify(data));
-        setResult({ status: 'ready', ...data });
+        setResult({ status: 'ready', key, ...data });
       })
       .catch((err) => {
         if (!cancelled) {
@@ -81,7 +116,14 @@ export function AgentDiffPane({ view, isPanelCollapsed, onTogglePanel }: AgentDi
             keptCount,
             err,
           });
-          setResult({ status: 'error', diff: '', before: '', after: '', properties: EMPTY_DELTA });
+          setResult({
+            status: 'error',
+            key,
+            diff: '',
+            before: '',
+            after: '',
+            properties: EMPTY_DELTA,
+          });
         }
       });
     return () => {
@@ -185,11 +227,11 @@ export function AgentDiffPane({ view, isPanelCollapsed, onTogglePanel }: AgentDi
       className="absolute inset-0 z-20 flex flex-col bg-background"
       data-testid="agent-diff-pane"
     >
-      {}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-b border-border px-3 py-2">
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
+              ref={closeButtonRef}
               variant="ghost"
               size="icon"
               className="size-7 shrink-0"
@@ -232,10 +274,10 @@ export function AgentDiffPane({ view, isPanelCollapsed, onTogglePanel }: AgentDi
               data-testid="agent-diff-stat"
               aria-label={t`${stat.additions} added, ${stat.deletions} removed`}
             >
-              <span aria-hidden="true" className="text-emerald-600 dark:text-emerald-500">
+              <span aria-hidden="true" className="text-success">
                 +{stat.additions}
               </span>{' '}
-              <span aria-hidden="true" className="text-red-600 dark:text-red-500">
+              <span aria-hidden="true" className="text-destructive">
                 −{stat.deletions}
               </span>
             </span>
@@ -294,7 +336,6 @@ export function AgentDiffPane({ view, isPanelCollapsed, onTogglePanel }: AgentDi
         </div>
       </div>
 
-      {}
       <div ref={diffBodyRef} className="min-h-0 flex-1 overflow-auto subtle-scrollbar">
         {result.status === 'loading' && (
           <div className="flex items-center gap-2 px-4 py-3 text-xs text-muted-foreground">
@@ -310,7 +351,7 @@ export function AgentDiffPane({ view, isPanelCollapsed, onTogglePanel }: AgentDi
         {result.status === 'ready' && <PropertyDiffBlock delta={result.properties} />}
         {result.status === 'ready' &&
           (renderMode === 'rendered' && rendered?.ok ? (
-            <RenderedDiffView diff={rendered} />
+            <RenderedDiffView diff={rendered} docName={docName} />
           ) : result.diff === '' ? (
             <>
               <p className="border-b border-border px-4 py-2 text-xs text-muted-foreground italic">

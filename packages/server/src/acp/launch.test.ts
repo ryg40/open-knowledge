@@ -27,6 +27,7 @@ import {
   isPathQualified,
   MINIMUM_NPX_NODE_MAJOR,
   mergedEnv,
+  npxInstallRefused,
   overlaySetsPath,
   packageAcquisitionFailure,
   preflightLaunch,
@@ -241,6 +242,28 @@ describe('mergedEnv PATH augmentation', () => {
     }
   });
 
+  test('keeps the dev channel away from agents, whose MCP children may run a CLI that predates it', () => {
+    const prior = process.env.OK_CHANNEL;
+    process.env.OK_CHANNEL = 'dev';
+    try {
+      expect(mergedEnv().OK_CHANNEL).toBeUndefined();
+    } finally {
+      if (prior === undefined) delete process.env.OK_CHANNEL;
+      else process.env.OK_CHANNEL = prior;
+    }
+  });
+
+  test('passes a shipped channel through to agents', () => {
+    const prior = process.env.OK_CHANNEL;
+    process.env.OK_CHANNEL = 'beta';
+    try {
+      expect(mergedEnv().OK_CHANNEL).toBe('beta');
+    } finally {
+      if (prior === undefined) delete process.env.OK_CHANNEL;
+      else process.env.OK_CHANNEL = prior;
+    }
+  });
+
   test('overlaySetsPath sees PATH under any spelling', () => {
     expect(overlaySetsPath({ Path: '/x' })).toBe(true);
     expect(overlaySetsPath({ PATH: '/x' })).toBe(true);
@@ -442,6 +465,67 @@ describe('ensureBinaryInstalled', () => {
     expect(existsSync(staleDir)).toBe(false);
   });
 
+  test('a second install of the same binary joins the download already running', async () => {
+    const source = tmp();
+    const cacheDir = tmp();
+    const artifact = buildBinaryTarball(source);
+    const target = { ...artifact.target, sha256: artifact.sha };
+    let downloads = 0;
+    const baseFetch = binaryFetch(artifact.bytes);
+    const countingFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      downloads += 1;
+      return baseFetch(input, init);
+    }) as typeof fetch;
+    const started: string[] = [];
+
+    const installed = await Promise.all([
+      ensureBinaryInstalled('test-agent', '1.0.0', target, cacheDir, log, {
+        fetchImpl: countingFetch,
+        onDownloadStart: () => started.push('first'),
+      }),
+      ensureBinaryInstalled('test-agent', '1.0.0', target, cacheDir, log, {
+        fetchImpl: countingFetch,
+        onDownloadStart: () => started.push('second'),
+      }),
+    ]);
+
+    expect(downloads).toBe(1);
+    expect(installed[0]).toBe(installed[1]);
+    expect(started.sort()).toEqual(['first', 'second']);
+  });
+
+  test('an install that joins after the download started is told it is installing', async () => {
+    const source = tmp();
+    const cacheDir = tmp();
+    const artifact = buildBinaryTarball(source);
+    const target = { ...artifact.target, sha256: artifact.sha };
+    const { promise: responseGate, resolve: releaseResponse } = Promise.withResolvers<void>();
+    const baseFetch = binaryFetch(artifact.bytes);
+    const gatedFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      await responseGate;
+      return baseFetch(input, init);
+    }) as typeof fetch;
+    const { promise: firstStarted, resolve: markFirstStarted } = Promise.withResolvers<void>();
+    const started: string[] = [];
+
+    const first = ensureBinaryInstalled('test-agent', '1.0.0', target, cacheDir, log, {
+      fetchImpl: gatedFetch,
+      onDownloadStart: () => {
+        started.push('first');
+        markFirstStarted();
+      },
+    });
+    await firstStarted;
+    const second = ensureBinaryInstalled('test-agent', '1.0.0', target, cacheDir, log, {
+      fetchImpl: gatedFetch,
+      onDownloadStart: () => started.push('second'),
+    });
+
+    expect(started).toEqual(['first', 'second']);
+    releaseResponse();
+    expect(await second).toBe(await first);
+  });
+
   test('concurrent installers adopt the first completed binary', async () => {
     const firstSource = tmp();
     const secondSource = tmp();
@@ -449,10 +533,7 @@ describe('ensureBinaryInstalled', () => {
     const first = buildBinaryTarball(firstSource, 'first');
     const second = buildBinaryTarball(secondSource, 'second');
     let arrivals = 0;
-    let releaseCommit!: () => void;
-    const commitGate = new Promise<void>((resolve) => {
-      releaseCommit = resolve;
-    });
+    const { promise: commitGate, resolve: releaseCommit } = Promise.withResolvers<void>();
     const beforeCommit = async () => {
       arrivals += 1;
       if (arrivals === 2) releaseCommit();
@@ -1382,7 +1463,7 @@ describe('startup package policy classification', () => {
     const generic = 'No solution found when resolving tool dependencies';
     expect(packageAcquisitionFailure(uv, generic)).toBeNull();
     expect(
-      packageAcquisitionFailure(uv, `${generic}\nversions were filtered by ` + '`exclude-newer`'),
+      packageAcquisitionFailure(uv, `${generic}\nversions were filtered by \`exclude-newer\``),
     ).toMatchObject({ code: 'install-failed' });
   });
 });
@@ -1442,6 +1523,49 @@ describe('staleNpxCacheEntry', () => {
     ],
   ])('ignores %s', (_label, detail) => {
     expect(staleNpxCacheEntry(detail)).toBeNull();
+  });
+});
+
+describe('npxInstallRefused', () => {
+  const refusal =
+    'npm error npx canceled due to missing packages and no YES option: ["ok-argv-probe@1.0.0"]';
+
+  test("recognizes npm's refusal to install a missing package", () => {
+    expect(npxInstallRefused(`${refusal}\n`)).toBe(true);
+  });
+
+  test('reads the older npm ERR! spelling', () => {
+    expect(
+      npxInstallRefused(
+        'npm ERR! npx canceled due to missing packages and no YES option: ["ok-argv-probe@1.0.0"]\r\n',
+      ),
+    ).toBe(true);
+  });
+
+  test('finds the refusal after an npm notice line', () => {
+    expect(
+      npxInstallRefused(
+        `npm notice New major version of npm available! 11.19.0 -> 12.2.0\n${refusal}\n`,
+      ),
+    ).toBe(true);
+  });
+
+  test('reads a refusal npm printed with color=always', () => {
+    expect(
+      npxInstallRefused(
+        '\u001b[1mnpm\u001b[22m \u001b[31merror\u001b[39m npx canceled due to missing packages and no YES option: ["ok-argv-probe@1.0.0"]\n',
+      ),
+    ).toBe(true);
+  });
+
+  test.each([
+    [
+      'a missing file',
+      "npm error code ENOENT\nnpm error syscall open\nnpm error path /Users/andrew/.npm/_npx/4142609e2aa780f6/package.json\nnpm error enoent Could not read package.json: Error: ENOENT: no such file or directory, open '/Users/andrew/.npm/_npx/4142609e2aa780f6/package.json'",
+    ],
+    ['a missing version', 'npm error code ETARGET\nnpm error notarget No matching version found'],
+  ])('ignores %s', (_label, detail) => {
+    expect(npxInstallRefused(detail)).toBe(false);
   });
 });
 

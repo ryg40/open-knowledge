@@ -1,4 +1,4 @@
-// oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — physical margin/padding/inset utilities predate the rule; drain by swapping ml/mr → ms/me, pl/pr → ps/pe, left/right → start/end, then deleting this line. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-physical-direction-utility
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 
 import type { OkignoreBinding } from '@inkeep/open-knowledge-core/config/bind-okignore-doc';
 import { isDocumentOverOpenByteLimit } from '@inkeep/open-knowledge-core/constants/document-open';
@@ -123,6 +123,7 @@ import {
   applyProblemIndicators,
   FILE_TREE_PROBLEM_CSS,
   OK_PROBLEM_BADGE_ATTR,
+  OK_PROBLEM_ROW_ATTR,
 } from '@/components/file-tree-problem-indicators';
 import {
   applyRenameInputAffordance,
@@ -408,8 +409,15 @@ const FILE_TREE_CREATION_CLEARED_CSS = `
   }
 `;
 
+const FILE_TREE_NAME_FOREGROUND_CSS = `
+  [data-type="item"]:not([data-item-selected="true"]):not([data-item-git-status]):not([${OK_PROBLEM_ROW_ATTR}]) > [data-item-section="content"] {
+    color: var(--file-tree-foreground, var(--trees-fg));
+  }
+`;
+
 const FILE_TREE_UNSAFE_CSS = [
   OK_FILE_TREE_READONLY_UNSAFE_CSS,
+  FILE_TREE_NAME_FOREGROUND_CSS,
   FILE_TREE_PROBLEM_CSS,
   FILE_TREE_RENAME_INPUT_CSS,
   FILE_TREE_ROOT_DROP_CSS,
@@ -799,7 +807,7 @@ export function FileTree({ ref }: { ref?: Ref<FileTreeHandle | null> }) {
     reconcileLocalRemoval,
     reconcileLocalRename,
   } = useDocumentContext();
-  const { notifySidebarFileSelected } = useSidebar();
+  const { notifySidebarFileSelected, cover: filesCover } = useSidebar();
   const { resolvedTheme } = useTheme();
   const { addPage, pageMeta, pages } = usePageList();
   const { okignoreBinding, merged } = useConfigContext();
@@ -807,8 +815,9 @@ export function FileTree({ ref }: { ref?: Ref<FileTreeHandle | null> }) {
   const showOnlyMarkdownFiles = merged?.appearance?.sidebar?.showOnlyMarkdownFiles ?? false;
   const showOkFolders = merged?.appearance?.sidebar?.showOkFolders ?? false;
   const previewTabsEnabled = merged?.editor?.previewTabs ?? true;
+  const previewDisposition = previewOpenDisposition(previewTabsEnabled);
   const previewOpenOptions = {
-    disposition: previewOpenDisposition(previewTabsEnabled),
+    disposition: previewDisposition,
     consumeActiveNewTab: true,
   } satisfies OpenTargetOptions;
   const couldNotReachServerTitle = t`Could not reach server`;
@@ -866,16 +875,19 @@ export function FileTree({ ref }: { ref?: Ref<FileTreeHandle | null> }) {
       | { kind: 'folder'; folderPath: string }
       | { kind: 'asset'; assetPath: string; entries?: readonly FileEntry[] },
   ) {
+    let editorDocName: string | null = null;
     if (target.kind === 'doc') {
       if (target.registerPage) addPage(target.docName);
-      openTarget(navigationTargetForDocument(target.docName, target.size), previewOpenOptions);
-      pushHashWithoutNavigation(hashFromDocName(target.docName));
+      const resolved = navigationTargetForDocument(target.docName, target.size);
+      openTarget(resolved, previewOpenOptions);
+      pushHashWithoutNavigation(hashFromDocName(target.docName), previewDisposition);
+      if (resolved.kind === 'doc') editorDocName = resolved.docName;
     } else if (target.kind === 'folder') {
       openTarget(
         { kind: 'folder', target: target.folderPath, folderPath: target.folderPath },
         previewOpenOptions,
       );
-      pushHashWithoutNavigation(hashFromFolderPath(target.folderPath));
+      pushHashWithoutNavigation(hashFromFolderPath(target.folderPath), previewDisposition);
     } else {
       const currentEntries = target.entries ?? documentsRef.current;
       const entry = currentEntries.find(
@@ -891,9 +903,9 @@ export function FileTree({ ref }: { ref?: Ref<FileTreeHandle | null> }) {
         },
         previewOpenOptions,
       );
-      pushHashWithoutNavigation(hashFromAssetPath(target.assetPath));
+      pushHashWithoutNavigation(hashFromAssetPath(target.assetPath), previewDisposition);
     }
-    notifySidebarFileSelected();
+    notifySidebarFileSelected(editorDocName);
   }
   function activateTreePath(
     treePath: string,
@@ -917,7 +929,7 @@ export function FileTree({ ref }: { ref?: Ref<FileTreeHandle | null> }) {
         },
         previewOpenOptions,
       );
-      pushHashWithoutNavigation(action.hash);
+      pushHashWithoutNavigation(action.hash, previewDisposition);
       notifySidebarFileSelected();
       return 'non-doc';
     }
@@ -934,7 +946,7 @@ export function FileTree({ ref }: { ref?: Ref<FileTreeHandle | null> }) {
     });
     if (okTarget?.kind === 'asset') {
       openTarget(okTarget, previewOpenOptions);
-      pushHashWithoutNavigation(hashFromAssetPath(okTarget.assetPath));
+      pushHashWithoutNavigation(hashFromAssetPath(okTarget.assetPath), previewDisposition);
       notifySidebarFileSelected();
       return 'non-doc';
     }
@@ -3002,7 +3014,10 @@ export function FileTree({ ref }: { ref?: Ref<FileTreeHandle | null> }) {
       const folderPath = treeDirectoryPathToFolderPath(path);
       if (wasSelected) {
         if (model.getSelectedPaths().length !== 1) return;
-        if (isSameHash(window.location.hash, hashFromFolderPath(folderPath))) return;
+        if (isSameHash(window.location.hash, hashFromFolderPath(folderPath))) {
+          if (filesCover) queueMicrotask(() => notifySidebarFileSelected());
+          return;
+        }
       }
       queueMicrotask(() => navigateWithPulse({ kind: 'folder', folderPath }));
       return;
@@ -3022,7 +3037,15 @@ export function FileTree({ ref }: { ref?: Ref<FileTreeHandle | null> }) {
     }
     const docName = treeFilePathToDocumentDocName(path, documentsRef.current);
     if (model.getSelectedPaths().length !== 1) return;
-    if (isSameHash(window.location.hash, hashFromDocName(docName))) return;
+    if (isSameHash(window.location.hash, hashFromDocName(docName))) {
+      if (filesCover) {
+        const resolved = navigationTargetForDocument(docName, undefined);
+        queueMicrotask(() =>
+          notifySidebarFileSelected(resolved.kind === 'doc' ? resolved.docName : null),
+        );
+      }
+      return;
+    }
     queueMicrotask(() => activateTreePath(path));
   }
 
@@ -3037,7 +3060,7 @@ export function FileTree({ ref }: { ref?: Ref<FileTreeHandle | null> }) {
     if (tabId) requestPreviewTabPromotionForTab(tabId);
   }
 
-  function handleEmptyExternalFileDragOver(event: ReactDragEvent<HTMLDivElement>) {
+  function handleEmptyExternalFileDragOver(event: ReactDragEvent<HTMLElement>) {
     if (!isExternalFileDrag(event.nativeEvent)) return;
     event.preventDefault();
     event.stopPropagation();
@@ -3045,13 +3068,13 @@ export function FileTree({ ref }: { ref?: Ref<FileTreeHandle | null> }) {
     setEmptyExternalFileDropActive(true);
   }
 
-  function handleEmptyExternalFileDragLeave(event: ReactDragEvent<HTMLDivElement>) {
+  function handleEmptyExternalFileDragLeave(event: ReactDragEvent<HTMLElement>) {
     const related = event.relatedTarget;
     if (related instanceof Node && event.currentTarget.contains(related)) return;
     setEmptyExternalFileDropActive(false);
   }
 
-  function handleEmptyExternalFileDrop(event: ReactDragEvent<HTMLDivElement>) {
+  function handleEmptyExternalFileDrop(event: ReactDragEvent<HTMLElement>) {
     if (!isExternalFileDrag(event.nativeEvent)) return;
     const files = filesFromExternalDrop(event.nativeEvent);
     if (files.length === 0) return;
@@ -3102,28 +3125,13 @@ export function FileTree({ ref }: { ref?: Ref<FileTreeHandle | null> }) {
       return <FileTreeFilteredToZeroNotice />;
     }
     return (
-      <section
-        aria-label={t`File drop zone`}
-        className={cn(
-          'flex flex-1 flex-col items-center justify-center gap-3 rounded-md py-8',
-          emptyExternalFileDropActive && 'bg-primary/5 ring-2 ring-primary/70 ring-inset',
-        )}
+      <FileTreeEmptyState
+        active={emptyExternalFileDropActive}
         onDragOver={handleEmptyExternalFileDragOver}
         onDragLeave={handleEmptyExternalFileDragLeave}
         onDrop={handleEmptyExternalFileDrop}
-      >
-        <span className="select-none text-sidebar-foreground/30 text-sm">
-          <Trans>No files yet.</Trans>
-        </span>
-        <Button
-          variant="link"
-          size="sm"
-          className="font-mono uppercase"
-          onClick={() => startCreating('file', '')}
-        >
-          <Trans>Create your first file</Trans>
-        </Button>
-      </section>
+        onCreate={() => startCreating('file', '')}
+      />
     );
   }
 
@@ -3150,7 +3158,6 @@ export function FileTree({ ref }: { ref?: Ref<FileTreeHandle | null> }) {
                   error && (
                     <>
                       <FileTreeHeaderNotice kind="error">{error}</FileTreeHeaderNotice>
-                      {}
                       {serverUnreachable ? <RestartServerButton className="mx-2 mb-1" /> : null}
                     </>
                   )
@@ -3305,6 +3312,41 @@ export function FileTree({ ref }: { ref?: Ref<FileTreeHandle | null> }) {
   );
 }
 
+export function FileTreeEmptyState({
+  active,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  onCreate,
+}: {
+  active: boolean;
+  onDragOver: (event: ReactDragEvent<HTMLElement>) => void;
+  onDragLeave: (event: ReactDragEvent<HTMLElement>) => void;
+  onDrop: (event: ReactDragEvent<HTMLElement>) => void;
+  onCreate: () => void;
+}) {
+  const { t } = useLingui();
+  return (
+    <section
+      aria-label={t`File drop zone`}
+      className={cn(
+        'flex flex-1 flex-col items-center justify-center gap-3 rounded-md py-8',
+        active && 'bg-primary/5 ring-2 ring-primary/70 ring-inset',
+      )}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      <span className="file-tree-empty-text select-none text-sidebar-foreground/30 text-sm">
+        <Trans>No files yet.</Trans>
+      </span>
+      <Button variant="link" size="sm" className="font-mono uppercase" onClick={onCreate}>
+        <Trans>Create your first file</Trans>
+      </Button>
+    </section>
+  );
+}
+
 function hasExpandedAncestry(path: string, expandedPaths: ReadonlySet<string>): boolean {
   return computeTreeAncestorPaths(path)
     .slice(0, -1)
@@ -3391,8 +3433,8 @@ function FileTreeSkeleton() {
           key={index}
           className="flex h-6 items-center gap-2"
         >
-          <Skeleton className="h-3 w-3 shrink-0 rounded-sm" />
-          <Skeleton className={`h-3 ${width}`} />
+          <Skeleton className="h-3 w-3 shrink-0 rounded-sm bg-sidebar-foreground/10" />
+          <Skeleton className={`h-3 bg-sidebar-foreground/10 ${width}`} />
         </div>
       ))}
     </div>

@@ -4,6 +4,7 @@ import { Trans, useLingui } from '@lingui/react/macro';
 import { File, Folder, Hexagon, type LucideIcon, Puzzle } from 'lucide-react';
 import { Fragment } from 'react';
 import { LINT_PLUGIN_META } from '@/components/settings/lint-plugin-meta';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { OkScaffoldPlan, OkSeedPackInfo } from '@/lib/desktop-bridge-types';
 import { skillDisplayName } from '@/lib/skill-scope';
@@ -19,10 +20,10 @@ export function CreatedItemsSkeleton({ rowCount }: { rowCount: number }) {
       <ul className="space-y-2">
         {Array.from({ length: rowCount }, (_, i) => i).map((i) => (
           <li key={`seed-skeleton-${i}`} aria-hidden="true" className="flex items-center gap-3">
-            <div className="size-8 shrink-0 animate-pulse rounded-lg bg-muted" />
+            <Skeleton className="size-8 shrink-0 rounded-lg" />
             <div className="min-w-0 flex-1 py-0.5">
-              <span className="block h-3.5 w-28 animate-pulse rounded bg-muted" />
-              <span className="mt-2 block h-3 w-4/5 animate-pulse rounded bg-muted" />
+              <Skeleton className="h-3.5 w-28 rounded" />
+              <Skeleton className="mt-2 h-3 w-4/5 rounded" />
             </div>
           </li>
         ))}
@@ -242,7 +243,6 @@ export function CreatedItemsList({
                 const Icon = row.icon;
                 return (
                   <li key={row.key} className="flex items-center gap-3">
-                    {}
                     <div
                       aria-hidden="true"
                       className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/60"
@@ -250,7 +250,6 @@ export function CreatedItemsList({
                       <Icon className="size-4 text-muted-foreground" />
                     </div>
                     <div className="min-w-0 flex-1 py-0.5">
-                      {}
                       <div className="flex items-center gap-2">
                         <code
                           className="min-w-0 flex-1 truncate font-mono text-1sm text-foreground/90"
@@ -261,7 +260,6 @@ export function CreatedItemsList({
                         {row.pill ? (
                           row.pillTooltip && row.pillTooltip.length > 0 ? (
                             <Tooltip>
-                              {}
                               <TooltipTrigger className="shrink-0 cursor-help rounded bg-transparent p-0 font-mono text-2xs uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground/70 focus-visible:text-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
                                 {row.pill}
                               </TooltipTrigger>

@@ -8,6 +8,7 @@ import { sourceFacts } from './telemetry.mjs';
 
 const kit = dirname(fileURLToPath(import.meta.url));
 const source = resolve(kit, '../..');
+const unstampedVersion = '0.0.0-unknown';
 const action = process.argv[2];
 const options = {};
 let result = { action, steps: [] };
@@ -175,10 +176,22 @@ function releaseCommit(release) {
   version(release);
   const lines = git('log', '--first-parent', '--format=%H%x09%s', 'refs/remotes/upstream/main').split('\n');
   const candidates = lines.filter((line) => new RegExp(`^main reset: post-stable v${release.replaceAll('.', '\\.')}($|[ (])`).test(line.split('\t').slice(1).join('\t')));
-  if (candidates.length !== 1) throw new Error(`expected one post-stable commit for ${release}, found ${candidates.length}`);
-  const sha = candidates[0].split('\t')[0];
+  if (candidates.length > 1) throw new Error(`expected one post-stable commit for ${release}, found ${candidates.length}`);
+  if (candidates.length === 1) {
+    const sha = candidates[0].split('\t')[0];
+    const manifest = JSON.parse(git('show', `${sha}:packages/cli/package.json`));
+    if (manifest.version !== release) throw new Error('post-stable package version does not match');
+    return sha;
+  }
+  try {
+    git('fetch', '--no-tags', 'upstream', `refs/tags/v${release}`);
+  } catch {
+    throw new Error(`expected one post-stable commit or the upstream tag v${release}, found neither`);
+  }
+  const sha = git('rev-parse', '--verify', 'FETCH_HEAD^{commit}');
+  if (!lines.some((line) => line.split('\t')[0] === sha)) throw new Error(`the upstream tag v${release} is not on the first-parent history of upstream main`);
   const manifest = JSON.parse(git('show', `${sha}:packages/cli/package.json`));
-  if (manifest.version !== release) throw new Error('post-stable package version does not match');
+  if (manifest.version !== unstampedVersion && manifest.version !== release) throw new Error('tagged package version does not match');
   return sha;
 }
 async function fetchUpstream(dependency) {
@@ -208,6 +221,7 @@ async function qualify() {
     upstream = releaseCommit(options.version);
     result.upstream_commit = upstream;
     git('branch', '-f', 'main', upstream);
+    git('tag', options.version, upstream);
     writeFileSync(log, `${upstream}\n`);
     return 0;
   }, fetched);

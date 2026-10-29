@@ -83,18 +83,17 @@ export function SkillMarkdownViewer({
           {grid}
         </article>
       ) : (
-        <main
+        <section
           className="flex h-full min-h-0 flex-col bg-background"
           aria-label={fileName}
           data-skill-markdown-viewer=""
           data-skill-markdown-viewer-state="loaded"
         >
           <div className="editor-doc-scroll min-h-0 flex-1 overflow-auto subtle-scrollbar scroll-fade-mask">
-            {}
             <ReadonlyPropertyPanel text={text} />
             {grid}
           </div>
-        </main>
+        </section>
       )}
       {createPortal(
         // oxlint-disable-next-line ok/no-unportaled-editor-content -- portaled site — view.dom parent is the exclusively-owned portalTarget per the H6 contract (PRECEDENTS.md #44)

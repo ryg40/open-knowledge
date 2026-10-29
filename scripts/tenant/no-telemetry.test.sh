@@ -85,6 +85,15 @@ edit_cases() {
   run 0 'no-telemetry: ok' --check
   pass
 
+  begin 'user-level project diagnostic records'
+  run 0
+  project_logs=$HOME/.ok/logs/projects/$(printf '/data' | sha256sum | cut -d ' ' -f 1)
+  mkdir -p "$project_logs"
+  run 0 'no-telemetry: ok' --check
+  printf 'record\n' > "$project_logs/spans.jsonl"
+  run 1 "recorded file: $project_logs/spans.jsonl" --check
+  pass
+
   begin 'lines added at the end'
   printf 'a: 1\n' > "$config"
   inode=$(stat -c %i "$config")

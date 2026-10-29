@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 // oxlint-disable ok/no-raw-html-interactive-element -- pre-rule backlog — file uses raw <button>/<input>/<textarea> awaiting shadcn migration; tracked at https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-html-interactive-element
 // oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — physical margin/padding/inset utilities predate the rule; drain by swapping ml/mr → ms/me, pl/pr → ps/pe, left/right → start/end, then deleting this line. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-physical-direction-utility
 import {
@@ -251,7 +252,13 @@ function LinkRow({
   return row;
 }
 
-function BacklinksSection({ docName }: { docName: string }) {
+function BacklinksSection({
+  docName,
+  onDestinationRequested,
+}: {
+  docName: string;
+  onDestinationRequested?: (docName: string) => void;
+}) {
   const { t } = useLingui();
   const {
     folderPaths,
@@ -325,6 +332,7 @@ function BacklinksSection({ docName }: { docName: string }) {
                       anchor={backlink.anchor}
                       snippet={backlink.snippet}
                       href={hashFromDocName(navigationIntent.hashDocName, backlink.anchor)}
+                      onClick={() => onDestinationRequested?.(navigationIntent.hashDocName)}
                     />
                   );
                 })}
@@ -342,7 +350,13 @@ function BacklinksSection({ docName }: { docName: string }) {
   );
 }
 
-function ForwardLinksSection({ docName }: { docName: string }) {
+function ForwardLinksSection({
+  docName,
+  onDestinationRequested,
+}: {
+  docName: string;
+  onDestinationRequested?: (docName: string) => void;
+}) {
   const { t } = useLingui();
   const {
     addPage,
@@ -380,7 +394,10 @@ function ForwardLinksSection({ docName }: { docName: string }) {
     try {
       await createPageFromSeedAndUpdate(seed, {
         addPage,
-        onCreated: navigateToDocHash,
+        onCreated: (createdDocName) => {
+          onDestinationRequested?.(createdDocName);
+          navigateToDocHash(createdDocName);
+        },
       });
       setCreatingKey(null);
     } catch (err) {
@@ -437,7 +454,7 @@ function ForwardLinksSection({ docName }: { docName: string }) {
         <LinkRow
           key={key}
           icon={<TriangleAlert className="size-3.5" />}
-          iconColorClass="text-amber-600 dark:text-amber-400"
+          iconColorClass="text-warning"
           rowTooltip={creatingKey === key ? t`Creating page` : t`Missing page — click to create`}
           ariaLabel={
             creatingKey === key
@@ -460,7 +477,7 @@ function ForwardLinksSection({ docName }: { docName: string }) {
         <LinkRow
           key={key}
           icon={<Folder className="size-3.5" />}
-          iconColorClass="text-sky-600 dark:text-sky-400"
+          iconColorClass="text-info"
           ariaLabel={t`Folder target: ${linkTitle}. Click to open the overview.`}
           title={displayTitle}
           path={path}
@@ -468,6 +485,7 @@ function ForwardLinksSection({ docName }: { docName: string }) {
           anchor={link.anchor}
           snippet={link.snippet}
           href={navigateHref}
+          onClick={() => onDestinationRequested?.(navigateHashDocName)}
         />
       );
     }
@@ -482,6 +500,7 @@ function ForwardLinksSection({ docName }: { docName: string }) {
         anchor={link.anchor}
         snippet={link.snippet}
         href={navigateHref}
+        onClick={() => onDestinationRequested?.(navigateHashDocName)}
       />
     );
   }
@@ -529,7 +548,13 @@ function ForwardLinksSection({ docName }: { docName: string }) {
   );
 }
 
-function LocalFilesSection({ docName }: { docName: string }) {
+function LocalFilesSection({
+  docName,
+  onDestinationComplete,
+}: {
+  docName: string;
+  onDestinationComplete?: (target?: HTMLElement) => void;
+}) {
   const { t } = useLingui();
   const { pages, loading: pagesLoading, error: pageListError } = usePageList();
   const { data, isLoading, error } = useQuery({
@@ -558,6 +583,7 @@ function LocalFilesSection({ docName }: { docName: string }) {
       line: target.line + 1,
       column: target.column + 1,
       source: 'links',
+      onNavigated: onDestinationComplete,
     };
     rememberPendingSourceNavigation(docName, { kind: 'lint', detail });
     window.dispatchEvent(new CustomEvent(LINT_NAV_EVENT, { detail }));
@@ -592,7 +618,7 @@ function LocalFilesSection({ docName }: { docName: string }) {
       <LinkRow
         key={`lt:${target.range.start}-${target.range.end}`}
         icon={isImage ? <ImageIcon className="size-3.5" /> : <File className="size-3.5" />}
-        iconColorClass={resolved ? undefined : 'text-amber-600 dark:text-amber-400'}
+        iconColorClass={resolved ? undefined : 'text-warning'}
         title={compactDocPath(identity)}
         titleHover={identity}
         ariaLabel={ariaLabel}
@@ -657,15 +683,25 @@ function LocalFilesSection({ docName }: { docName: string }) {
   );
 }
 
-export function LinksPanel({ docName, className = '' }: { docName: string; className?: string }) {
+export function LinksPanel({
+  docName,
+  className = '',
+  onDestinationRequested,
+  onDestinationComplete,
+}: {
+  docName: string;
+  className?: string;
+  onDestinationRequested?: (docName: string) => void;
+  onDestinationComplete?: (target?: HTMLElement) => void;
+}) {
   return (
     <Panel className={className}>
       <PanelBody className="px-0 py-0">
-        <ForwardLinksSection docName={docName} />
+        <ForwardLinksSection docName={docName} onDestinationRequested={onDestinationRequested} />
         <Separator />
-        <LocalFilesSection docName={docName} />
+        <LocalFilesSection docName={docName} onDestinationComplete={onDestinationComplete} />
         <Separator />
-        <BacklinksSection docName={docName} />
+        <BacklinksSection docName={docName} onDestinationRequested={onDestinationRequested} />
       </PanelBody>
     </Panel>
   );

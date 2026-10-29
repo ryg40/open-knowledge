@@ -3,6 +3,7 @@ import { mediaKindForSidebarAssetExtension } from '@inkeep/open-knowledge-core/c
 import { PrincipalSuccessSchema } from '@inkeep/open-knowledge-core/schemas/api';
 import type { Principal } from '@inkeep/open-knowledge-core/types/principal';
 import { createContext, type ReactNode, use, useEffect, useRef, useState } from 'react';
+import { isDocPanelOnScreen } from '@/components/doc-panel-visibility';
 import type { ResolvedNavigationTarget } from '@/components/navigation-targets';
 import { docNameForNavigationTarget } from '@/components/navigation-targets';
 import { consumePrewarmClick } from '@/components/prewarm-correlation';
@@ -27,6 +28,7 @@ import { subscribeLocalMenuAction } from '@/lib/local-menu-action-bus';
 import { markNoteWindowDocDeleted } from '@/lib/note-window-deleted-store';
 import { isNoteWindow } from '@/lib/note-window-mode';
 import { mark } from '@/lib/perf';
+import { revealEditor, revealEditorBeforeActing } from '@/lib/reveal-editor';
 import { refreshServerInfo } from '@/lib/server-info-refresh';
 import { showTabSessionRestoreRecoveryNotice } from '@/lib/tab-session-restore-recovery-notice';
 import {
@@ -35,6 +37,7 @@ import {
 } from '@/lib/tab-session-restore-suppression';
 import { useCollabUrl } from '@/lib/use-collab-url';
 import { resolveSyncWorkspace } from '@/lib/use-workspace';
+import { noteWorkspaceHashWrite } from '@/lib/workspace-hash-writes';
 import { getEditorForDoc } from './active-editor';
 import { handleBranchSwitched } from './branch-invalidation';
 import {
@@ -57,6 +60,7 @@ import {
   hydrateEditorWorkspace,
   normalizeEditorWorkspace,
   type PaneSide,
+  preserveLivePreviewTabs,
   projectVisibleEditorWorkspace,
   type RecentlyClosedEditorTab,
   recordRecentlyClosedTab,
@@ -207,6 +211,7 @@ interface DocumentContextValue {
 }
 
 export interface OpenTargetOptions {
+  deliberate?: boolean;
   disposition?: TabOpenDisposition;
   consumeActiveNewTab?: boolean;
   tabBehavior?: 'append' | 'replace-active';
@@ -320,6 +325,7 @@ function hashFromTabId(tabId: string): string {
 
 function navigateToHash(nextHash: string): void {
   if (typeof window !== 'undefined' && !isSameHash(window.location.hash, nextHash)) {
+    noteWorkspaceHashWrite(nextHash);
     window.location.hash = nextHash;
   }
 }
@@ -732,6 +738,7 @@ export function DocumentProvider({ children }: { children: ReactNode }) {
             activeTarget: currentFocused.activeNewTabId ? null : pane.activeTarget,
           }));
         }
+        nextWorkspace = preserveLivePreviewTabs(nextWorkspace, currentWorkspace, state);
         const hash = window.location.hash;
         const hashTabId = tabIdFromHash(hash);
         const hashOwner = hashTabId ? findPaneOwningTab(nextWorkspace, hashTabId) : null;
@@ -1225,6 +1232,7 @@ export function DocumentProvider({ children }: { children: ReactNode }) {
     existingTabBehavior: ExistingTabOpenBehavior = 'activate-owner',
   ) => {
     if (collabUrl === null) return;
+    if (options.deliberate !== false) revealEditor();
     const paneId = requestedPaneId ?? workspaceRef.current.focusedPaneId;
     const p = getPool(collabUrl);
     if (target.kind === 'skills') {
@@ -1303,6 +1311,7 @@ export function DocumentProvider({ children }: { children: ReactNode }) {
     activateTabInPaneById(workspaceRef.current.focusedPaneId, tabId);
 
   const openBlobRunner = () => {
+    revealEditor();
     activateOrOpenSurfaceNewTab(workspaceRef.current.focusedPaneId, 'blob-runner');
   };
 
@@ -1582,6 +1591,7 @@ export function DocumentProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     return subscribeLocalMenuAction((action) => {
       if (action !== 'close-active-tab-or-window') return;
+      revealEditorBeforeActing();
       if (!closeActiveTabOrWindow()) window.close();
     });
   }, [
@@ -1802,7 +1812,7 @@ export function DocumentProvider({ children }: { children: ReactNode }) {
         setDocPanelExpandSignal((prev) => prev + 1);
         return;
       }
-      if (docPanelMode === 'agent' && docPanelAgentId === connectionId) {
+      if (docPanelMode === 'agent' && docPanelAgentId === connectionId && isDocPanelOnScreen()) {
         setDocPanelModeState('doc');
         return;
       }

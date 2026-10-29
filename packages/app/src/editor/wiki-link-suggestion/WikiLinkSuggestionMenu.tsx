@@ -131,15 +131,10 @@ export function WikiLinkSuggestionMenu({
       className="w-80 overflow-y-auto subtle-scrollbar rounded-lg border bg-popover p-1 shadow-md"
       style={{ maxHeight: 'var(--suggestion-menu-max-height, 40vh)' }}
     >
-      {}
       <span className="sr-only" aria-live="polite" aria-atomic="true">
         {selectedItem ? announcementText(selectedItem) : ''}
       </span>
-      {error && (
-        <div className="rounded-md px-2 py-1.5 text-xs text-amber-700 dark:text-amber-300">
-          {error}
-        </div>
-      )}
+      {error && <div className="rounded-md px-2 py-1.5 text-xs text-warning">{error}</div>}
       {mode === 'anchor' && (
         <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
           {pageTarget}
@@ -196,7 +191,6 @@ export function WikiLinkSuggestionMenu({
               <span className="truncate font-medium">
                 {item.kind === 'create' ? item.actionLabel : item.title}
               </span>
-              {}
               {item.kind === 'page' && item.title !== item.docName && (
                 <span className="line-clamp-2 break-all text-xs text-muted-foreground">
                   {item.docName}

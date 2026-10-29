@@ -1,7 +1,9 @@
 // oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — physical margin/padding/inset utilities predate the rule; drain by swapping ml/mr → ms/me, pl/pr → ps/pe, left/right → start/end, then deleting this line. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-physical-direction-utility
 
+import { graphemePrefix, graphemeSuffix } from '@inkeep/open-knowledge-core/utils/grapheme-clip';
 import { Plural, Trans, useLingui } from '@lingui/react/macro';
 import { MessageSquare, X } from 'lucide-react';
+import { setPropertiesCollapsed } from '@/components/properties-collapsed-store';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
@@ -51,7 +53,6 @@ export function QueuedCommentsChip({
         'text-xs text-muted-foreground',
       )}
     >
-      {}
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
@@ -64,7 +65,6 @@ export function QueuedCommentsChip({
             className="h-auto min-h-0 gap-1 px-0.5 py-0 text-xs font-normal text-muted-foreground hover:text-foreground"
           >
             <MessageSquare className="size-3" />
-            {}
             {docs.length > 1 ? (
               <Trans>
                 <Plural value={count} one="# comment" other="# comments" /> across{' '}
@@ -75,7 +75,6 @@ export function QueuedCommentsChip({
             )}
           </Button>
         </TooltipTrigger>
-        {}
         <TooltipContent className="max-w-64">
           {docs.length > 1 ? (
             <ul className="flex flex-col gap-0.5">
@@ -116,33 +115,32 @@ export function propertyAddress(key: string, path: readonly (string | number)[])
   return out;
 }
 
-export function revealThread(thread: CommentThread): void {
+export function revealThread(
+  thread: CommentThread,
+  onDestinationComplete?: (target: HTMLElement) => void,
+): void {
+  const { target, anchor } = thread;
+  if (target.kind === 'property') setPropertiesCollapsed(false);
+  const resolveTarget =
+    target.kind === 'property' && anchor !== null
+      ? () =>
+          revealPropertyValueRange({
+            key: target.key,
+            path: target.path,
+            quote: anchor.quote,
+            start: anchor.start,
+            end: anchor.end,
+          })
+      : undefined;
   revealComment({
     docName: thread.docName,
-    quote: thread.target.kind === 'property' ? '' : (thread.anchor?.quote ?? ''),
+    quote: target.kind === 'property' ? '' : (anchor?.quote ?? ''),
     threadId: thread.id,
-    context: thread.anchor ?? undefined,
+    context: anchor ?? undefined,
+    onDestinationComplete,
+    resolveTarget,
   });
-  const { target, anchor } = thread;
-  if (target.kind !== 'property' || anchor === null) return;
-  let attempts = 0;
-  const attempt = (): void => {
-    const done = revealPropertyValueRange({
-      key: target.key,
-      path: target.path,
-      quote: anchor.quote,
-      start: anchor.start,
-      end: anchor.end,
-    });
-    if (done) return;
-    attempts += 1;
-    if (attempts >= REVEAL_FRAME_BUDGET) return;
-    requestAnimationFrame(attempt);
-  };
-  requestAnimationFrame(attempt);
 }
-
-const REVEAL_FRAME_BUDGET = 30;
 
 export interface CommentBatchItem {
   docName: string;
@@ -172,12 +170,12 @@ const CONTEXT_CHARS = 48;
 
 function trimTail(text: string): string {
   const flat = text.replace(/\s+/g, ' ').trimStart();
-  return flat.length > CONTEXT_CHARS ? `…${flat.slice(-CONTEXT_CHARS)}` : flat;
+  return flat.length > CONTEXT_CHARS ? `…${graphemeSuffix(flat, CONTEXT_CHARS)}` : flat;
 }
 
 function trimHead(text: string): string {
   const flat = text.replace(/\s+/g, ' ').trimEnd();
-  return flat.length > CONTEXT_CHARS ? `${flat.slice(0, CONTEXT_CHARS)}…` : flat;
+  return flat.length > CONTEXT_CHARS ? `${graphemePrefix(flat, CONTEXT_CHARS)}…` : flat;
 }
 
 function locatingNote(item: CommentBatchItem): string | null {

@@ -14,6 +14,7 @@ import { GRAMMAR_EXTRACTORS } from './extractors.mjs';
 import { isFresh, sourceDigest } from './freshness.mjs';
 
 const REGEX_METACHARACTERS = /[.+^${}()|[\]\\]/g;
+const INDEXED_GIT_CONFIG_ENTRY = /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/;
 
 export function globToRegExp(glob) {
   if (UNSUPPORTED_GLOB_SYNTAX.test(glob)) {
@@ -52,9 +53,16 @@ export function gitEnvironment(base = process.env) {
     GIT_PREFIX: _gitPrefix,
     GIT_CEILING_DIRECTORIES: _gitCeilingDirectories,
     GIT_DISCOVERY_ACROSS_FILESYSTEM: _gitDiscoveryAcrossFilesystem,
+    GIT_CONFIG_PARAMETERS: _gitConfigParameters,
+    GIT_CONFIG_COUNT: _gitConfigCount,
     ...env
   } = base;
-  return { ...env, LC_ALL: 'C' };
+  return {
+    ...Object.fromEntries(
+      Object.entries(env).filter(([name]) => !INDEXED_GIT_CONFIG_ENTRY.test(name)),
+    ),
+    LC_ALL: 'C',
+  };
 }
 
 function runGit(repoRoot, args, input) {
@@ -79,7 +87,34 @@ function describeSpawnFailure(result) {
 
 function gitIgnoredPaths(repoRoot, relPaths) {
   if (relPaths.length === 0) return new Set();
-  const result = runGit(repoRoot, ['check-ignore', '--stdin', '-z'], `${relPaths.join('\0')}\0`);
+  const index = runGit(repoRoot, ['ls-files', '--cached', '-z']);
+  let paths = relPaths;
+  let flags = [];
+  if (!index.error && index.status === 0) {
+    const trackedPaths = index.stdout.split('\0').filter(Boolean);
+    const tracked = new Set(trackedPaths);
+    const indexedAncestor = relPaths.some((path) => {
+      for (let at = path.indexOf('/'); at !== -1; at = path.indexOf('/', at + 1)) {
+        if (tracked.has(path.slice(0, at))) return true;
+      }
+      return false;
+    });
+    if (!indexedAncestor) {
+      for (const path of trackedPaths) {
+        for (let at = path.indexOf('/'); at !== -1; at = path.indexOf('/', at + 1)) {
+          tracked.add(path.slice(0, at));
+        }
+      }
+      paths = relPaths.filter((path) => !tracked.has(path));
+      flags = ['--no-index'];
+    }
+  }
+  if (paths.length === 0) return new Set();
+  const result = runGit(
+    repoRoot,
+    ['check-ignore', '--stdin', '-z', ...flags],
+    `${paths.join('\0')}\0`,
+  );
   if (result.status === 1) return new Set();
   if (result.status === 128 && /not a git repository/i.test(result.stderr)) return new Set();
   if (result.error || result.status !== 0) {

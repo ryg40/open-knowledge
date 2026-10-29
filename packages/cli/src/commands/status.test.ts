@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { LockState } from './lock-state.ts';
 import { buildStatusReport, renderStatusText, runStatus } from './status.ts';
 
@@ -30,10 +30,25 @@ function dead(pid: number): LockState {
       startedAt: '2026-04-16T00:00:00Z',
       worktreeRoot: '/x',
     },
+    text: '',
+  };
+}
+function reused(pid: number): LockState {
+  return {
+    status: 'reused-pid',
+    lockPath: '/tmp/r.lock',
+    lock: {
+      pid,
+      port: 3001,
+      hostname: 'host',
+      startedAt: '2026-04-16T00:00:00Z',
+      worktreeRoot: '/x',
+    },
+    text: '',
   };
 }
 function corrupt(): LockState {
-  return { status: 'corrupt', lockPath: '/tmp/c.lock' };
+  return { status: 'corrupt', lockPath: '/tmp/c.lock', text: '{' };
 }
 function foreign(): LockState {
   return {
@@ -78,6 +93,19 @@ describe('buildStatusReport', () => {
     expect(r.server.pid).toBe(999);
   });
 
+  test('reused-pid → alive: false, reports the recorded lock', () => {
+    const r = buildStatusReport(reused(4242));
+    expect(r.server).toEqual({
+      name: 'server',
+      state: 'reused-pid',
+      pid: 4242,
+      port: 3001,
+      startedAt: '2026-04-16T00:00:00Z',
+      host: 'host',
+      alive: false,
+    });
+  });
+
   test('corrupt → alive: false, no pid surfaced', () => {
     const r = buildStatusReport(corrupt());
     expect(r.server.state).toBe('corrupt');
@@ -107,6 +135,11 @@ describe('buildStatusReport', () => {
 });
 
 describe('renderStatusText', () => {
+  test('reused-pid renders as stale and points at ok clean', () => {
+    const out = renderStatusText(buildStatusReport(reused(4242)));
+    expect(out).toContain('stale (pid=4242 now belongs to another process); run `ok clean`');
+  });
+
   test('alive entries include pid + port + startedAt', () => {
     const out = renderStatusText(buildStatusReport(alive(100, 3001, 'host', ['http', 'ws', 'ui'])));
     expect(out).toContain('pid=100 port=3001');
@@ -185,4 +218,24 @@ test('read failures retain unknown liveness and suggest restoring access', () =>
   expect(report.server).toMatchObject({ state: 'read-error', alive: 'unknown' });
   expect(report.server.pid).toBeUndefined();
   expect(renderStatusText(report)).toContain('restore file and parent-directory access');
+});
+
+describe('status hints name the running channel CLI', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  test.each([
+    ['stable', 'ok'],
+    ['beta', 'ok-beta'],
+  ])('%s: stale and corrupt locks suggest %s clean', (channel, command) => {
+    vi.stubEnv('OK_CHANNEL', channel);
+    expect(renderStatusText(buildStatusReport(dead(999)))).toContain(
+      `server  stale (dead pid=999) — run \`${command} clean\``,
+    );
+    expect(renderStatusText(buildStatusReport(corrupt()))).toContain(
+      `server  lock file corrupt — run \`${command} clean\``,
+    );
+    expect(renderStatusText(buildStatusReport(reused(999)))).toContain(
+      `server  stale (pid=999 now belongs to another process); run \`${command} clean\``,
+    );
+  });
 });

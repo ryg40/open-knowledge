@@ -16,6 +16,11 @@
   background-color: var(--background);
 }
 
+[data-editor-hidden] [data-rmiz-content] {
+  /* biome-ignore lint/complexity/noImportantStyles: react-medium-image-zoom writes visibility: visible as an inline style, which no selector specificity can outrank. */
+  visibility: hidden !important;
+}
+
 /*
  * Explicit source root for Tailwind v4 content scanning.
  *
@@ -440,6 +445,21 @@
   }
 }
 
+@utility floating-card-surface {
+  @apply rounded-lg border border-border bg-card shadow-[0_2px_8px_0_rgb(0_0_0/0.08),0_1px_2px_-1px_rgb(0_0_0/0.1)];
+}
+
+@utility corner-card-column {
+  & .floating-card-surface {
+    pointer-events: auto;
+  }
+}
+
+/* UPSTREAM(radix-ui@1.4.3): a modal Radix menu or dialog locks the page by writing pointer-events none inline on body, and the cards must honor that lock. */
+body[style*="pointer-events: none"] .corner-card-column .floating-card-surface {
+  pointer-events: none;
+}
+
 /* Reduced-motion override — keep the opacity crossfade as a comprehension
    aid (the panel still appears/disappears) but pin the height so the
    layout-triggering animation doesn't fire. Matches the rest of this
@@ -604,22 +624,31 @@
   animation-delay: 60ms;
 }
 
-/* Reduced motion — keep opacity/color transition for comprehension, remove movement.
-   Static terracotta left accent bar fades in and out, no transform, no background tint. */
+/* Reduced motion — keep a color fade for comprehension, remove movement.
+   Static terracotta left accent bar fades in, no transform, no background tint.
+   The fade is an animation, not a transition: these blocks keep `transition`
+   for the `.ok-chunk-wrapper` content-visibility deferral, and a `transition`
+   here would replace it while the flash lasts. */
+@keyframes ok-agent-flash-bar {
+  from {
+    box-shadow: none;
+  }
+  to {
+    box-shadow: inset 3px 0 0 var(--color-agent);
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   [data-agent-flash-state="editing"][data-agent-flash-position="append"]
     .ProseMirror
     > *:nth-last-child(-n + 3 of :not(.ok-trailing-affordance, .ProseMirror-gapcursor)) {
-    animation: none;
+    animation: ok-agent-flash-bar 2s ease forwards;
     box-shadow: inset 3px 0 0 var(--color-agent);
-    transition: box-shadow 2s ease;
   }
   [data-agent-flash-state="editing"][data-agent-flash-position="prepend"]
     .ProseMirror
     > *:nth-child(-n + 3) {
-    animation: none;
+    animation: ok-agent-flash-bar 2s ease forwards;
     box-shadow: inset 3px 0 0 var(--color-agent);
-    transition: box-shadow 2s ease;
   }
 }
 
@@ -1035,10 +1064,17 @@
   pointer-events: none;
 }
 
+.collaboration-cursor__label-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6;
+}
+
 .collaboration-cursor__label {
   position: absolute;
-  top: calc(-100% - 0.2em);
-  left: -1px;
+  top: 0;
+  left: 0;
   padding: 1.5px 6px;
   border-radius: 5px 5px 5px 0;
   font-family: var(--font-mono);
@@ -1082,6 +1118,11 @@
   opacity: 0.3;
 }
 
+section[data-editor-pane-id] {
+  container-type: inline-size;
+  container-name: editor-document;
+}
+
 /* Editor layout — grid on wrapper; content column max 1024px (lg), side rails minmax(gutter, 1fr) */
 .tiptap-editor {
   --content-max-width: 1024px;
@@ -1114,13 +1155,18 @@
   grid-column: content;
 }
 
+@property --ask-composer-height {
+  syntax: "<length>";
+  initial-value: 0px;
+  inherits: false;
+}
+
 /* The floating Ask AI composer reserves scroll room at the bottom of the doc by
    padding the editor CONTENT (.ProseMirror / .cm-content) — padding the scroll
    container alone creates no overflow because the content's own min-height fills
    it. The inset tracks the live composer via `--ask-composer-height` (card height
-   + gap, published by BottomComposer); the var is the single source of truth and
-   is absent when the composer is collapsed or hidden, so the padding collapses to
-   0 and the space is reclaimed — no class to fall out of sync. Scoped inside
+   + gap, published by BottomComposer); the var resolves to 0px when the composer is
+   collapsed or hidden, so the space is reclaimed — no class to fall out of sync. Scoped inside
    `.editor-doc-scroll` so the floating composer's own ProseMirror (a sibling of
    the scroll container) is never padded. */
 .editor-doc-scroll {
@@ -1283,8 +1329,7 @@
      block's own `margin-bottom` collapses THROUGH a parent with no bottom
      padding: with `padding-bottom: 0` those two edges are the same pixel and
      the band is exactly 0px tall. That is the state a document is in whenever
-     the Ask composer is unmounted, because `BottomComposer` REMOVES
-     `--ask-composer-height` rather than setting it to zero. With the composer
+     the Ask composer is unmounted. With the composer
      mounted the scroller rule above does supply padding, but the composer
      floats over precisely that band, so the only room ever left to click was
      whatever `margin-bottom` the final block happened to carry. The old
@@ -1335,32 +1380,36 @@
   --ok-trailing-zone: 2rem;
 }
 
-/* Phone-width rails. The 4rem side rails are a desktop reading measure; on a
-   ~390px screen they eat 128px, leaving a ~246px text column and starving the
-   floating composer — whose card is a content-column child — down to a
-   single-digit-pixel input that cannot be typed into.
+@container editor-document (width < 40rem) {
+  .tiptap-editor,
+  .property-panel {
+    --margin-left-width: 3.75rem;
+    --margin-right-width: 1rem;
+  }
 
-   The two declarations move together on purpose: .ProseMirror escapes its
-   content column into the rail (negative margin, compensating padding) to win
-   drag-handle hit area on the left and border slack on the right. Shrink the
-   rail without shrinking the escape and the border-box overhangs the editor and
-   overflows the viewport, so the negative margin must never exceed
-   --margin-width. Must also stay AFTER the .ProseMirror base rule — a media
-   query adds no specificity, so an earlier block would lose to it.
-   .ProseMirror.composer-prosemirror zeroes both below at higher specificity and
-   is deliberately unaffected.
+  .tiptap-editor:where(:dir(rtl)),
+  .property-panel:where(:dir(rtl)) {
+    --margin-left-width: 1rem;
+    --margin-right-width: 3.75rem;
+  }
 
-   Gated on a coarse pointer, not width alone. The block drag handle renders at
-   content-start minus 52px, which a 1rem rail cannot hold — it lands at -28px
-   and is clipped. A touch device never reveals that handle (it is hover-only),
-   so nothing is lost there, while a narrow desktop window with a mouse keeps
-   both the wide rail and a working handle. Consequence worth knowing when
-   testing: resizing a desktop browser narrow does NOT reproduce this layout;
-   emulate a touch device. */
+  .editor-content-aligned:where(:not(.property-panel)) {
+    --margin-left-width: 1rem;
+    --margin-right-width: 1rem;
+  }
+
+  .ProseMirror:not(.composer-prosemirror) {
+    margin-right: -1rem;
+    padding-right: 1rem;
+  }
+}
+
 @media (width < 40rem) and (pointer: coarse) {
   .tiptap-editor,
   .editor-content-aligned {
     --margin-width: 1rem;
+    --margin-left-width: 1rem;
+    --margin-right-width: 1rem;
   }
 
   .ProseMirror {
@@ -1707,12 +1756,13 @@
 }
 
 /* Task lists — unified List extension emits <li data-type="taskItem"> */
-.ProseMirror ul:has(> li[data-type="taskItem"]) {
+.ProseMirror ul:has(> li[data-type="taskItem"]):not(:has(> li:not([data-type="taskItem"]))) {
   list-style: none;
   padding-left: 0;
 }
 
 .ProseMirror li[data-type="taskItem"] {
+  list-style-type: none;
   display: flex;
   align-items: flex-start;
   gap: 0.5em;
@@ -2421,11 +2471,41 @@
   background-color: var(--background);
 }
 
-/* Corner cell (first column + header row) must clear both frozen row layer and
-   sticky column layer when both are active simultaneously. */
+/* A first row holding any th is the row the freeze translates, every cell of
+   it, so it stacks above body rows at every scroll position. The freeze moves
+   it with a compositor-driven animation; a stacking flip at the freeze boundary
+   would land on the main thread, frames behind the transform, leaving body rows
+   painted over the moving row during a fast scroll. */
+.ProseMirror .tableWrapper > table > tbody > tr:first-child:has(> th) > :is(th, td) {
+  z-index: 2;
+}
+
+.ProseMirror .tableWrapper > table > tbody > tr:first-child:has(> th) > td {
+  background-color: var(--background);
+}
+
+/* First-column header cells in body rows (header-column tables) sit above the
+   sticky body column. */
 .ProseMirror .tableWrapper > table > tbody > tr > th:first-child {
   background-color: var(--muted);
   z-index: 3;
+}
+
+/* A frozen-row cell's resize handle overhangs its right border; raise the cell
+   holding it so the next cell in that row does not cover the overhang. */
+.ProseMirror
+  .tableWrapper
+  > table
+  > tbody
+  > tr:first-child:has(> th)
+  > :is(th, td):not(:first-child):has(> .column-resize-handle) {
+  z-index: 3;
+}
+
+/* Corner cell (first column + frozen row) clears the frozen row, a raised
+   resize-handle cell and the sticky column, frozen or not. */
+.ProseMirror .tableWrapper > table > tbody > tr:first-child:has(> th) > :is(th, td):first-child {
+  z-index: 4;
 }
 
 /* Occluder above the frozen header (frozen-table-headers.ts): scrolled-past
@@ -2439,7 +2519,7 @@
    ±1px horizontal overlap closes the seams over collapsed cell borders.
    height must stay >= TOOLBAR_HEIGHT (56px, frozen-table-headers.ts) so the
    block spans the whole toolbar-fade slot; 80px adds margin. */
-.ProseMirror .tableWrapper > table > tbody > tr:first-child > th::before {
+.ProseMirror .tableWrapper > table > tbody > tr:first-child:has(> th) > :is(th, td)::before {
   content: "";
   position: absolute;
   left: -1px;
@@ -2456,21 +2536,32 @@
    header mid-table; !important author declarations override animation
    effects in the cascade, so these win over the fills. */
 @media print {
-  .ProseMirror .tableWrapper > table > tbody > tr:first-child > th {
-    transform: none;
-    box-shadow: none;
+  .ProseMirror .tableWrapper > table > tbody > tr:first-child:has(> th) > :is(th, td) {
+    /* biome-ignore lint/complexity/noImportantStyles: the freeze holds transform in a WAAPI fill, which outranks every normal author declaration. */
+    transform: none !important;
+    /* biome-ignore lint/complexity/noImportantStyles: same WAAPI fill override as `transform` above. */
+    box-shadow: none !important;
   }
-  .ProseMirror .tableWrapper > table > tbody > tr:first-child > th::before {
-    opacity: 0;
+  .ProseMirror .tableWrapper > table > tbody > tr:first-child:has(> th) > :is(th, td)::before {
+    /* biome-ignore lint/complexity/noImportantStyles: the occluder's opacity is held in a WAAPI fill on ::before. */
+    opacity: 0 !important;
   }
 }
 
-.ProseMirror p.is-empty::before {
-  content: attr(data-placeholder);
+.ProseMirror p.is-empty::before,
+.ProseMirror[data-empty-placeholder]:empty::before {
   pointer-events: none;
   float: left;
   height: 0;
   @apply text-muted-foreground/60;
+}
+
+.ProseMirror p.is-empty::before {
+  content: attr(data-placeholder);
+}
+
+.ProseMirror[data-empty-placeholder]:empty::before {
+  content: attr(data-empty-placeholder);
 }
 
 /* When any JSX prop panel is open in this editor, suppress the slash-command
@@ -2749,8 +2840,7 @@ body[data-editor-tab-dragging] * {
 
 /* Table edge "+" bars — Notion-style append-column / append-row affordance.
    The TableInsertControls extension mounts one container per table on
-   `editor.view.dom.parentElement` and floating-ui sets each bar's `left`/`top`
-   plus the stretched cross-axis size inline. Each bar is a persistent but
+   `editor.view.dom.parentElement`. Each bar is a persistent but
    transparent hit zone at the table edge; hovering it (the mouse landing inside
    the bar) reveals the "+", so reveal is pure CSS — no JS hover tracking. */
 .ok-table-insert-controls {
@@ -2778,7 +2868,7 @@ body[data-editor-tab-dragging] * {
      strip, so it's hoverable. */
   color: transparent;
   background: transparent;
-  /* The bar sits flush against the table edge (no floating-ui offset). The
+  /* The bar sits flush against the table edge. The
      gutter toward the table is transparent padding — `content-box` keeps the
      visible highlight off it, preserving the visual gap while making the gutter
      itself part of the (hoverable) button, so there's no dead zone between the
@@ -2877,7 +2967,7 @@ body[data-editor-tab-dragging] * {
   @apply border-none!;
 }
 
-.cm-gutters {
+:where(html[data-color-theme]) .cm-gutters {
   @apply text-muted-foreground/80!;
 }
 
@@ -3313,6 +3403,7 @@ button:active:not(:disabled) {
   --color-sidebar-primary: var(--sidebar-primary);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar: var(--sidebar);
+  --color-desk: var(--desk);
   --color-chart-5: var(--chart-5);
   --color-chart-4: var(--chart-4);
   --color-chart-3: var(--chart-3);
@@ -3322,6 +3413,13 @@ button:active:not(:disabled) {
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-identity-1: var(--identity-1);
+  --color-identity-2: var(--identity-2);
+  --color-identity-3: var(--identity-3);
+  --color-identity-4: var(--identity-4);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -3346,6 +3444,8 @@ button:active:not(:disabled) {
 }
 
 :root {
+  color-scheme: light;
+
   /* Sidebar inset variant applies m-2 (8px top + 8px bottom) to SidebarInset — offset its height accordingly */
   --layout-inset-offset: 16px;
 
@@ -3371,7 +3471,14 @@ button:active:not(:disabled) {
   --muted-foreground: oklch(0.556 0 0);
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
+  --destructive: oklch(0.49 0.21 27.518);
+  --success: oklch(0.47 0.118 165.612);
+  --warning: oklch(0.473 0.137 46.201);
+  --info: oklch(0.488 0.243 264.376);
+  --identity-1: oklch(0.702 0.183 293.541);
+  --identity-2: oklch(0.789 0.154 211.53);
+  --identity-3: oklch(0.75 0.183 55.934);
+  --identity-4: oklch(0.718 0.202 349.761);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
@@ -3410,6 +3517,8 @@ button:active:not(:disabled) {
   --chart-4: oklch(0.55 0.18 290);
   --chart-5: oklch(0.58 0.21 25);
   --radius: 0.625rem;
+  --desk: oklch(from var(--sidebar) calc(l - 0.015) c h);
+  --desk-hover: oklch(from var(--sidebar-hover) calc(l - 0.015) c h);
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
@@ -3430,33 +3539,23 @@ button:active:not(:disabled) {
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
 
-  /*
-    Syntax-highlight semantic tokens — used by the PropPanel CodeMirror
-    editor (`CodeMirrorPropInput`) and any future code-shaped surface
-    that wants theme-adaptive coloring. Light values are the Tailwind v4
-    `-700`/`-800` saturated palette (good contrast on `--background:
-    oklch(1 0 0)`); the matching `.dark` block below shifts to `-300`/
-    `-400` for WCAG AA on `--background: oklch(0.145 0 0)`. Hex
-    fallbacks are GitHub-light defaults — only used if Tailwind's
-    default theme tokens haven't loaded (SSR / preview-render edge).
-  */
   --syntax-keyword: var(--color-purple-700, #6f42c1);
   --syntax-tag: var(--color-red-700, #b31d28);
   --syntax-attr: var(--color-blue-700, #005cc5);
-  --syntax-string: var(--color-green-800, #22863a);
+  --syntax-string: var(--color-green-900, oklch(0.393 0.095 152.535));
   --syntax-number: var(--color-blue-800, #005cc5);
-  --syntax-atom: var(--color-orange-700, #d2691e);
+  --syntax-atom: var(--color-orange-800, oklch(0.47 0.157 37.304));
   /*
     The remaining syntax roles. A selected color theme overrides all of these
     from its base16 slots; the values here are the `default` theme's own, so
     the same rules paint correctly with no palette applied.
   */
-  --syntax-comment: var(--color-gray-500, #6a737d);
+  --syntax-comment: var(--color-gray-600, oklch(0.444 0.011 73.639));
   --syntax-func: var(--color-purple-700, #6f42c1);
   --syntax-var: var(--color-red-700, #b31d28);
   --syntax-type: var(--color-yellow-700, #8b6500);
   --syntax-operator: var(--foreground);
-  --syntax-meta: var(--color-gray-600, #6a737d);
+  --syntax-meta: var(--color-gray-600, oklch(0.444 0.011 73.639));
   /* Code-block canvas — a hair off `--background` so a fence reads as a slab. */
   --syntax-bg: oklch(0.97 0 0);
 
@@ -3501,11 +3600,13 @@ button:active:not(:disabled) {
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
+  color-scheme: dark;
+
+  --background: oklch(0.21 0 0);
   --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
+  --card: oklch(0.245 0 0);
   --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
+  --popover: oklch(0.225 0 0);
   --popover-foreground: oklch(0.985 0 0);
   --primary: var(--color-sky-blue);
   --primary-foreground: oklch(0.205 0 0);
@@ -3515,7 +3616,10 @@ button:active:not(:disabled) {
   --muted-foreground: oklch(0.708 0 0);
   --accent: oklch(0.269 0 0);
   --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
+  --destructive: oklch(0.778 0.191 22.216);
+  --success: oklch(0.765 0.177 163.223);
+  --warning: oklch(0.879 0.169 91.605);
+  --info: oklch(0.729 0.165 254.624);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
@@ -3533,13 +3637,14 @@ button:active:not(:disabled) {
   --chart-3: oklch(0.77 0.14 70);
   --chart-4: oklch(0.72 0.16 290);
   --chart-5: oklch(0.72 0.2 25);
-  --sidebar: oklch(0.205 0 0);
+  --sidebar: oklch(0.185 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
   --sidebar-primary: oklch(0.488 0.243 264.376);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.274 0.006 286.033);
   --sidebar-accent-foreground: var(--color-sky-blue);
   --sidebar-hover: oklch(0.269 0 0 / 50%);
+  --desk-hover: var(--sidebar-hover);
   --sidebar-hover-foreground: oklch(0.985 0 0);
   --sidebar-hover-muted-foreground: var(--muted-foreground);
   --sidebar-hover-destructive-foreground: var(--destructive);
@@ -3550,24 +3655,18 @@ button:active:not(:disabled) {
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
 
-  /*
-    Syntax-highlight tokens — dark-theme overrides. Lighter shades
-    (`-300` / `-400`) clear WCAG AA on the dark `--background:
-    oklch(0.145 0 0)`. Hex fallbacks are mid-light shades that survive
-    on dark for the SSR / preview-render edge.
-  */
   --syntax-keyword: var(--color-purple-300, #d2a8ff);
   --syntax-tag: var(--color-red-300, #ffa198);
   --syntax-attr: var(--color-blue-300, #79c0ff);
-  --syntax-string: var(--color-green-300, #7ee787);
+  --syntax-string: oklch(0.9 0.15 154.449);
   --syntax-number: var(--color-blue-300, #79c0ff);
   --syntax-atom: var(--color-orange-300, #ffa657);
-  --syntax-comment: var(--color-gray-400, #8b949e);
+  --syntax-comment: oklch(0.78 0.01 56.259);
   --syntax-func: var(--color-purple-300, #d2a8ff);
   --syntax-var: var(--color-red-300, #ffa198);
   --syntax-type: var(--color-yellow-300, #e3b341);
   --syntax-operator: var(--foreground);
-  --syntax-meta: var(--color-gray-400, #8b949e);
+  --syntax-meta: oklch(0.78 0.01 56.259);
   --syntax-bg: oklch(0.18 0.005 285);
 
   --link-color: var(--color-sky-blue);
@@ -3594,6 +3693,35 @@ button:active:not(:disabled) {
   --ansi-bright-magenta: #d670d6;
   --ansi-bright-cyan: #29b8db;
   --ansi-bright-white: #ffffff;
+}
+
+html.dark:not([data-color-theme]) {
+  --desk: oklch(0.15 0 0);
+  --file-tree-foreground: color-mix(in oklab, var(--sidebar-foreground) 75%, var(--sidebar));
+}
+
+html.dark:not([data-color-theme]) [data-app-header-leading] [data-variant="secondary"] {
+  background-color: color-mix(in oklab, var(--desk) 96%, var(--sidebar-foreground));
+  color: var(--muted-foreground);
+}
+
+html.dark [data-app-header] button[data-variant="ghost"]:is(:hover, [data-state="open"]) {
+  background-color: oklch(from var(--desk) calc(l + 0.04) c h);
+}
+
+@media (hover: hover) {
+  [data-app-header]
+    [data-pane-switcher]
+    button[data-variant="ghost"]:not([aria-pressed="true"]):hover {
+    background-color: oklch(from var(--foreground) l c h / 0.1);
+  }
+}
+
+html.dark
+  [data-app-header]
+  [data-pane-switcher]
+  button[data-variant="ghost"][aria-pressed="true"]:is(:hover, [data-state="open"]) {
+  background-color: oklch(from var(--foreground) l c h / 0.15);
 }
 
 /*
@@ -3626,19 +3754,28 @@ button:active:not(:disabled) {
 html.electron-mode {
   background-color: transparent;
   /*
-    macOS traffic-light safe-area reserve. The Electron main process spreads
-    `trafficLightPosition: { x: 22, y: 24 }` on darwin (see
-    `packages/desktop/src/main/index.ts`), placing OS-drawn close/min/zoom
-    buttons in the renderer's top-left at x=22..~100. Any full-viewport
-    overlay must reserve enough left padding to clear that footprint.
-    78px = trafficLightPosition.x (22) + 3 buttons × ~18px + margin. This
-    token is the single source for that reserve — EditorHeader, FileSidebar's
-    SidebarHeader, GraphPanel, and ConnectingBanner all consume it rather than
-    re-declaring the literal.
+    macOS traffic-light safe-area reserve. The Electron main process places
+    the OS-drawn close/min/zoom buttons in the renderer's top-left: at
+    x=16, y=15 inside a project window's 44px AppHeader (lined up with the
+    file list's content edge), x=22, y=17 in note windows and x=22, y=24 in
+    every other window (see
+    `packages/desktop/src/main/window-chrome.ts` and `note-window.ts`). Any
+    top-row chrome or full-viewport overlay must reserve enough left padding
+    to clear that footprint. 78px = trafficLightPosition.x (22) + 3 buttons
+    × ~18px + margin. This token is the single source for that reserve:
+    AppHeader, the note and single-file windows' EditorHeader, GraphPanel,
+    and the connection and branch banners all consume it rather than
+    re-declaring the literal. The AppHeader adds 10px to it, so on darwin
+    back and forward start 12px after the window buttons at x=16, and on
+    the web the first button's icon lines up with the file list, 16px from
+    the edge. Windows and Linux re-declare it as 0px inside the AppHeader for
+    the same alignment (see the rule after the reduced-transparency block).
     Web hosts (no `window.okDesktop`) never gain the `electron-mode` class,
-    so the variable is undefined there. Consumers MUST use the fallback
-    form `pl-[var(--ok-titlebar-reserve-left,1rem)]` — `,1rem` matches the
-    base `px-4` so web layout is unchanged. A bare no-fallback
+    so the variable is undefined there. Consumers MUST always supply a
+    fallback, and its value is the padding that consumer wants on the web:
+    `pl-[var(--ok-titlebar-reserve-left,1rem)]` for the ones whose base is
+    `px-4`, and `,0px` for the AppHeader, which supplies its own 10px on top
+    and so wants nothing added underneath. A bare no-fallback
     `pl-[var(--ok-titlebar-reserve-left)]` is invalid-at-computed-value-time
     on web and collapses `padding-left` to `0`, discarding the consumer's
     base padding — a regression, not intended behavior. See precedent #49.
@@ -3671,12 +3808,31 @@ html.electron-mode.electron-platform-linux {
   );
 }
 
+@media (hover: hover) {
+  [data-app-header]
+    :is([data-variant^="ghost"], [data-slot="menubar-trigger"]):not([aria-pressed="true"]):hover {
+    background-color: var(--desk-hover);
+  }
+}
+
+[data-app-header]
+  :is([data-variant^="ghost"], [data-slot="menubar-trigger"]):not([aria-pressed="true"]):is(
+    [data-state="open"],
+    [aria-expanded="true"]
+  ) {
+  background-color: var(--desk-hover);
+}
+
 html.electron-mode body {
-  background-color: oklch(from var(--sidebar) l c h / 0.85);
+  background-color: oklch(from var(--desk) l c h / 0.85);
 }
 
 html.electron-mode [data-slot="sidebar-wrapper"] {
-  background-color: oklch(from var(--sidebar) l c h / 0.85);
+  background-color: oklch(from var(--desk) l c h / 0.85);
+}
+
+html.electron-mode [data-app-header] {
+  background-color: oklch(from var(--desk) l c h / 0.85);
 }
 
 html.electron-mode [data-slot="sidebar-inner"] {
@@ -3707,20 +3863,33 @@ html.electron-mode [data-slot="sidebar-inner"] {
 */
 @media (prefers-reduced-transparency: reduce) {
   html.electron-mode {
-    background-color: var(--sidebar);
+    background-color: var(--desk);
   }
 
   html.electron-mode body {
-    background-color: var(--sidebar);
+    background-color: var(--desk);
   }
 
   html.electron-mode [data-slot="sidebar-wrapper"] {
-    background-color: var(--sidebar);
+    background-color: var(--desk);
+  }
+
+  html.electron-mode [data-app-header] {
+    background-color: var(--desk);
   }
 
   html.electron-mode [data-slot="sidebar-inner"] {
     background-color: var(--sidebar);
   }
+}
+
+html.electron-mode.electron-platform-win32 [data-app-header],
+html.electron-mode.electron-platform-linux [data-app-header] {
+  --ok-titlebar-reserve-left: 0px;
+}
+
+html [data-editor-file-list-slot] [data-slot="sidebar-inner"] {
+  background-color: var(--sidebar);
 }
 
 /* prose-no-margin — margin reset for first/last children inside wrappers.
@@ -5179,7 +5348,7 @@ html.electron-mode [data-slot="sidebar-inner"] {
   border: 1px solid var(--border);
   background: var(--background);
   margin: 0.5rem 0;
-  overflow: hidden;
+  overflow: clip;
   @apply rounded-lg;
 }
 
@@ -5773,17 +5942,21 @@ html.electron-mode [data-slot="sidebar-inner"] {
   }
 }
 
-.dark
-  [data-agent-flash-state="editing"][data-agent-flash-position="append"]
-  .ProseMirror
-  > *:nth-last-child(-n + 3 of :not(.ok-trailing-affordance, .ProseMirror-gapcursor)) {
-  animation-name: agent-flash-dark;
-}
-.dark
-  [data-agent-flash-state="editing"][data-agent-flash-position="prepend"]
-  .ProseMirror
-  > *:nth-child(-n + 3) {
-  animation-name: agent-flash-dark;
+/* Full motion only: under reduced motion the agent flash is the accent-bar
+   fade in both themes. */
+@media (prefers-reduced-motion: no-preference) {
+  .dark
+    [data-agent-flash-state="editing"][data-agent-flash-position="append"]
+    .ProseMirror
+    > *:nth-last-child(-n + 3 of :not(.ok-trailing-affordance, .ProseMirror-gapcursor)) {
+    animation-name: agent-flash-dark;
+  }
+  .dark
+    [data-agent-flash-state="editing"][data-agent-flash-position="prepend"]
+    .ProseMirror
+    > *:nth-child(-n + 3) {
+    animation-name: agent-flash-dark;
+  }
 }
 
 .dark [data-presence-badge="agent"][data-presence-mode="editing"] {
@@ -6241,19 +6414,41 @@ html.electron-mode [data-slot="sidebar-inner"] {
    result and reading a caret out of it.
 
    What actually protects this site is the selection pin: a click places the
-   caret in the block, and cv:auto keeps a selection-containing element
-   relevant to the user, so the clicked wrapper cannot acquire the lock that
-   would make the CHECK reachable. That is Chromium behavior, not ours, and it
-   is pinned by `tests/stress/cv-auto-paint-lock-click.e2e.ts` — which fails if
-   a future Chromium drops it.
+   caret in the block, so the clicked wrapper cannot acquire the lock that
+   would make the CHECK reachable. Two things hold the pin. Chromium keeps a
+   selection-containing cv:auto element relevant to the user, and the
+   `data-ok-selection-block` rule below makes the wrapper that holds the caret
+   `visible`. `tests/stress/cv-auto-paint-lock-click.e2e.ts` pins the clicked
+   wrapper staying unlocked, so it fails only if both are lost.
 
    Do not replace `auto` with `hidden` here without the same deferred-lock +
    visibility pair `.ok-mode-hidden` carries — an undeferred paint lock over
    hit-testable editor content trips Blink's display-lock CHECK (see the
-   `.ok-mode-hidden` comment above). */
+   `.ok-mode-hidden` comment above).
+
+   Chromium's pin does not cover typing into a block made in the same frame
+   as its caret. Enter creates a new wrapper and moves the caret into it; the
+   wrapper locks at its first style recalc and unlocks only at the next
+   rendering update. A key typed before that update is inserted without
+   layout, so Chromium leaves the caret before the typed character and keeps
+   the placeholder `<br>`. The decoration therefore marks the top-level block
+   holding each selection end with `data-ok-selection-block`, which stays
+   `visible`. A block the caret leaves takes `auto` back through the
+   `.ok-mode-hidden` deferring transition, because a caret that moves back in
+   during the same frame (ArrowUp right after Enter) would otherwise land at
+   the start of a locked line. Any other rule that sets `transition` on a
+   top-level block replaces this deferral, which is why the reduced-motion
+   agent flash fades with an animation. Pinned by
+   `tests/stress/new-block-caret.e2e.ts`. */
 .ProseMirror .ok-chunk-wrapper {
   content-visibility: auto;
   contain-intrinsic-size: 0 var(--ok-cv-h, 80px);
+  transition: content-visibility 0s 32ms allow-discrete;
+}
+
+.ProseMirror .ok-chunk-wrapper[data-ok-selection-block] {
+  content-visibility: visible;
+  transition: none;
 }
 
 /* Code-block wrapper needs an unclipped paint area — the block's chrome
@@ -6497,6 +6692,27 @@ html.electron-mode [data-slot="sidebar-inner"] {
   cursor: default;
 }
 
+.ok-rendered-diff .tabs-strip {
+  display: none;
+}
+
+.ok-rendered-diff
+  .tabs-content
+  > .component-children
+  > [data-node-view-content-react]
+  > .react-renderer {
+  display: block;
+}
+
+.ok-rendered-diff .tab-panel[data-tab-label]::before {
+  content: attr(data-tab-label);
+  display: block;
+  margin-bottom: 0.25rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
 /* Mermaid WYSIWYG canvas (`mermaid-wysiwyg` package). The package injects its
    own `<style data-mw>` at runtime with `--mw-*` custom-property hooks for all
    interaction chrome (selection glow, popovers, in-place editors, plus-menus).
@@ -6712,4 +6928,132 @@ html.electron-mode [data-slot="sidebar-inner"] {
      theming, so opt the element out rather than restate them as system
      colours: the app it annotates is entirely system-coloured in this mode. */
   forced-color-adjust: none;
+}
+
+html[data-bug-report-capturing] [data-bug-report-launcher] {
+  visibility: hidden;
+  transition: none;
+}
+
+html[data-bug-report-capturing] [data-slot="dialog-overlay"]:has(~ [data-bug-report-launcher]) {
+  visibility: hidden;
+  transition: none;
+}
+
+html:not([data-color-theme]):not(.dark)
+  .raw-mdx-fallback-wrapper[data-severity="error"]
+  > div
+  > span {
+  color: #a31524;
+}
+
+html:not([data-color-theme]):not(.dark) file-tree-container {
+  /* biome-ignore lint/complexity/noImportantStyles: the tree host receives --trees-selected-fg as an inline style, which no selector specificity can outrank. */
+  --trees-selected-fg: #1d4ed8 !important;
+}
+
+html:not([data-color-theme]) .file-tree-empty-text {
+  color: var(--muted-foreground);
+}
+
+html:not([data-color-theme]):not(.dark) .cm-gutters {
+  color: #606060;
+}
+
+html:not([data-color-theme]) .color-theme-picker [data-state="off"]:not(:hover) {
+  color: var(--muted-foreground);
+}
+
+html:not([data-color-theme]):not(.dark) .settings-sidebar-group-title {
+  color: #5a5a5a;
+}
+
+html:not([data-color-theme]):not(.dark) .settings-sidebar-group-title[data-disabled] {
+  color: var(--muted-foreground);
+}
+
+html:not([data-color-theme]).dark .settings-sidebar-group-title[data-disabled] {
+  color: color-mix(in oklab, var(--muted-foreground) 80%, transparent);
+}
+
+html:not([data-color-theme]):not(.dark) .cm-content {
+  --muted-foreground: #5a5a5a;
+  --syntax-type: var(--color-yellow-800, oklch(0.476 0.114 61.907));
+  --link-color: var(--color-azure-700, oklch(0.4895 0.233 263.93));
+  --destructive: var(--color-red-800, oklch(0.444 0.177 26.899));
+}
+html:not([data-color-theme]).dark .cm-content {
+  --link-color: #8bb9ff;
+  --muted-foreground: oklch(0.78 0 0);
+  --destructive: var(--color-red-300, oklch(0.808 0.114 19.571));
+}
+html:not([data-color-theme]):not(.dark) .cm-selectionLayer {
+  --selection-soft: #e0ebfc;
+}
+
+html:not([data-color-theme]).dark .cm-selectionLayer {
+  --selection-soft: #20364d;
+}
+
+html:not([data-color-theme]) .cm-editor .cm-selectionBackground,
+html:not([data-color-theme])
+  .cm-editor.cm-focused
+  > .cm-scroller
+  > .cm-selectionLayer
+  .cm-selectionBackground {
+  background-color: var(--selection-soft);
+}
+
+html:not([data-color-theme]):not(.dark) .cm-editor .cm-searchMatch,
+html:not([data-color-theme]):not(.dark) .cm-editor .cm-selectionMatch {
+  background-color: rgb(230 198 76 / 24%);
+}
+html:not([data-color-theme]).dark .cm-editor .cm-searchMatch,
+html:not([data-color-theme]).dark .cm-editor .cm-selectionMatch {
+  background-color: rgb(155 122 39 / 16%);
+}
+html:not([data-color-theme]):not(.dark) .cm-editor .cm-searchMatch.cm-searchMatch-selected {
+  background-color: #cbdcfa;
+}
+html:not([data-color-theme]).dark .cm-editor .cm-searchMatch.cm-searchMatch-selected {
+  background-color: #243950;
+}
+
+html:not([data-color-theme]):not(.dark) [data-slot="kbd"] {
+  --muted-foreground: #686868;
+}
+
+[data-agents-panel-mount][data-chat-alone]
+  [data-agent-thread-root]
+  > :not(.absolute):not([data-testid="agent-thread-transcript"]):not(
+    :has([data-testid="agent-thread-transcript"])
+  ) {
+  width: 100%;
+  max-width: var(--chat-reading-width);
+  margin-inline: auto;
+}
+
+[data-agents-panel-mount][data-chat-alone] [data-testid="agent-thread-transcript"] {
+  padding-inline: max(0.75rem, calc((100% - var(--chat-reading-width)) / 2 + 0.75rem));
+}
+
+[data-agents-panel-mount] {
+  --chat-reading-width: 48rem;
+}
+
+[data-editor-pane-projected] [data-editor-pane-panel]:not([data-editor-pane-selected]),
+[data-editor-pane-projected] [data-editor-pane-tab-group]:not([data-editor-pane-selected]) {
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+[data-editor-pane-projected] [data-editor-pane-resize-handle] {
+  display: none;
+}
+
+[data-editor-pane-projected] [data-editor-pane-panel][data-editor-pane-selected],
+[data-editor-pane-projected] [data-editor-pane-tab-group][data-editor-pane-selected] {
+  min-width: 0;
 }

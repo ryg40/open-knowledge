@@ -4,9 +4,7 @@ import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import {
   computePointReleaseVersion,
-  evaluateAnchorGuard,
   parseBumpVerdicts,
-  readAnchorVersion,
   realGit,
   recordBumpVerdicts,
   runGit,
@@ -14,12 +12,27 @@ import {
   withBumpVerdicts,
 } from '../../scripts/compute-stable-version.mjs';
 import {
+  noteReaderAt,
+  parseNoteLevels,
+  recordNoteLevels,
+  serializeNoteLevels,
+  stableNotes,
+  withNoteLevels,
+} from '../../scripts/render-stable-notes.mjs';
+import { describeHold, evaluateTree, gitReader } from './release-hold.mjs';
+import {
   describeNoSelection,
   listPrebuildRuns,
   makeIsAncestor,
   makeTreeAt,
   selectPrebuildRun,
 } from './select-native-config-prebuild.mjs';
+import {
+  createShippedFixCheck,
+  describeVerdict,
+  refusalHeadline,
+  unpublishedBaseReason,
+} from './shipped-fix-containment.mjs';
 import { parseChangeset } from './write-back.mjs';
 
 function refuse(code, message) {
@@ -30,30 +43,12 @@ function pass(message) {
   return { ok: true, code: null, message };
 }
 
-export function guardAnchor({ anchorVersion, latestStableTag }) {
-  const verdict = evaluateAnchorGuard({ anchorVersion, latestStableTag });
-  if (!verdict.ok) {
-    return refuse(
-      'anchor-drift',
-      `${verdict.reason} Refusing rather than waiting: this lane holds the release-cadence lock, ` +
-        'and the consolidation that clears the drift needs it. Re-run once the anchor is level. ' +
-        'If main-reset itself keeps failing its version guard, dispatch it with anchor_override=true ' +
-        '(RELEASES.md, Recovering anchor drift).',
-    );
-  }
-  return pass(verdict.reason);
-}
-
 export function parseFixRefs(raw) {
   const refs = splitList(raw);
   if (refs.length === 0) {
     throw new Error(`no fix ref found in '${raw ?? ''}' (expected one or more commit SHAs, comma or space separated)`);
   }
   return refs;
-}
-
-export function parseDeltaIds(raw) {
-  return splitList(raw);
 }
 
 function splitList(raw) {
@@ -303,6 +298,33 @@ export function verifyWorkspaceMatchesLockfile({ resolved, readWorktreeFile }) {
   return `agrees with the lockfile on ${notes.join(' and ')}.`;
 }
 
+export function guardBasePublished({ latestStableTag, publishedTags }) {
+  const reason = unpublishedBaseReason({ latestStableTag, publishedTags });
+  if (reason !== null) return refuse('base-unpublished', reason);
+  return pass(`The newest stable tag ${latestStableTag} is published, so the point release builds on it.`);
+}
+
+export function guardShipsPublishedFixes({ verdict, latestStableTag }) {
+  const label = `${latestStableTag} plus the applied fixes`;
+  if (verdict.ok) return pass(describeVerdict(verdict, label)[0]);
+  return refuse(
+    'drops-shipped-fix',
+    [
+      `${refusalHeadline(verdict, label)} Add those fixes to fix_refs, or ship through a promotion whose beta contains them.`,
+      ...describeVerdict(verdict, label).slice(1),
+    ].join('\n'),
+  );
+}
+
+export function guardReleaseHold({ verdict, latestStableTag }) {
+  const label = `${latestStableTag} plus the applied fixes`;
+  if (!verdict.held) return pass(describeHold(verdict, label));
+  return refuse(
+    'release-hold',
+    `${describeHold(verdict, label)} A pick brought the hold onto the stable: leave that ref out of fix_refs.`,
+  );
+}
+
 export function guardRefsOnMain({ fixRefs, isOnMain }) {
   const offenders = fixRefs.filter((ref) => !isOnMain(ref));
   if (offenders.length > 0) {
@@ -386,20 +408,6 @@ export function guardNativeConfigProvenance({ selection }) {
   );
 }
 
-export function guardMainResetDeltaIds({ deltaIds }) {
-  if (!Array.isArray(deltaIds) || deltaIds.length === 0) {
-    return refuse(
-      'empty-delta-ids',
-      'Refusing to dispatch main-reset without an explicit changeset delta: it treats an empty or absent ' +
-        'delta as consolidate-the-whole-pending-pile, which would consume every unsoaked changeset. ' +
-        'Supply the delta, or skip the dispatch entirely.',
-    );
-  }
-  return pass(`main-reset would consolidate exactly ${deltaIds.length} changeset(s).`);
-}
-
-const MAIN_RESET_REPO = 'inkeep/agents-private';
-
 export const APP_CREDENTIAL_HELPER =
   '!f() { test "$1" = get || return 0; echo username=x-access-token; echo "password=$GH_TOKEN"; }; f';
 
@@ -413,18 +421,29 @@ export const pushTagArgs = (tag) => [
   tag,
 ];
 
-export function readFixBumps({ mode, fixRefs }, git) {
-  const verdicts = new Map();
-  if (mode === 'revert') return verdicts;
-  const reading = recordBumpVerdicts(git, verdicts);
+function forEachFixChangeset({ mode, fixRefs }, git, visit) {
+  if (mode === 'revert') return;
   for (const ref of fixRefs) {
     const sha = git.revParse(ref);
     const before = git.changesetBlobs(`${sha}^`);
     for (const [id, blob] of git.changesetBlobs(sha)) {
-      if (before.get(id) !== blob) reading.bumpTypeOf(sha, id);
+      if (before.get(id) !== blob) visit(sha, id);
     }
   }
+}
+
+export function readFixBumps(opts, git) {
+  const verdicts = new Map();
+  const reading = recordBumpVerdicts(git, verdicts);
+  forEachFixChangeset(opts, git, (sha, id) => reading.bumpTypeOf(sha, id));
   return verdicts;
+}
+
+export function readFixNoteLevels(opts, git) {
+  const levels = new Map();
+  const reading = recordNoteLevels(git, levels);
+  forEachFixChangeset(opts, git, (sha, id) => reading.noteLevelOf(sha, id));
+  return levels;
 }
 
 export class PointReleaseRefusal extends Error {
@@ -445,12 +464,10 @@ export function runPointRelease(opts, io) {
   const {
     mode,
     fixRefs,
-    anchorDeltaIds,
     resolvePaths = [],
     dryRun = true,
     dispatchedBy = '',
     selfRepo = '',
-    bridgeConfigured = true,
   } = opts;
 
   if (mode !== 'cherry-pick' && mode !== 'revert') {
@@ -469,7 +486,10 @@ export function runPointRelease(opts, io) {
   }
   const latestStableSha = io.git.revParse(latestStableTag);
 
-  checkGuard(guards, guardAnchor({ anchorVersion: io.readAnchorVersion(), latestStableTag }));
+  checkGuard(
+    guards,
+    guardBasePublished({ latestStableTag, publishedTags: io.containment.publishedStableTags() }),
+  );
   checkGuard(guards, guardRefsOnMain({ fixRefs, isOnMain: io.git.isOnMain }));
   checkGuard(guards, guardResolvePathsAllowlisted({ resolvePaths }));
 
@@ -511,8 +531,13 @@ export function runPointRelease(opts, io) {
       selection: io.gh.selectNativeConfigPrebuild(syntheticSha),
     }),
   );
+  checkGuard(guards, guardReleaseHold({ verdict: io.hold.evaluate(syntheticSha), latestStableTag }));
+  checkGuard(
+    guards,
+    guardShipsPublishedFixes({ verdict: io.containment.evaluate(syntheticSha), latestStableTag }),
+  );
 
-  const mainReset = decideMainReset({ anchorDeltaIds, addedIds: version.addedIds, bridgeConfigured, guards, warnings });
+  if (mode === 'revert') warnings.push(revertFollowUpWarning(version.removedIds));
 
   const changesetEntries = version.addedIds.map((id) => {
     let body = null;
@@ -545,11 +570,11 @@ export function runPointRelease(opts, io) {
     addedIds: version.addedIds,
     removedIds: version.removedIds,
     changesetEntries,
-    mainReset,
     guards,
     warnings,
   };
-  plan.releaseNotes = formatReleaseNotes(plan);
+  plan.releaseNotes =
+    mode === 'cherry-pick' ? renderedReleaseNotes(plan, io, warnings) : formatReleaseNotes(plan);
 
   if (dryRun) return plan;
 
@@ -570,13 +595,6 @@ export function runPointRelease(opts, io) {
       eventType: 'desktop-release',
       clientPayload: { release_tag: plan.tag, ref: plan.tag, dispatched_by: dispatchedBy },
     });
-    if (mainReset.dispatch) {
-      io.gh.dispatch({
-        repo: MAIN_RESET_REPO,
-        eventType: 'main-reset',
-        clientPayload: { stable_version: plan.version, delta_ids: mainReset.deltaIds, dispatched_by: dispatchedBy },
-      });
-    }
   } catch (err) {
     const marked = err instanceof Error ? err : new Error(String(err));
     marked.pushedTag = plan.tag;
@@ -666,41 +684,56 @@ function changesetsIntroducedBy(resolvedRefs, io) {
   return introduced;
 }
 
-function decideMainReset({ anchorDeltaIds, addedIds, bridgeConfigured, guards, warnings }) {
-  const named = String(anchorDeltaIds ?? '').trim() !== '';
-  const deltaIds = named ? parseDeltaIds(anchorDeltaIds) : addedIds;
-
-  if (!named && deltaIds.length === 0) {
-    warnings.push(
-      'Skipping the main-reset dispatch: this release forwards no changeset delta, and dispatching an ' +
-        'empty one would consolidate the entire pending pile. Two follow-ups are now yours: land the fix ' +
-        '(for a revert, the revert itself) on main so the pile stops carrying it, and run main-reset with ' +
-        'that changeset so the anchor advances past this stable. Until the anchor advances, every ' +
-        'version-computing path refuses.',
+function revertFollowUpWarning(removedIds) {
+  if (removedIds.length > 0) {
+    return (
+      `This revert deletes ${removedIds.map((id) => `.changeset/${id}.md`).join(', ')}. ` +
+      'If the daily changeset cleanup has already deleted these files from main, an ordinary code-only revert there cannot ' +
+      'reproduce the shipped patch. The shipped-fix check will refuse that later main promotion even when ' +
+      'the rollback code is correct; putting its changeset in a separate PR does not resolve this mismatch. ' +
+      'Unless the revert cannot wait for main, land it on main and ship it in cherry-pick mode instead, ' +
+      'provided it picks cleanly; otherwise use the normal promotion path.'
     );
-    return { dispatch: false, deltaIds: null, skipReason: 'no-delta-to-forward' };
   }
-
-  checkGuard(guards, guardMainResetDeltaIds({ deltaIds }));
-
-  if (!bridgeConfigured) {
-    warnings.push(
-      'Skipping the main-reset dispatch: the cross-repo bridge App is not configured on this repo. Run ' +
-        `main-reset manually with delta_ids ${JSON.stringify(deltaIds)} so the anchor advances past this stable.`,
-    );
-    return { dispatch: false, deltaIds, skipReason: 'bridge-not-configured' };
-  }
-
-  return { dispatch: true, deltaIds, skipReason: null };
+  return (
+    'A revert has no PR number of its own, so the shipped-fix check will refuse every later promotion until ' +
+    'main holds a commit with exactly the patch this release ships. Land the revert on main in a PR that ' +
+    'changes nothing else, and put its changeset in a separate PR.'
+  );
 }
 
-export function formatReleaseNotes(plan) {
-  const lines = [
+function provenanceLines(plan) {
+  return [
     `Point release over ${plan.latestStableTag}: the current stable plus ${plan.fixRefs.length} applied ` +
       `commit(s), isolated from the changes still soaking on main.`,
     '',
     `Applied: ${plan.fixRefs.map((r) => (r.ref === r.sha ? r.sha : `${r.ref} (${r.sha})`)).join(', ')}`,
   ];
+}
+
+function renderedReleaseNotes(plan, io, warnings) {
+  let notes;
+  try {
+    notes = stableNotes(
+      {
+        commit: plan.syntheticSha,
+        excludeTags: [plan.tag],
+        publishedTags: io.containment.publishedStableTags(),
+      },
+      io.git,
+    );
+  } catch (err) {
+    warnings.push(
+      `The release notes could not be rendered from the changesets (${messageOf(err)}), so the body quotes ` +
+        `them instead and carries no notes-source marker; the docs changelog lists no entry for ${plan.tag} until the body carries one.`,
+    );
+    return formatReleaseNotes(plan);
+  }
+  return `${notes}\n${provenanceLines(plan).join('\n')}\n`;
+}
+
+export function formatReleaseNotes(plan) {
+  const lines = provenanceLines(plan);
   const entries = plan.changesetEntries ?? [];
   const quoted = entries.filter((e) => e.body);
   const unquoted = entries.filter((e) => !e.body);
@@ -718,13 +751,16 @@ export function formatReleaseNotes(plan) {
 
 export function realIo() {
   return {
-    readAnchorVersion,
+    containment: createShippedFixCheck(),
+    hold: {
+      evaluate: (sha) => evaluateTree({ candidate: sha, git: gitReader() }),
+    },
     fs: {
       readWorktreeFile: (path) => readFileSync(path, 'utf8'),
       writeWorktreeFile: (path, content) => writeFileSync(path, content),
     },
     git: {
-      ...realGit,
+      ...noteReaderAt(),
       isOnMain: (ref) => realGit.isAncestor(ref, 'origin/main'),
       tagExists: (tag) => {
         const res = spawnSync('git', ['rev-parse', '--verify', '--quiet', `refs/tags/${tag}`], { encoding: 'utf8' });
@@ -785,10 +821,6 @@ export function realIo() {
         const res = spawnSync('gh', ['api', '-X', 'POST', `repos/${repo}/dispatches`, '--input', '-'], {
           encoding: 'utf8',
           input: JSON.stringify({ event_type: eventType, client_payload: clientPayload }),
-          env:
-            repo === MAIN_RESET_REPO && process.env.BRIDGE_GH_TOKEN
-              ? { ...process.env, GH_TOKEN: process.env.BRIDGE_GH_TOKEN }
-              : process.env,
         });
         if (res.status !== 0) {
           throw new Error(
@@ -805,16 +837,33 @@ function log(...args) {
 }
 
 function readBumpsMain() {
+  let opts;
+  let reader;
   let verdicts;
   try {
-    verdicts = readFixBumps({ mode: process.env.MODE, fixRefs: parseFixRefs(process.env.FIX_REFS) }, realGit);
+    opts = { mode: process.env.MODE, fixRefs: parseFixRefs(process.env.FIX_REFS) };
+    reader = noteReaderAt();
+    verdicts = readFixBumps(opts, reader);
   } catch (err) {
     console.error(`::error::point-release-plan --read-bumps: ${messageOf(err)}`);
     process.exit(1);
   }
+  let levels;
+  try {
+    levels = readFixNoteLevels(opts, reader);
+  } catch (err) {
+    levels = new Map();
+    console.log(
+      `::warning::point-release-plan --read-bumps: the release-note level of a changeset could not be read ` +
+        `(${messageOf(err)}), so the release body will quote the changesets without the notes-source marker.`,
+    );
+  }
   log(`Read the bump of ${verdicts.size} changeset(s) written by ${process.env.MODE} refs ${process.env.FIX_REFS}.`);
   if (process.env.GITHUB_OUTPUT) {
-    appendFileSync(process.env.GITHUB_OUTPUT, `bump_verdicts=${serializeBumpVerdicts(verdicts)}\n`);
+    appendFileSync(
+      process.env.GITHUB_OUTPUT,
+      `bump_verdicts=${serializeBumpVerdicts(verdicts)}\nnote_levels=${serializeNoteLevels(levels)}\n`,
+    );
   }
 }
 
@@ -832,16 +881,17 @@ function main() {
     if (process.env.BUMP_VERDICTS !== undefined) {
       io.git = withBumpVerdicts(io.git, parseBumpVerdicts(process.env.BUMP_VERDICTS));
     }
+    if (process.env.NOTE_LEVELS !== undefined) {
+      io.git = withNoteLevels(io.git, parseNoteLevels(process.env.NOTE_LEVELS));
+    }
     plan = runPointRelease(
       {
         mode: process.env.MODE,
         fixRefs: parseFixRefs(process.env.FIX_REFS),
-        anchorDeltaIds: process.env.ANCHOR_DELTA_IDS,
         resolvePaths: parseResolvePaths(process.env.RESOLVE_PATHS),
         dryRun,
         dispatchedBy: process.env.DISPATCHED_BY || '',
         selfRepo: process.env.GITHUB_REPOSITORY || '',
-        bridgeConfigured: process.env.BRIDGE_CONFIGURED === 'true',
       },
       io,
     );
@@ -884,8 +934,7 @@ function main() {
         `latest_stable_tag=${plan.latestStableTag}`,
         `synthetic_sha=${plan.syntheticSha}`,
         `resolved_paths=${JSON.stringify(plan.resolvedPaths.map((r) => r.path))}`,
-        `delta_ids=${JSON.stringify(plan.mainReset.deltaIds ?? [])}`,
-        `main_reset_dispatched=${plan.mainReset.dispatch ? 'true' : 'false'}`,
+        `added_ids=${JSON.stringify(plan.addedIds)}`,
         '',
       ].join('\n'),
     );

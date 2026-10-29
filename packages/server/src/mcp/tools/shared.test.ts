@@ -2,7 +2,7 @@ import {
   SKILL_INSTALL_WARNING_CODES,
   summarizeLintPluginFailures,
 } from '@inkeep/open-knowledge-core';
-import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 
 import { type Config, ConfigSchema } from '../../config/schema.ts';
@@ -17,7 +17,7 @@ import {
   alignWarningCodes,
   capAuditWarnings,
   errorTextWithDetail,
-  HOCUSPOCUS_NOT_RUNNING_ERROR,
+  hocuspocusNotRunningError,
   httpGet,
   httpPost,
   INSTALL_WARNING_CODE_GLOSS,
@@ -33,6 +33,14 @@ import {
   textResult,
   UNREADABLE_WARNINGS_TEXT,
 } from './shared.ts';
+
+beforeEach(() => {
+  vi.stubEnv('OK_CHANNEL', 'stable');
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe('capAuditWarnings', () => {
   test('retains late validator-attributed failures ahead of generic warnings', () => {
@@ -277,14 +285,27 @@ describe('normalizeDocName', () => {
   });
 });
 
-describe('HOCUSPOCUS_NOT_RUNNING_ERROR', () => {
+describe('hocuspocusNotRunningError', () => {
   test('names the recovery command', () => {
-    expect(HOCUSPOCUS_NOT_RUNNING_ERROR).toContain('ok start');
+    expect(hocuspocusNotRunningError()).toContain('ok start');
+  });
+
+  test('keeps the Stable text byte-identical and names ok-beta on Beta', () => {
+    try {
+      vi.stubEnv('OK_CHANNEL', 'stable');
+      expect(hocuspocusNotRunningError()).toBe(
+        'Error: Hocuspocus server is not running. Start it with `ok start`, then retry.\nDo not fall back to native file edits for in-scope markdown; route writes through OpenKnowledge so attribution and live sync stay intact.',
+      );
+      vi.stubEnv('OK_CHANNEL', 'beta');
+      expect(hocuspocusNotRunningError()).toContain('Start it with `ok-beta start`, then retry.');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   test('does not offer a native-edit escape hatch', () => {
-    expect(HOCUSPOCUS_NOT_RUNNING_ERROR).toContain('Do not fall back to native file edits');
-    expect(HOCUSPOCUS_NOT_RUNNING_ERROR).toContain('route writes through OpenKnowledge');
+    expect(hocuspocusNotRunningError()).toContain('Do not fall back to native file edits');
+    expect(hocuspocusNotRunningError()).toContain('route writes through OpenKnowledge');
   });
 });
 
@@ -541,6 +562,20 @@ describe('httpPost', () => {
 });
 
 describe('a request that runs out of time', () => {
+  test.each(['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT'])(
+    'recognizes a fetch transport timeout: %s',
+    async (code) => {
+      const cause = Object.assign(new Error('Transport deadline expired'), { code });
+      vi.stubGlobal('fetch', () => Promise.reject(new TypeError('fetch failed', { cause })));
+      try {
+        const result = await httpGet('http://localhost:1', '/anything');
+        expect(result.error).toBe('Server timed out: fetch failed.');
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
   const timedOutWriting =
     'Server timed out: The operation was aborted due to timeout. The server may still have applied the request, so check before retrying.';
   const timedOutReading = 'Server timed out: The operation was aborted due to timeout.';

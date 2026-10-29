@@ -1,10 +1,13 @@
 export {
   ALLOWED_GIT_TRANSPORTS,
   type Fetched,
+  type FetchedListing,
   fetchSource,
+  fetchSourceListing,
   parseSkillsShSource,
   parseSource,
   SkillFetchError,
+  SkillSubpathNotFoundError,
   type SkillsShSourceRef,
   type SourceSpec,
 } from './acquire/fetch.ts';
@@ -27,8 +30,10 @@ export {
   type AcquiredFile,
   type AcquiredSkill,
   acquiredBundleTooLarge,
+  BUNDLE_WALK_IGNORE,
   discoverSkillDirs,
   parseSkillDir,
+  parseSkillDirAsync,
   readSkillDirMeta,
 } from './acquire/parse.ts';
 export {

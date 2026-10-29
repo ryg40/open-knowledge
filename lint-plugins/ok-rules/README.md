@@ -10,7 +10,9 @@ One plugin holding every rule is deliberate: oxlint walks the AST once and dispa
 
 **All custom lint enforcement uses oxlint JS-plugin rules** — [PRECEDENTS.md #42](../../PRECEDENTS.md#custom-lint-enforcement-precedent-42). Add a module under `rules/` + a fixture-file test. The fixture-file test is non-negotiable: it preserves the mutation-self-test property by asserting the exact position of every diagnostic, filtered by the rule's own code, on a fixture pairing positive cases with negative cases.
 
-**Rule modules carry no prose comments.** These are `.mjs` files, so the [no-comments policy](../no-comments/README.md) applies to them — unlike the `.grit` files they replaced, which sat outside it and carried long rationale headers. That rationale lives here instead, in the rule's section below. When you write a rule, budget for writing its README section in the same change; there is nowhere else for the reasoning to go.
+**Rule modules carry no prose comments.** Most are `.mjs` files and a few are `.ts` files, and the [no-comments policy](../no-comments/README.md) applies to both — unlike the `.grit` files they replaced, which sat outside it and carried long rationale headers. That rationale lives here instead, in the rule's section below. When you write a rule, budget for writing its README section in the same change; there is nowhere else for the reasoning to go.
+
+**A rule can be TypeScript.** oxlint loads a `.ts` rule module under the pinned Node, which strips its types, so `index.mjs` imports it by its full `.ts` path. Type it with a type-only import of oxlint's own rule typings, as `no-empty-jsx-expression.ts` does. Its fixture test is then `<rule>.uncached.test.ts`. `pnpm run typecheck:lint-plugins` checks the `.ts` rules and tests with `lint-plugins/ok-rules/tsconfig.json`, and `turbo run typecheck` runs it.
 
 **Diagnostic messages name the fix and link the docs.** Every message has two load-bearing pieces: (a) a noun-phrase or action verb-phrase that names what to do to fix the violation (the fix-noun — readers see this and know the next move without leaving the editor); (b) a trailing `See <docs-URL>` pointing at the rule's section in this README so the message stays self-documenting. Process metadata (decision markers like `D19:`, spec-section refs) does NOT belong in the diagnostic — it rots the same way it rots in source comments. The fixture test asserts both pieces are present (substring match for the fix-noun + URL regex) so the convention survives drift.
 
@@ -44,7 +46,7 @@ Rule: [`lint-plugins/ok-rules/rules/no-loosely-typed-webcontents-ipc.mjs`](rules
 
 ### `no-raw-html-interactive-element`
 
-UI primitives discipline. Forbids raw JSX `<button>`, `<input>`, `<textarea>`, `<select>` inside production `.tsx` under `packages/{app,desktop,plugin}/src/**`. Consumers must use the shadcn primitives (`Button`, `Input`, `Textarea`, `Select`) from `@/components/ui/*`; if the primitive isn't installed yet, add it via `pnpm dlx shadcn@latest add <name>` first. The rule catches the PR #937 failure mode: contributors (including Codex / Claude Code / human reviewers) introducing raw `<button>` JSX while a shadcn `<Button>` from `@/components/ui/button` was already imported in the same file.
+UI primitives discipline. Forbids raw JSX `<button>`, `<input>`, `<textarea>`, `<select>` inside production `.tsx` under `packages/{app,desktop,plugin}/src/**`. Consumers must use the shadcn primitives (`Button`, `Input`, `Textarea`, `Select`) from `@/components/ui/*`; if the primitive isn't installed yet, add it via `pnpm dlx shadcn@latest add <name>` from `packages/app` first. The rule catches the PR #937 failure mode: contributors (including Codex / Claude Code / human reviewers) introducing raw `<button>` JSX while a shadcn `<Button>` from `@/components/ui/button` was already imported in the same file.
 
 **Scoped** (see the rule's `RULE_SCOPES` entry in [`scope.mjs`](scope.mjs)) to `packages/{app,desktop,plugin}/src/**/*.tsx`. Exemptions are the leading-`!` globs in that same entry:
 
@@ -232,16 +234,16 @@ Rule: [`lint-plugins/ok-rules/rules/class-proof-registration-discipline.mjs`](ru
 
 Flags `expect(await locator.count())` — the one-shot count snapshot that never retries. Under CI CPU contention the DOM settles a few frames after the read, so the assertion flakes while the auto-retrying web-first form `await expect(locator).toHaveCount(n)` passes deterministically (the no-retry read was one of the hidden-flake shapes in the 2026-06 e2e CI audit). The pattern matches the probe sub-expression regardless of the matcher that follows (`.toBe`, `.toEqual`, `.toBeGreaterThanOrEqual`, ...). Upstream precedent: eslint-plugin-playwright `prefer-to-have-count`.
 
-**Scoped** (see the rule's `RULE_SCOPES` entry in [`scope.mjs`](scope.mjs)) to `packages/app/tests/{stress,visual,a11y}/**/*.e2e.ts` (the same three dirs `tests/integration/e2e-stop-rules.test.ts` source-scans) + the fixture. Not workspace-wide: outside Playwright specs, `.count()` is usually not a `Locator` and the web-first rewrite does not apply.
+**Scoped** (see the rule's `RULE_SCOPES` entry in [`scope.mjs`](scope.mjs)) to `packages/app/tests/{stress,a11y}/**/*.e2e.ts` (the two dirs `tests/integration/e2e-stop-rules.test.ts` source-scans) + the fixture. Not workspace-wide: outside Playwright specs, `.count()` is usually not a `Locator` and the web-first rewrite does not apply.
 
 The rule does NOT catch:
 - `expect.soft(await locator.count())` — different callee node shape; zero occurrences today.
 - A count read assigned to a variable and asserted later (`const n = await loc.count(); expect(n).toBe(2)`) — two statements; the rule cannot correlate them. Add an e2e-stop-rules source-scan rule if the split form ever recurs.
 - oxlint JS-plugin diagnostics are diagnostic-only — the `toHaveCount` rewrite is named in the message but not auto-applied.
 
-**Scope** (`RULE_SCOPES['playwright-prefer-to-have-count']` in [`scope.mjs`](scope.mjs)). One-shot `expect(await locator.count())` reads never retry and are the canonical hidden-flake assertion shape (2026-06 e2e audit). Scoped to the browser e2e suites (all three dirs the e2e-stop-rules source-scan also covers) + the rule's own fixture. Not workspace-wide: outside Playwright specs, `.count()` is usually not a Locator and the web-first rewrite does not apply.
+**Scope** (`RULE_SCOPES['playwright-prefer-to-have-count']` in [`scope.mjs`](scope.mjs)). One-shot `expect(await locator.count())` reads never retry and are the canonical hidden-flake assertion shape (2026-06 e2e audit). Scoped to the browser e2e suites (the stress and a11y dirs the e2e-stop-rules source-scan also covers) + the rule's own fixture. Not workspace-wide: outside Playwright specs, `.count()` is usually not a Locator and the web-first rewrite does not apply.
 
-Included: `packages/app/tests/stress/**/*.e2e.ts`, `packages/app/tests/visual/**/*.e2e.ts`, `packages/app/tests/a11y/**/*.e2e.ts`, `lint-plugins/ok-rules/__fixtures__/playwright-prefer-to-have-count.fixture.tsx`.
+Included: `packages/app/tests/stress/**/*.e2e.ts`, `packages/app/tests/a11y/**/*.e2e.ts`, `lint-plugins/ok-rules/__fixtures__/playwright-prefer-to-have-count.fixture.tsx`.
 
 Rule: [`lint-plugins/ok-rules/rules/playwright-prefer-to-have-count.mjs`](rules/playwright-prefer-to-have-count.mjs). Fixture: [`lint-plugins/ok-rules/__fixtures__/playwright-prefer-to-have-count.fixture.tsx`](__fixtures__/playwright-prefer-to-have-count.fixture.tsx). Test: [`lint-plugins/ok-rules/tests/playwright-prefer-to-have-count.uncached.test.mjs`](tests/playwright-prefer-to-have-count.uncached.test.mjs). See [PRECEDENTS.md #42](../../PRECEDENTS.md#custom-lint-enforcement-precedent-42) for the custom-rule convention.
 
@@ -550,7 +552,7 @@ Reading-direction discipline. Chrome layout takes its side from the reading dire
 
 **Scoped** (see the rule's `RULE_SCOPES` entry in [`scope.mjs`](scope.mjs)) to `packages/{app,desktop,plugin}/src/**/*.tsx`. `.tsx` only: the single branch matches a JSX attribute, so a `.ts` glob would be dead scope rather than extra coverage. Exemptions as negative `!`-globs: `!packages/app/src/editor/**` (ProseMirror and CodeMirror own their DOM and take per-string direction from the text rather than from the chrome), `!packages/app/src/components/ui/**` (shadcn primitives are regenerated by `shadcn add`, so an edit there is overwritten on the next pull), and `!**/*.test.tsx` / `!**/*.dom.test.tsx`.
 
-**Pre-rule backlog (ratchet pattern).** The 81 files that pre-date the rule carry a file-level `// oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — …` header, same contract as `no-raw-html-interactive-element`: the comment list across the codebase IS the visible backlog, and review treats each header as a backlog marker rather than a free pass. Drain a file by swapping `ml`/`mr` → `ms`/`me`, `pl`/`pr` → `ps`/`pe`, `left`/`right` → `start`/`end`, then deleting the header — the rule starts firing again immediately, so a partial pass that misses one utility fails the gate. 81 of the 292 chrome files in scope carry a header (148 utilities in total), so the rule is live on the other 211 today.
+**Pre-rule backlog (ratchet pattern).** The 66 files that pre-date the rule carry a file-level `// oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — …` header, same contract as `no-raw-html-interactive-element`: the comment list across the codebase IS the visible backlog, and review treats each header as a backlog marker rather than a free pass. Drain a file by swapping `ml`/`mr` → `ms`/`me`, `pl`/`pr` → `ps`/`pe`, `left`/`right` → `start`/`end`, then deleting the header — the rule starts firing again immediately, so a partial pass that misses one utility fails the gate. 66 of the 375 chrome files in scope carry a header (127 utilities in total), so the rule is live on the other 309 today.
 
 The rule does NOT catch:
 
@@ -625,6 +627,20 @@ Included: `packages/app/src/**/*.tsx`, `packages/desktop/src/**/*.tsx`, `package
 
 Rule: [`lint-plugins/ok-rules/rules/no-demoted-dialog-confirm.mjs`](rules/no-demoted-dialog-confirm.mjs). Fixture: [`lint-plugins/ok-rules/__fixtures__/no-demoted-dialog-confirm.fixture.tsx`](__fixtures__/no-demoted-dialog-confirm.fixture.tsx). Test: [`lint-plugins/ok-rules/tests/no-demoted-dialog-confirm.uncached.test.mjs`](tests/no-demoted-dialog-confirm.uncached.test.mjs). See [PRECEDENTS.md #42](../../PRECEDENTS.md#custom-lint-enforcement-precedent-42) for the custom-rule convention.
 
+### `no-blocking-error-box`
+
+Desktop error reporting. No code under `packages/desktop/src` calls `showErrorBox` on Electron's `dialog`, or on anything shaped like it. Errors are shown with `showErrorDialog` from [`packages/desktop/src/main/error-dialog.ts`](../../packages/desktop/src/main/error-dialog.ts), an async `showMessageBox` attached to a parent window.
+
+**Why.** `dialog.showErrorBox` is synchronous and takes no parent window. On Linux it runs `gtk_dialog_run`, which holds the main thread in a nested GTK loop until someone presses its button. With no parent, the window manager can stack the dialog behind the window it is reporting on, and the dialog has no taskbar entry, so nothing on screen shows it is still open. In PRD-9099 that left the Project Navigator on "Opening <folder>…" indefinitely: the `ok:project:open` reply could not leave the main process. SIGTERM was ignored as well, because both Chromium's shutdown task and the app's Node signal handler wait for the main loop. `showMessageBox` with a parent stays above that window, and the main loop keeps running while it is open.
+
+**Scoped** (see the rule's `RULE_SCOPES` entry in [`scope.mjs`](scope.mjs)) to `packages/desktop/src/**/*.ts`, the only package that runs in Electron's main process. `**/*.test.ts` and `**/*.test-helper.ts` are excluded, because tests stub the method by name.
+
+The rule matches a call of a non-computed `.showErrorBox` member, whatever the receiver: `dialog`, `electron.dialog`, or an injected dialog host. It does NOT catch a bare `showErrorBox(...)` identifier, a computed `dialog['showErrorBox'](...)`, or a reference taken without calling it (`const f = dialog.showErrorBox`). Those shapes have no realistic occurrence.
+
+**Opting out.** There is no sanctioned use after `app` is ready. Before `ready`, Electron prints the error box to stderr on Linux instead of showing it, so even an early-boot error needs a different reporting path.
+
+Rule: [`lint-plugins/ok-rules/rules/no-blocking-error-box.mjs`](rules/no-blocking-error-box.mjs). Fixture: [`lint-plugins/ok-rules/__fixtures__/no-blocking-error-box.fixture.tsx`](__fixtures__/no-blocking-error-box.fixture.tsx). Test: [`lint-plugins/ok-rules/tests/no-blocking-error-box.uncached.test.mjs`](tests/no-blocking-error-box.uncached.test.mjs). See [PRECEDENTS.md #42](../../PRECEDENTS.md#custom-lint-enforcement-precedent-42) for the custom-rule convention.
+
 ### `no-unconverted-git-pathspec`
 
 Git pathspec discipline. Fires on a hand-written `'--'` string literal in an array literal, or as a direct argument of a `.raw(...)` varargs call, anywhere under `packages/{core,server,cli,desktop}/src/**` — unless the argv's leading non-flag token is one of the five verbs whose `--` operands are not pathspecs. The array branch consults no git token of any kind; see the over-catch note below. The tail after the separator is built with `pathspecArgs(paths)` from [`packages/core/src/git-pathspec.ts`](../../packages/core/src/git-pathspec.ts), which emits the separator and the `:(literal)` conversion together.
@@ -655,7 +671,7 @@ Rule: [`lint-plugins/ok-rules/rules/no-unconverted-git-pathspec.mjs`](rules/no-u
 
 ### `no-sentinel-signal-target`
 
-Owned-process signalling. `process.kill(target, signal)` — and the desktop test-support reaper seam `signalOwnedGroup` / `signalOwnedPids` / `reapOwnedTree` when no sender is injected (that seam is not on `main` yet — it lives on the unmerged `feat/ok-update-relaunch-substrate` branch, and the rule covers it ahead of time so the gate is in place the day it lands) — never receive a target that is (a) a literal `0`, `1` or `-1`, (b) a `?? <n>` / `|| <n>` fallback to a number, or (c) a parse of text — `Number(...)`, `parseInt(...)`, `parseFloat(...)`, or the `Number.` spellings of the latter two. A signal-`0` liveness probe (`process.kill(pid, 0)`) sends nothing and is exempt, whatever the target.
+Owned-process signalling. `process.kill(target, signal)` — and the desktop test-support reaper seam `signalOwnedGroup` / `signalOwnedPids` / `reapOwnedTree` when no sender is injected (that seam is not in this tree yet; the rule covers it ahead of time so the gate is in place the day it lands) — never receive a target that is (a) a literal `0`, `1` or `-1`, (b) a `?? <n>` / `|| <n>` fallback to a number, or (c) a parse of text — `Number(...)`, `parseInt(...)`, `parseFloat(...)`, or the `Number.` spellings of the latter two. A signal-`0` liveness probe (`process.kill(pid, 0)`) sends nothing and is exempt, whatever the target.
 
 **Why.** On POSIX, `kill(0, sig)` signals the caller's whole process group, `kill(-1, sig)` every process the user owns, and `kill(-pid, sig)` a group. On 2026-09-20 and 21 a desktop unit test killed every process on a developer's Mac three times, Terminal included: it called `signalOwnedGroup(1, 'SIGKILL')` to prove a guard refused it, a mutation loop had weakened the guard to `pid > 0`, and `process.kill(-1, …)` went through. The mutation loop was killed before its own revert step, so the mutant stayed on disk and every later run of the suite repeated the kill. The same sentinel shape was already live on `main`: `process.kill(pid ?? 0, 'SIGKILL')` in a test reaper, and `process.kill(Number(readFileSync(pidFile)), 'SIGKILL')` in a `finally` — an empty pidfile parses to `0`. Both shipped green: nothing in `pnpm lint` or `pnpm check` looked at what a kill was fed. Canonical prose: the "Never signal a pid you did not spawn" STOP rule in the workspace `AGENTS.md`; this rule encodes its decidable subset.
 
@@ -663,9 +679,11 @@ Owned-process signalling. `process.kill(target, signal)` — and the desktop tes
 
 - **Signal the handle you spawned** — `child.kill(signal)`.
 - **Or a pid you took from that handle** — `child.pid`, wrapped or negated for its group, only while the handle has not reported exit, checked in the same turn as the signal. Negation reaches a group only if you spawned it detached, since `-pid` addresses the group whose pgid is that pid and an ordinary child leads none; on a non-detached child it raises `ESRCH`, which a `catch {}` around the kill turns into a surviving process.
+- **Or that group after the handle reports exit, only while its lifeline holds it.** The maintainers' gate tooling, which the public mirror does not carry, starts each gate step under a guard that forks a lifeline watcher into the step's process group before it runs the step. While that watcher, a live member, holds the group, no other group can take its pgid, so the step's supervisor may still signal `-child.pid` after the step's first process exits. Once the lifeline has closed or been released, the group is no longer a target.
+- **The lifeline's own `kill -s KILL 0`.** That watcher ends the group it belongs to with `kill -s KILL 0` when its supervisor's end of the lifeline closes. It is the only signal to a literal `0` the STOP rule allows, and these two are its only acts beyond signalling a handle before it exits.
 - **Negation is not laundering.** `-<expr>` is judged by exactly the same tests as `<expr>`, so a negated `?? <n>` fallback fires just as the bare fallback does, and only a pid already taken from a handle survives the minus sign.
 - **Filter a nullable pid out of a list** instead of substituting a sentinel.
-- **A pid parsed from a file or a `ps` row is not a signal target**, because `isValidLockPid()` checks its range, not its owner. Stop that process through its owner, or report it.
+- **A pid parsed from a file or a `ps` row is not a signal target**, because `isValidLockPid()` checks its range, not its owner. Stop that process through its owner, or report it. The one sanctioned exception is a `server.lock` pid at the two sites that stop a server through its lock, `runStop` (`packages/cli/src/commands/stop.ts`) and the desktop's `terminateServerByPid` (`packages/desktop/src/main/window-manager.ts`). Each signals only after `assessLockHolder` (`packages/server/src/process-identity.ts`) reads the pid's current holder as the process that wrote the lock, immediately before every signal, and refuses otherwise; a reused pid is never signalled. A new site that stops a server through its lock routes through one of these two rather than adding its own kill.
 
 **The reaper seam is what is absent.** `signalOwnedGroup`, `signalOwnedPids`, `reapOwnedTree` and `recordingSignalSender` have no definition on this head, so the seam's own sanctioned shape — an injected sender — is the one thing you cannot write here yet. Once the seam lands, a guard test that must feed it a sentinel passes `recordingSignalSender().send` — not the recorder itself — in the sender slot, which is the third argument to `signalOwnedGroup` and `signalOwnedPids` but the fourth to `reapOwnedTree`, and asserts the recorded calls. The rule stops firing only when a real sender value occupies that slot: passing `undefined` or `void 0` explicitly injects nothing and still fires, and passing `process.kill` itself is no escape either.
 
@@ -694,9 +712,130 @@ Included: `**/*.ts`, `**/*.tsx`, `**/*.mts`, `**/*.cts`, `**/*.js`, `**/*.jsx`, 
 
 The shared module owns the definition. The portability test inventories only the sibling dependency-free `.mjs` implementation modules; it does not classify TypeScript, and its test-file exclusion remains local. Scanners that deliberately inspect test helpers retain that scope rather than inheriting the production default.
 
-The fixture pairs 15 violations with adjacent negatives. The self-test also plants a check under `scripts/` and invokes the real lint configuration, verifies the shared-predicate replacement passes, and removes the planted file. The rule and its self-test run in the existing lint and uncached test jobs.
+The fixture pairs 15 violations with adjacent negatives. The self-test also plants a check and its shared-predicate replacement side by side under `scripts/`, lints both with the real lint configuration in one invocation, expects the diagnostic on the planted check alone, and removes both files. One invocation pays the type-aware startup once rather than once per file. The rule and its self-test run in the existing lint and uncached test jobs.
 
 Rule: [`no-hand-rolled-test-file-suffix.mjs`](rules/no-hand-rolled-test-file-suffix.mjs). Fixture: [`no-hand-rolled-test-file-suffix.fixture.tsx`](__fixtures__/no-hand-rolled-test-file-suffix.fixture.tsx). Test: [`no-hand-rolled-test-file-suffix.uncached.test.mjs`](tests/no-hand-rolled-test-file-suffix.uncached.test.mjs).
+
+### `no-fixed-palette-color`
+
+Theme discipline. Chrome colors come from the active theme, so a custom or bundled palette recolors the whole app rather than everything except the surfaces someone styled with a fixed Tailwind hue. The rule flags a color utility that names a chromatic Tailwind hue (`red` through `rose`, shades `50` to `950`), with any variant prefix or opacity modifier, and asks for a theme token instead: `success`, `warning`, `destructive` or `info` for status, `chart-1` to `chart-5` for data categories, and `identity-1` to `identity-4` for telling items such as threads apart. The identity tokens come from the palette slots that carry no status, so an identity color never reads as a state; four of the five chart tokens share slots with the status tokens, and `chart-4` shares `identity-1`'s. A status tint carries only text in that same status color, which the theme derivation holds at 4.5:1 up to a 25% tint: chips, badges, pills and hover states. That holds wherever some shade of the slot color passes on both the page and its tint; on a mid-tone page where none does, the derivation falls back to checking the bare page and card only, and the tint is unchecked. A `ghost` Button adds its own `hover:text-foreground` and `dark:hover:bg-muted/50`, so a status-tinted ghost Button names its hover text and dark hover fill explicitly. A callout or row whose text is the body foreground marks its status with a border and an icon or title, not a fill, because no wash fits under body text in every theme (Solarized's own foreground is 4.86:1 on its popover). The rule matches hue names, so it cannot catch `bg-warning/10 text-foreground`; review has to.
+
+**It matches every string, not only class props.** Status colors in this codebase mostly live in maps and helpers (`{ ready: 'bg-emerald-500' }`, a `TONE_CLASS` record, a ring palette array) rather than in a `className` attribute, so the rule reads every string literal and template-literal chunk. It knows the color utilities by prefix, hyphenated ones included (`ring-offset`, `inset-ring`, `inset-shadow`, `drop-shadow`, `text-shadow`), so a CSS custom property name (`--color-red-500`), a bare `red-500` and prose never match. The utility must also stand alone as a token, so an identifier that merely contains one (`legacy-text-red-500`, `text-red-500-legacy`) stays silent.
+
+**Neutrals are out of scope.** Grays (`slate`, `gray`, `zinc`, `neutral`, `stone`) and `black`/`white` are not palette hues; the rule does not flag them.
+
+The rule does NOT catch hex, `rgb()` or `oklch()` literals, which canvas-drawn surfaces such as the graph view use, or colors in stylesheets.
+
+Included: `packages/app/src/**/*.ts`, `packages/app/src/**/*.tsx`, `packages/desktop/src/**/*.ts`, `packages/desktop/src/**/*.tsx`, `packages/plugin/src/**/*.ts`, `packages/plugin/src/**/*.tsx`, `lint-plugins/ok-rules/__fixtures__/no-fixed-palette-color.fixture.tsx`. Excluded: `**/*.test.ts`, `**/*.test.tsx`, `**/*.dom.test.tsx`, `**/*.test-helper.ts`, `**/*.test-helper.tsx`.
+
+Rule: [`no-fixed-palette-color.mjs`](rules/no-fixed-palette-color.mjs). Fixture: [`no-fixed-palette-color.fixture.tsx`](__fixtures__/no-fixed-palette-color.fixture.tsx). Test: [`no-fixed-palette-color.uncached.test.mjs`](tests/no-fixed-palette-color.uncached.test.mjs).
+
+### `no-empty-jsx-expression`
+
+Flags JSX expression braces in a child position that hold no expression. It has two messages.
+
+**Empty braces.** `{}`, or braces with only whitespace between them, compile to nothing, so they are dead code. They are the shape a comment strip leaves when it removes a JSX comment but not its braces. Delete the braces, and the line when nothing else is on it. Read the JSX text around them first: braces between two runs of text keep those runs apart as separate children, so deleting them can join the text. `one`, `{}` and `two` on three lines render `onetwo`; without the braces they render `one two`.
+
+**Comment braces.** `{/* ... */}` exists only to carry a comment. Put the comment between the element's props, or after its tag name, and delete the braces:
+
+```tsx
+<div
+  // a comment between props
+  className="row"
+>
+<div // oxlint-disable-line jsx-a11y/no-static-element-interactions -- reason
+  onClick={select}
+>
+```
+
+A comment between `<` and the tag name is not an option: TypeScript 7 rejects it (`TS1003`).
+
+Two directives have no other place, so they keep their braces:
+- a single `biome-ignore`. Biome reports at the opening `<`, so a `biome-ignore` between props or after the tag name does not apply.
+- a single `oxlint-disable-next-line` directly before JSX text, or before an element whose first child is JSX text. A rule that reports on the text (`ok/microcopy-ellipsis`) can be suppressed only by a comment on the line above that text.
+
+Any other comment, or a second comment next to a directive, is flagged. The [no-comments rule](../no-comments/README.md) still judges the text of every comment.
+
+Biome and oxlint reject `<div title={} />` as a parse error (`TS17000`), so no lint rule runs on it.
+
+`oxlint.config.ts` ignores `lint-plugins/no-comments/__fixtures__/`, because the no-comments fixtures hold JSX comments and unused directives on purpose.
+
+Unscoped, because any JSX file can carry one.
+
+Rule: [`no-empty-jsx-expression.ts`](rules/no-empty-jsx-expression.ts). Fixture: [`no-empty-jsx-expression.fixture.tsx`](__fixtures__/no-empty-jsx-expression.fixture.tsx). Test: [`no-empty-jsx-expression.uncached.test.ts`](tests/no-empty-jsx-expression.uncached.test.ts).
+
+### `no-redundant-jsx-element-braces`
+
+Pairs with the built-in `react/jsx-curly-brace-presence` rule, which `oxlint.config.ts` enables with `children: "never"` and `props: "never"`. The built-in rule reports braces around a single child element, `<p>{<b>x</b>}</p>`, and string braces such as `{'text'}` and `title={'x'}`. It skips any braces that hold a comment, and this rule covers that case.
+
+This rule flags braces in a child position that hold one element or fragment and at least one comment. The comment can sit before or after the element, between its props, or on a child inside it. A comment strip leaves this shape when the braces held a line comment before the element.
+
+The fix is to delete the braces and write the element as a direct child. A comment that the braces carried goes between the element's props, or after its tag name (`<div // ...`). The compiled output does not change.
+
+The rule does NOT catch:
+- braces whose only comment outside the element is a single `biome-ignore` directive. Biome reports at the opening `<`, so a `biome-ignore` between props or after the tag name does not apply.
+- braces with no comment. The built-in rule reports them.
+- an element as an attribute value (`icon={<Icon />}`), where the braces are needed.
+- an element inside a larger expression (`{ok && <b>x</b>}`, `{ok ? <b>x</b> : null}`).
+
+Unscoped, because any JSX file can carry one.
+
+Rule: [`no-redundant-jsx-element-braces.ts`](rules/no-redundant-jsx-element-braces.ts). Fixture: [`no-redundant-jsx-element-braces.fixture.tsx`](__fixtures__/no-redundant-jsx-element-braces.fixture.tsx). Test: [`no-redundant-jsx-element-braces.uncached.test.ts`](tests/no-redundant-jsx-element-braces.uncached.test.ts).
+
+### `no-native-renderer-dialog`
+
+Feedback-surface discipline, from the display guide at [`plugins/ok/skills/feedback-surfaces/SKILL.md`][feedback-surfaces-guide]. Renderer code never opens the browser's native `confirm`, `alert` or `prompt` dialog. The native dialog has no title, no destructive button, no app theme and no focus handling, and its button labels come from the browser, so Lingui cannot translate them. Confirmations use `AlertDialog` from `@/components/ui/alert-dialog`, or `DeleteConfirmationDialog` for a delete.
+
+The rule fires on a call of `window.confirm`, `window.alert` or `window.prompt` (also through `globalThis` or `self`), and on a bare `confirm(...)`, `alert(...)` or `prompt(...)` call whose name resolves to the global. Resolution walks the scope chain from the call: an import, a parameter, or a function or variable declared in any enclosing scope is a local binding, so `consentStore.confirm(...)`, `threadClient.prompt(...)`, an imported `prompt` and a local `function confirm` stay silent. A parameter named `window` is local too, so `window.confirm` on it is not flagged.
+
+The scope is the renderer packages, `packages/app/src` and `packages/plugin/src`. `packages/desktop/src` is left out: it holds the Electron main process, the preload bridge, the utility process and shared modules, none of which renders UI, and the desktop renderer is `packages/app` itself (the desktop build sets `root: ../app`). Native Electron dialogs in the main process are a different surface that the guide limits separately and `no-blocking-error-box` partly gates.
+
+The rule does NOT catch a dialog function taken by reference and called later (`const ask = window.confirm; ask(...)`), a computed member (`window['confirm']`), or a call through another alias of the global object.
+
+Included: `packages/app/src/**/*.ts`, `packages/app/src/**/*.tsx`, `packages/plugin/src/**/*.ts`, `packages/plugin/src/**/*.tsx`, `lint-plugins/ok-rules/__fixtures__/no-native-renderer-dialog.fixture.tsx`. Excluded: `**/*.test.ts`, `**/*.test.tsx`, `**/*.dom.test.tsx`, `**/*.test-helper.ts`, `**/*.test-helper.tsx`.
+
+Rule: [`no-native-renderer-dialog.mjs`](rules/no-native-renderer-dialog.mjs). Fixture: [`no-native-renderer-dialog.fixture.tsx`](__fixtures__/no-native-renderer-dialog.fixture.tsx). Test: [`no-native-renderer-dialog.uncached.test.mjs`](tests/no-native-renderer-dialog.uncached.test.mjs).
+
+### `no-custom-toast`
+
+Toast discipline, from the display guide at [`plugins/ok/skills/feedback-surfaces/SKILL.md`][feedback-surfaces-guide]. App code calls the typed sonner functions (`toast.success`, `toast.error`, `toast.warning`, `toast.info`, `toast.loading`), never `toast.custom`. The app's `<Toaster richColors closeButton />` styles the typed toasts with their color, icon, width and close button. Sonner leaves a custom toast unstyled: it sizes to its content, renders no close button, and in a collapsed stack the toast behind keeps its content visible, so a mixed stack overlaps.
+
+The rule resolves `toast` from the file's own `sonner` imports: a named `toast` import under any local name (`import { toast as sonnerToast } from 'sonner'`) and `toast` read off a namespace import (`sonner.toast.custom`). The name must resolve to that import: a `toast` imported from another module, or a local declaration that shadows the import, is not flagged. A `custom` method on any other object is not flagged, and neither is a `toast.custom` reference that is never called.
+
+**Pre-rule backlog.** The three existing custom toasts, in `packages/app/src/lib/install-bug-report-send-toasts.ts`, `install-server-drift-listener.ts` and `install-stale-tab-reload-prompt.ts`, carry a file-level `// oxlint-disable ok/no-custom-toast -- pre-rule backlog: ...` header. Delete the header in the change that moves the file to a typed toast. A toast that truly needs custom content keeps an inline `// oxlint-disable-next-line ok/no-custom-toast -- <reason>` and follows the guide: `width: var(--width)`, its own close button, and a check stacked behind and in front of a typed toast.
+
+Included: `packages/app/src/**/*.ts`, `packages/app/src/**/*.tsx`, `lint-plugins/ok-rules/__fixtures__/no-custom-toast.fixture.tsx`. Excluded: `**/*.test.ts`, `**/*.test.tsx`, `**/*.dom.test.tsx`, `**/*.test-helper.ts`, `**/*.test-helper.tsx`.
+
+Rule: [`no-custom-toast.mjs`](rules/no-custom-toast.mjs). Fixture: [`no-custom-toast.fixture.tsx`](__fixtures__/no-custom-toast.fixture.tsx). Test: [`no-custom-toast.uncached.test.mjs`](tests/no-custom-toast.uncached.test.mjs).
+
+### `no-raw-error-toast`
+
+Error-copy discipline, from the display guide at [`plugins/ok/skills/feedback-surfaces/SKILL.md`][feedback-surfaces-guide]. A toast never shows raw error text. Raw text is untranslatable, often an internal message, and frequently wrong for the user; the guide asks for the failure to be mapped to a reason with copy written for it ("Couldn't {verb} {thing}."), and for raw detail to go behind a "Show details" disclosure or into Report a bug.
+
+The rule checks the message argument and the options object's `description` of a sonner `toast(...)`, `toast.error`, `toast.warning`, `toast.info`, `toast.success`, `toast.loading` or `toast.message` call, with `toast` resolved from the file's `sonner` imports as in `no-custom-toast`. It fires when that value is raw error text, which it recognizes syntactically:
+
+- `<x>.message`, `String(<x>)` and `<x>.toString()`, where `<x>` is an error value;
+- an error value used directly (`toast.error(result.error)`, `description: res.error`);
+- any `errorText(...)` call, since that helper exists to stringify an unknown error;
+- a template literal, or a Lingui `t` template, that interpolates any of the above;
+- either branch of a conditional, either side of `||`, `??` or `+`, and the right side of `&&`, holding any of the above, so the common ``err instanceof Error ? err.message : t`...` `` fires.
+
+**The error-value heuristic.** The rule runs on the untyped AST, so it cannot ask whether a value is an `Error`. It decides by name instead: an identifier, or the last property of a member chain, named `err`, `error`, `e`, `ex`, `cause` or `reason`, or ending in `Error` or `Err` after a lowercase letter or digit (`saveError`, `cloneError`, `result.error`, `lastErr`). A predicate such as `isError` also matches, which is harmless because a condition is never the rendered value: only the right side of `&&` and the branches of a conditional are read, not its test. A `message` field on anything else is not flagged, because a result or protocol object's `message` cannot be told apart from user-facing copy without types.
+
+The rule does NOT catch:
+
+- **`message` on a non-error name.** `toast.error(result.message)` and ``t`Message not sent: ${frame.message}` `` are raw text from a result or a server frame, but the name says nothing about it. Five such toasts exist today (`RestartServerButton`, `DocumentErrorBoundary`, `NetworkAccessSection`, `presence/use-sync-toasts.ts`, `lib/acp/thread-client.ts`).
+- **Raw text under another name.** `description: detail` or `description: result.detail` where `detail` came from an error, and a variable assigned from `err.message` on an earlier line and then passed to the toast. The rule reads the call's own arguments only.
+- **Formatting helpers other than `errorText`.** `humanFormat(result.error)` is treated as mapped copy, not raw text.
+- **`toast.promise`** and its `error` callback, and toasts built from a JSX element.
+
+Read the heuristic in both directions: an error-named variable that already holds written, translated copy is still flagged when it is passed straight through. Rename it (`errorCopy` does not end in `Error`), or suppress the line with a reason.
+
+**Pre-rule backlog.** Forty-two files under `packages/app/src` that predate the rule carry a file-level `// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: ...` header over their 73 existing raw-error toasts. The headers are the visible backlog. Drain a file by mapping each failure to written copy, then deleting its header; the rule fires again at once, so a partial migration fails the gate.
+
+Included: `packages/app/src/**/*.ts`, `packages/app/src/**/*.tsx`, `lint-plugins/ok-rules/__fixtures__/no-raw-error-toast.fixture.tsx`. Excluded: `**/*.test.ts`, `**/*.test.tsx`, `**/*.dom.test.tsx`, `**/*.test-helper.ts`, `**/*.test-helper.tsx`.
+
+Rule: [`no-raw-error-toast.mjs`](rules/no-raw-error-toast.mjs). Fixture: [`no-raw-error-toast.fixture.tsx`](__fixtures__/no-raw-error-toast.fixture.tsx). Test: [`no-raw-error-toast.uncached.test.mjs`](tests/no-raw-error-toast.uncached.test.mjs).
 
 ## Suppression
 
@@ -718,16 +857,18 @@ Current production suppressions:
 
 | rule | line-level | file-level (backlog) |
 | - | - | - |
-| `no-physical-direction-utility` | 4 | 73 |
-| `no-loosely-typed-webcontents-ipc` | 31 | 0 |
-| `no-raw-html-interactive-element` | 0 | 20 |
-| `no-unportaled-editor-content` | 7 | 0 |
+| `no-physical-direction-utility` | 4 | 66 |
+| `no-loosely-typed-webcontents-ipc` | 32 | 0 |
+| `no-raw-html-interactive-element` | 0 | 19 |
+| `no-unportaled-editor-content` | 10 | 0 |
 | `require-windowshide-on-spawn` | 6 | 0 |
 | `microcopy-ellipsis` | 2 | 0 |
 | `no-unwrapped-user-facing-string` | 1 | 0 |
 | `no-hand-rolled-spinner` | 1 | 0 |
+| `no-raw-error-toast` | 0 | 42 |
+| `no-custom-toast` | 0 | 3 |
 
-Every other rule has zero. The file-level counts above are the visible migration backlogs for the logical-property pass and shadcn migration.
+Every other rule has zero. The file-level counts above are the visible migration backlogs for the logical-property pass, the shadcn migration and the feedback-surfaces guide.
 
 **Where an inline suppression can and cannot sit.** A suppression comment needs a line of its own directly above the reported span, which is a property of the *formatting* rather than of the rule. On a JSX attribute that means the attribute must already be on its own line. A `{/* oxlint-disable-next-line */}` child covers the element that follows it, not a text node that starts after that element.
 
@@ -759,7 +900,7 @@ export const ruleName = {
 };
 ```
 
-**No prose comments.** Rule modules are `.mjs` and the [no-comments policy](../no-comments/README.md) applies. Rationale goes in this README, in the rule's own section.
+**No prose comments.** Rule modules are `.mjs` or `.ts`, and the [no-comments policy](../no-comments/README.md) applies to both. Rationale goes in this README, in the rule's own section.
 
 **Message shape (load-bearing).** The diagnostic message has three parts in order: (1) the problem statement, (2) the fix-noun naming the action that resolves it, (3) `See <docs-URL>` built by `docsUrl('<rule-name>')` so no message hand-writes the base URL.
 
@@ -775,7 +916,7 @@ Add a `RULE_SCOPES['<rule-name>']` entry in [`scope.mjs`](scope.mjs): an array o
 
 Scope lives here rather than in `oxlint.config.ts#overrides` because **oxlint's `overrides[].files` does not honour `!` negation** (measured on oxlint 1.66.0: with the rule `off` at root and an override of `files: ['lint-plugins/ok-rules/__fixtures__/**', '!**/*.fixture.tsx']`, the rule still fired on the excluded fixture — the negative glob did not subtract from the positive one. Re-check this on an oxlint upgrade; if negation lands, this whole scope table becomes revisitable) — a negative glob in that list does not subtract from a positive one, so an override-scoped rule silently fires on its exclusions. Biome's `includes` did honour it, which is why the rules this replaced could scope in config.
 
-**Workspace-wide is a claim about this table, not about oxlint.** A rule with no `RULE_SCOPES` entry is one no entry here narrows; it is not a rule oxlint feeds every file in the repo. Selection happens first and is narrower: `ignorePatterns` in [`oxlint.config.ts`](../../oxlint.config.ts) drops `/reports/**`, `/specs/**`, `.agents/skills/**`, `.codex/skills/**` and the fixtures directory before any rule sees them, and naming one of those files positionally on the command line does not override it (measured on oxlint 1.80.0: `--debug=files` prints nothing for such a file while a control under `packages/` is listed, and `--no-ignore` does not rescue it — that flag governs `.gitignore`, not this list). The pre-push lane is narrower still, since `lint-staged` routes only `packages/**`, `docs/**`, `{scripts,.github/scripts}/**/*.mjs` and root `*.ts` through oxlint.
+**Workspace-wide is a claim about this table, not about oxlint.** A rule with no `RULE_SCOPES` entry is one no entry here narrows; it is not a rule oxlint feeds every file in the repo. Selection happens first and is narrower: `ignorePatterns` in [`oxlint.config.ts`](../../oxlint.config.ts) drops `/reports/**`, `/specs/**`, `.agents/skills/**`, `.codex/skills/**`, `lint-plugins/no-comments/__fixtures__/**` and `lint-plugins/ok-rules/__fixtures__/**` before any rule sees them, and naming one of those files positionally on the command line does not override it (measured on oxlint 1.80.0: `--debug=files` prints nothing for such a file while a control under `packages/` is listed, and `--no-ignore` does not rescue it — that flag governs `.gitignore`, not this list). The pre-push lane is narrower still, since `lint-staged` routes only `packages/**`, `docs/**`, `{scripts,.github/scripts}/**/*.mjs` and root `*.ts` through oxlint.
 
 ### 4. Author the fixture file
 
@@ -783,7 +924,7 @@ Drop `<rule-name>.fixture.tsx` in `__fixtures__/`, pairing positive cases (must 
 
 ### 5. Author the fixture-file test
 
-Put it at `lint-plugins/ok-rules/tests/<rule-name>.uncached.test.mjs`, not in a package. The `.uncached.test` suffix runs it in the uncached cross-package tier (`vitest.uncached.config.ts`): every agent round, CI's `lint` job, and every whole-suite `turbo run`, which names `test:uncached` beside `test`. A package's cached test tier would replay a stale pass when only the rule or `oxlint.config.ts` changed, unless that package's Turbo key hashed both. The tests in that directory check that every rule the `ok` plugin registers has one. Write it as plain JavaScript.
+Put it at `lint-plugins/ok-rules/tests/<rule-name>.uncached.test.mjs`, not in a package. The `.uncached.test` suffix runs it in the uncached cross-package tier (`vitest.uncached.config.ts`): every agent round, CI's `open-knowledge / tier-guards (uncached)` cell, and every whole-suite `turbo run`, which names `test:uncached` beside `test`. A package's cached test tier would replay a stale pass when only the rule or `oxlint.config.ts` changed, unless that package's Turbo key hashed both. The tests in that directory check that every rule the `ok` plugin registers has one. Write it as plain JavaScript.
 
 The tier's global setup, `test-support/ok-rules-fixture-lint.ts`, runs oxlint once over every fixture with the fixture config and hands the report to the tests; a watch-mode rerun lints again. Every rule test fails when that run could not start, exited other than 1, gave no JSON report, linted a different number of files than the directory's `*.fixture.tsx` files, or reported a diagnostic on no fixture. `lintOkRulesFixture` in `test-support/read-ok-rules-config.test-helper.ts` returns one fixture's diagnostics from the report, each with its rule code, `line:column` position and message, in a fixed order. A diagnostic that names no rule (a rule that threw while linting that fixture, or a fixture oxlint could not parse) fails that fixture's test with oxlint's message, as it does the scope meta-test, which reads every fixture. oxlint also drops every other JS-plugin diagnostic on a file where a rule threw, so a rule whose scope reaches other fixtures fails their tests too. Run outside the tier, it fails and prints the command that runs the test. Assert the exact list of your rule's fire positions, filtered by its own code:
 
@@ -853,3 +994,5 @@ Add a `### \`<rule-name>\`` section: what it catches, what it deliberately does 
 - [oxlint custom JS plugins](https://oxc.rs/docs/guide/usage/linter/plugins.html)
 - [PRECEDENTS.md #42](../../PRECEDENTS.md#custom-lint-enforcement-precedent-42) — the custom-lint-enforcement convention
 - [`lint-plugins/no-comments/README.md`](../no-comments/README.md) — the sibling oxlint plugin and the comment policy that governs these modules
+
+[feedback-surfaces-guide]: ../../plugins/ok/skills/feedback-surfaces/SKILL.md

@@ -9,7 +9,7 @@ import type { HeadingEntry } from '@inkeep/open-knowledge-core/utils/slug';
 import { t } from '@lingui/core/macro';
 import { Trans, useLingui } from '@lingui/react/macro';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 import { usePageList } from '@/components/PageListContext';
 import { isKnownPageDocName } from '@/components/page-membership';
 import {
@@ -74,6 +74,7 @@ export interface OutlineNavDetail {
   index: number;
   slug: string;
   mode: 'wysiwyg' | 'source';
+  onNavigated?: (target: HTMLElement) => void;
 }
 
 export const OUTLINE_NAV_EVENT = 'open-knowledge:outline-nav';
@@ -88,6 +89,7 @@ export function OutlinePanel(props: {
   docName: string;
   isSourceMode: boolean;
   className?: string;
+  onNavigated?: (target: HTMLElement) => void;
 }) {
   return (
     <ProfilerBoundary name="outline-panel">
@@ -100,18 +102,24 @@ function OutlinePanelInner({
   docName,
   isSourceMode,
   className = '',
+  onNavigated,
 }: {
   docName: string;
   isSourceMode: boolean;
   className?: string;
+  onNavigated?: (target: HTMLElement) => void;
 }) {
   const { t } = useLingui();
   const { pages, loading, error: pageListError } = usePageList();
   const queryClient = useQueryClient();
   const { activeProvider, activeDocName } = useDocumentContext();
   const isKnownPage = isKnownPageDocName(pages, docName);
-  const hadResult = queryClient.getQueryState(['page-headings', docName]) !== undefined;
-  const isUnresolvable = !loading && pageListError === null && !isKnownPage && hadResult;
+  const queryCache = queryClient.getQueryCache();
+  const hasHeadingsQuery = useSyncExternalStore(
+    queryCache.subscribe,
+    () => queryClient.getQueryState(['page-headings', docName]) !== undefined,
+  );
+  const isUnresolvable = !loading && pageListError === null && !isKnownPage && hasHeadingsQuery;
   const {
     data: headings = [],
     isLoading,
@@ -140,6 +148,7 @@ function OutlinePanelInner({
       }, OUTLINE_INVALIDATE_DEBOUNCE_MS);
     };
     doc.on('update', onUpdate);
+    void queryClient.invalidateQueries({ queryKey: ['page-headings', docName] });
     return () => {
       doc.off('update', onUpdate);
       if (debounceTimer !== null) clearTimeout(debounceTimer);
@@ -157,6 +166,7 @@ function OutlinePanelInner({
       index,
       slug,
       mode: isSourceMode ? 'source' : 'wysiwyg',
+      onNavigated,
     };
     if (detail.mode === 'source') {
       rememberPendingSourceNavigation(docName, { kind: 'outline', detail });
@@ -224,7 +234,7 @@ function OutlinePanelInner({
                   className={cn(
                     'w-full cursor-pointer truncate py-1.5 pe-2 text-left text-sm transition-colors',
                     isActive
-                      ? 'font-medium text-primary'
+                      ? 'font-medium text-[var(--secondary-panel-accent,var(--primary))]'
                       : 'text-muted-foreground hover:text-foreground',
                   )}
                   style={{ paddingLeft: `${(heading.level - 1) * LEVEL_W + 20}px` }}

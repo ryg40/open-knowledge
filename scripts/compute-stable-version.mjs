@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { gitCleanEnv } from './git-clean-env.mjs';
-import { FIXED_GROUP_ANCHOR, bumpSemver, loadChangesets, maxBumpType, maxReleaseType } from './compute-next-beta.mjs';
+import { bumpSemver, loadChangesets, maxBumpType, maxReleaseType } from './changeset-versions.mjs';
 
 const BETA_TAG_RE = /^v\d+\.\d+\.\d+-beta\.\d+$/;
 const STABLE_TAG_RE = /^v\d+\.\d+\.\d+$/;
@@ -104,56 +104,6 @@ export function computePointReleaseVersion({ syntheticSha, latestStableTag, late
   return { version, tag: `v${version}`, latestStableVersion, addedIds, removedIds, bump };
 }
 
-export function evaluateAnchorGuard({ anchorVersion, latestStableTag }) {
-  const anchor = String(anchorVersion ?? '').trim();
-  if (!/^\d+\.\d+\.\d+$/.test(anchor)) {
-    throw new Error(`anchor version '${anchorVersion}' is not a bare X.Y.Z version.`);
-  }
-  const tag = String(latestStableTag ?? '').trim();
-  if (tag === '') {
-    return {
-      ok: true,
-      anchorVersion: anchor,
-      latestStableVersion: '',
-      drift: 'bootstrap',
-      reason: `No stable tag exists yet; the anchor (${anchor}) cannot be stale against it.`,
-    };
-  }
-  if (!STABLE_TAG_RE.test(tag)) {
-    throw new Error(`latest stable tag '${latestStableTag}' is not in the expected vX.Y.Z format.`);
-  }
-  const latestStableVersion = tag.slice(1);
-  if (anchor === latestStableVersion) {
-    return {
-      ok: true,
-      anchorVersion: anchor,
-      latestStableVersion,
-      drift: 'none',
-      reason: `Anchor ${anchor} matches the newest stable ${tag}.`,
-    };
-  }
-  const drift = compareVersions(anchor, latestStableVersion) < 0 ? 'behind' : 'ahead';
-  return {
-    ok: false,
-    anchorVersion: anchor,
-    latestStableVersion,
-    drift,
-    reason:
-      drift === 'behind'
-        ? `Anchor ${anchor} is behind the newest stable ${tag}; a main-reset consolidation is still pending.`
-        : `Anchor ${anchor} is ahead of the newest stable ${tag}; a consolidation advanced without a matching stable tag.`,
-  };
-}
-
-function compareVersions(a, b) {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
-    if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
-  }
-  return 0;
-}
-
 export function runGit(args, cwd) {
   const res = spawnSync('git', args, { cwd, encoding: 'utf8', env: gitCleanEnv() });
   if (res.status !== 0) {
@@ -202,61 +152,92 @@ export function gitAt(cwd) {
         `git merge-base --is-ancestor ${a} ${b} failed (exit ${res.status}): ${String(res.stderr || '').trim()}`,
       );
     },
+    changesetText: (sha, id) => runGit(['show', `${sha}:./.changeset/${id}.md`], cwd),
+    stableTags: () =>
+      runGit(['tag', '--list', 'v*'], cwd)
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((tag) => STABLE_TAG_RE.test(tag)),
     bumpTypeOf: (sha, id) =>
       maxReleaseType(loadChangesets().parse(runGit(['show', `${sha}:./.changeset/${id}.md`], cwd)).releases),
   };
 }
 
+export function releasedChangesetIds(git, { excludeTags = [], releasedTags = null } = {}) {
+  const excluded = new Set(excludeTags);
+  const released = new Set();
+  for (const tag of releasedTags ?? git.stableTags()) {
+    if (excluded.has(tag)) continue;
+    for (const id of git.changesetIds(tag)) released.add(id);
+  }
+  return released;
+}
+
+export function unreleasedChangesetIds(git, sha, { excludeTags = [], releasedTags = null } = {}) {
+  const released = releasedChangesetIds(git, { excludeTags, releasedTags });
+  return git.changesetIds(sha).filter((id) => !released.has(id));
+}
+
 export const realGit = gitAt();
 
-const BUMP_VERDICT_TYPES = new Set(['patch', 'minor', 'major', null]);
+const VERDICT_TYPES = new Set(['patch', 'minor', 'major', null]);
 
-export function parseBumpVerdicts(raw) {
+const BUMP_VERDICTS = {
+  env: 'BUMP_VERDICTS',
+  output: 'bump_verdicts',
+  job: 'read-bumps',
+  noun: 'bump verdict',
+  value: 'bump types',
+};
+
+export function parseVerdicts(raw, { env, output, job, noun, value }) {
   if (String(raw ?? '').trim() === '') {
     throw new Error(
-      'BUMP_VERDICTS is empty: the read-bumps job wrote no bump_verdicts output, or this step does not ' +
-        'receive needs.read-bumps.outputs.bump_verdicts.',
+      `${env} is empty: the ${job} job wrote no ${output} output, or this step does not ` +
+        `receive needs.${job}.outputs.${output}.`,
     );
   }
   let parsed;
   try {
     parsed = JSON.parse(String(raw));
   } catch (err) {
-    throw new Error(`bump verdicts are not JSON: ${err.message}`);
+    throw new Error(`${noun}s are not JSON: ${err.message}`);
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('bump verdicts must be a JSON object mapping changeset blob ids to bump types.');
+    throw new Error(`${noun}s must be a JSON object mapping changeset blob ids to ${value}.`);
   }
   for (const [blob, type] of Object.entries(parsed)) {
-    if (!BUMP_VERDICT_TYPES.has(type)) {
-      throw new Error(`bump verdict for blob ${blob} is ${JSON.stringify(type)}, not patch, minor, major or null.`);
+    if (!VERDICT_TYPES.has(type)) {
+      throw new Error(`${noun} for blob ${blob} is ${JSON.stringify(type)}, not patch, minor, major or null.`);
     }
   }
   return new Map(Object.entries(parsed));
 }
 
+export const parseBumpVerdicts = (raw) => parseVerdicts(raw, BUMP_VERDICTS);
+
 export const serializeBumpVerdicts = (verdicts) => JSON.stringify(Object.fromEntries(verdicts));
 
-export function recordBumpVerdicts(git, verdicts) {
+export function recordVerdicts(git, method, verdicts) {
   return {
     ...git,
-    bumpTypeOf: (sha, id) => {
-      const type = git.bumpTypeOf(sha, id);
+    [method]: (sha, id) => {
+      const type = git[method](sha, id);
       verdicts.set(git.changesetBlobs(sha).get(id), type);
       return type;
     },
   };
 }
 
-export function withBumpVerdicts(git, verdicts) {
+export function withVerdicts(git, method, verdicts, { noun }) {
   return {
     ...git,
-    bumpTypeOf: (sha, id) => {
+    [method]: (sha, id) => {
       const blob = git.changesetBlobs(sha).get(id);
       if (blob === undefined || !verdicts.has(blob)) {
         throw new Error(
-          `no bump verdict for .changeset/${id}.md at ${sha} (blob ${blob ?? 'absent'}); the job that ran the ` +
-            'Changesets reader did not read this changeset, so its bump is unknown here.',
+          `no ${noun} for .changeset/${id}.md at ${sha} (blob ${blob ?? 'absent'}); the job that ran the ` +
+            `Changesets reader did not read this changeset, so its ${noun} is unknown here.`,
         );
       }
       return verdicts.get(blob);
@@ -264,49 +245,10 @@ export function withBumpVerdicts(git, verdicts) {
   };
 }
 
-export function readAnchorVersion() {
-  const pre = JSON.parse(readFileSync('.changeset/pre.json', 'utf8'));
-  if (pre.mode !== 'pre') {
-    throw new Error(`Expected .changeset/pre.json mode=pre, got mode=${pre.mode}; the anchor is not meaningful.`);
-  }
-  const anchor = pre.initialVersions?.[FIXED_GROUP_ANCHOR];
-  if (!anchor) throw new Error(`No initialVersion for ${FIXED_GROUP_ANCHOR} in .changeset/pre.json`);
-  return anchor;
-}
+export const recordBumpVerdicts = (git, verdicts) => recordVerdicts(git, 'bumpTypeOf', verdicts);
 
-function anchorGuardMain() {
-  let result;
-  try {
-    result = evaluateAnchorGuard({
-      anchorVersion: readAnchorVersion(),
-      latestStableTag: realGit.newestStableTag(),
-    });
-  } catch (err) {
-    console.error(`::error::compute-stable-version --anchor-guard: ${err.message}`);
-    process.exit(1);
-  }
-
-  console.log(JSON.stringify(result));
-
-  if (process.env.GITHUB_OUTPUT) {
-    appendFileSync(
-      process.env.GITHUB_OUTPUT,
-      [
-        `anchor_ok=${result.ok ? 'true' : 'false'}`,
-        `anchor_version=${result.anchorVersion}`,
-        `latest_stable_version=${result.latestStableVersion}`,
-        `anchor_drift=${result.drift}`,
-        '',
-      ].join('\n'),
-    );
-  }
-
-  if (!result.ok) {
-    console.error(`::error::${result.reason}`);
-    process.exit(2);
-  }
-  log(result.reason);
-}
+export const withBumpVerdicts = (git, verdicts) =>
+  withVerdicts(git, 'bumpTypeOf', verdicts, BUMP_VERDICTS);
 
 function pointReleaseMain() {
   let result;
@@ -352,11 +294,6 @@ function pointReleaseMain() {
 }
 
 function main() {
-  if (process.argv[2] === '--anchor-guard') {
-    anchorGuardMain();
-    return;
-  }
-
   if (process.argv[2] === '--point-release') {
     pointReleaseMain();
     return;
@@ -400,7 +337,6 @@ function main() {
       `stable_tag=${result.stableTag ?? ''}`,
       `beta_sha=${result.betaSha ?? ''}`,
       `latest_stable_sha=${result.latestStableSha ?? ''}`,
-      `delta_ids=${JSON.stringify(result.deltaIds ?? [])}`,
       `bump_verdicts=${serializeBumpVerdicts(verdicts)}`,
     ];
     appendFileSync(process.env.GITHUB_OUTPUT, `${lines.join('\n')}\n`);

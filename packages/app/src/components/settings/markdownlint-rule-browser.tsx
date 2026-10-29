@@ -242,7 +242,6 @@ function RuleRow({
   return (
     <Collapsible data-testid={`markdownlint-rule-row-${rule.id}`}>
       <div className="flex items-center justify-between gap-3 px-3 py-2">
-        {}
         <CollapsibleTrigger
           className="group flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-0.5 text-left hover:bg-muted/50"
           data-testid={`markdownlint-rule-expand-${rule.id}`}
@@ -317,7 +316,7 @@ function RuleRow({
               onClick={(e) => dispatchExternalLinkClick(e, rule.docUrl)}
               onAuxClick={(e) => dispatchExternalLinkClick(e, rule.docUrl)}
               aria-label={t`Documentation for ${rule.id} (opens in browser)`}
-              className="inline-flex items-center gap-0.5 text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+              className="inline-flex items-center gap-0.5 text-primary underline-offset-2 hover:underline"
             >
               <Trans>Documentation</Trans>
               <ArrowUpRight aria-hidden className="size-3" />

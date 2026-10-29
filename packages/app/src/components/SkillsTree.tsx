@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 import type {
   SkillMoveFailureOutcome,
   SkillScope,
@@ -1136,7 +1137,6 @@ export function SkillsTree({
 
   return (
     <>
-      {}
       <div
         ref={iconPoolRef}
         aria-hidden
@@ -1150,20 +1150,16 @@ export function SkillsTree({
         <span {...{ [HOST_POOL_KEY_ATTR]: 'generic' }}>
           <Sparkles />
         </span>
-        {}
         <span {...{ [PROVENANCE_POOL_KEY_ATTR]: PROVENANCE_PLUGIN_POOL_KEY }}>
           <Package />
         </span>
-        {}
         <span {...{ [PROVENANCE_POOL_KEY_ATTR]: PROVENANCE_PIN_POOL_KEY }}>
           <Pin />
         </span>
-        {}
         <span {...{ [PROVENANCE_POOL_KEY_ATTR]: PROVENANCE_LIBRARY_POOL_KEY }}>
           <LibraryBig />
         </span>
       </div>
-      {}
       {installMenu ? (
         <DropdownMenu
           open

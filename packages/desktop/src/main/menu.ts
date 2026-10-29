@@ -15,7 +15,7 @@ import {
   SHOW_INSTALL_SKILL,
   type TerminalPlacement,
 } from '@inkeep/open-knowledge-core';
-import type { Dialog, MenuItemConstructorOptions } from 'electron';
+import type { BrowserWindow, Dialog, MenuItemConstructorOptions } from 'electron';
 import type { EntryPoint } from '../shared/entry-point.ts';
 import type { EditorActiveTargetSnapshot } from '../shared/ipc-channels.ts';
 import { promptForExistingFolder, promptForExistingMarkdownFile } from './dialog-helpers.ts';
@@ -28,6 +28,7 @@ export interface MenuDeps {
   showDevToolsMenu: boolean;
   terminalCapable: boolean;
   dialog: Dialog;
+  errorDialogParent(): BrowserWindow | null;
   openNavigator(): void;
   openProject(projectPath: string, entryPoint: EntryPoint): Promise<void>;
   openEphemeralFile?(filePath: string): Promise<void>;
@@ -79,6 +80,9 @@ export interface MenuDeps {
   agentPanelVisible?: boolean;
   hasEditorSelection?: boolean;
   onToggleAgentPanel?(): void;
+  singleFileWindow?: boolean;
+  editorVisible?: boolean;
+  onToggleEditor?(): void;
   onNewTerminal?(): void;
   onKillTerminal?(): void;
   onNewTerminalWindow?(): void;
@@ -192,7 +196,7 @@ const MENU_BINDINGS: Record<string, MenuCommandBinding> = {
   'switch-project': { click: (d) => () => d.openNavigator() },
   'open-folder': {
     click: (d) => async () => {
-      const picked = await promptForExistingFolder(d.dialog);
+      const picked = await promptForExistingFolder(d.dialog, { errorParent: d.errorDialogParent });
       if (picked) {
         await d.openProject(picked, 'pick-existing');
       }
@@ -200,7 +204,9 @@ const MENU_BINDINGS: Record<string, MenuCommandBinding> = {
   },
   'open-file': {
     click: (d) => async () => {
-      const picked = await promptForExistingMarkdownFile(d.dialog);
+      const picked = await promptForExistingMarkdownFile(d.dialog, {
+        errorParent: d.errorDialogParent,
+      });
       if (picked) {
         await d.openEphemeralFile?.(picked);
       }
@@ -296,6 +302,11 @@ const MENU_BINDINGS: Record<string, MenuCommandBinding> = {
     click: (d) => () => d.onToggleAgentPanel?.(),
     present: (d) => d.noteWindow !== true,
     enabled: (d) => d.onToggleAgentPanel !== undefined,
+  },
+  'toggle-editor': {
+    click: (d) => () => d.onToggleEditor?.(),
+    present: (d) => d.noteWindow !== true && d.singleFileWindow !== true,
+    enabled: (d) => d.onToggleEditor !== undefined,
   },
   'toggle-show-hidden-files': {
     click: (d) => () => d.onToggleShowHiddenFiles?.(),

@@ -32,8 +32,27 @@ export { APP_PACKAGE_ROOT };
 export const VITE_E2E_SEED_DIR =
   process.env.OK_TEST_VITE_SEED_DIR ?? join(APP_PACKAGE_ROOT, 'node_modules', '.vite-e2e-seed');
 
-export function viteSeedIsReady(): boolean {
-  return existsSync(join(VITE_E2E_SEED_DIR, 'deps', '_metadata.json'));
+export const VITE_E2E_SEED_POINTER = `${VITE_E2E_SEED_DIR}.current`;
+
+export function resolveViteSeedDir(): string | undefined {
+  let pointer: string;
+  try {
+    pointer = readFileSync(VITE_E2E_SEED_POINTER, 'utf-8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      return existsSync(VITE_E2E_SEED_DIR) ? VITE_E2E_SEED_DIR : undefined;
+    }
+    throw new Error(
+      `the vite seed pointer ${VITE_E2E_SEED_POINTER} could not be read (${code ?? String(err)})`,
+      { cause: err },
+    );
+  }
+  return pointer.trim();
+}
+
+export function viteSeedIsReady(seedDir = resolveViteSeedDir()): boolean {
+  return seedDir !== undefined && existsSync(join(seedDir, 'deps', '_metadata.json'));
 }
 
 export function rollbackPreparedViteCacheDir(
@@ -52,11 +71,12 @@ export function rollbackPreparedViteCacheDir(
 }
 
 export function prepareViteCacheDir(prefix: string): string {
+  const seedDir = resolveViteSeedDir();
   mkdirSync(join(APP_PACKAGE_ROOT, 'node_modules'), { recursive: true });
   const dir = mkdtempSync(join(APP_PACKAGE_ROOT, 'node_modules', `.vite-${prefix}-`));
-  if (viteSeedIsReady()) {
+  if (seedDir !== undefined && viteSeedIsReady(seedDir)) {
     try {
-      cpSync(VITE_E2E_SEED_DIR, dir, { recursive: true, force: true });
+      cpSync(seedDir, dir, { recursive: true, force: true });
     } catch (err) {
       const rollbackFailure = rollbackPreparedViteCacheDir(dir);
       if (rollbackFailure !== undefined) console.warn(`[e2e teardown] ${rollbackFailure}`);
@@ -226,6 +246,8 @@ function parseStartupReceipt(pending: PendingViteStartup): TestServerStartupRece
   };
 }
 
+const RECEIPT_POLL_INTERVAL_MS = 100;
+
 function waitForStartupReceipt(
   pending: PendingViteStartup,
   deadlineAt: number,
@@ -233,11 +255,13 @@ function waitForStartupReceipt(
   return new Promise((resolve, reject) => {
     let watcher: ReturnType<typeof watch> | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let poll: ReturnType<typeof setInterval> | undefined;
     let settled = false;
     const cleanup = () => {
       watcher?.off('error', onWatchError);
       watcher?.close();
       if (timer !== undefined) clearTimeout(timer);
+      if (poll !== undefined) clearInterval(poll);
       pending.proc.off('error', onError);
       pending.proc.off('exit', onExit);
     };
@@ -294,6 +318,7 @@ function waitForStartupReceipt(
           ),
         remainingMs,
       );
+      poll = setInterval(readReceipt, RECEIPT_POLL_INTERVAL_MS);
       readReceipt();
       if (pending.proc.exitCode !== null || pending.proc.signalCode !== null) onExit();
     } catch (err) {
@@ -314,7 +339,9 @@ export async function waitForBoundViteEndpoint(
   return { port: receipt.port, baseURL };
 }
 
-function endpointBaseURL(receipt: TestServerStartupReceipt): string {
+export function endpointBaseURL(
+  receipt: Pick<TestServerStartupReceipt, 'address' | 'family' | 'port'>,
+): string {
   return `http://${receipt.family === 'IPv6' ? `[${receipt.address}]` : receipt.address}:${receipt.port}`;
 }
 
@@ -364,7 +391,7 @@ async function assertViteStartupIdentity(
   }
 }
 
-function describeExit(proc: ChildProcess): string {
+export function describeExit(proc: ChildProcess): string {
   return proc.signalCode === null ? `with code ${proc.exitCode}` : `on ${proc.signalCode}`;
 }
 
@@ -461,7 +488,12 @@ export function signalTree(proc: ChildProcess, signal: NodeJS.Signals): boolean 
 
 const GROUP_DRAIN_POLL_INTERVAL_MS = 25;
 
-export async function killGracefully(proc: ChildProcess, timeoutMs = 5000): Promise<void> {
+export declare const WORKER_SERVER_HANDLE: unique symbol;
+
+export async function killGracefully(
+  proc: ChildProcess & { readonly [WORKER_SERVER_HANDLE]?: never },
+  timeoutMs = 5000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   if (proc.exitCode === null && proc.signalCode === null) {
     const exited = new Promise<void>((resolve) => proc.once('exit', () => resolve()));

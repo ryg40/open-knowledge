@@ -105,15 +105,10 @@ export function TagSuggestionMenu({
       className="w-64 overflow-y-auto subtle-scrollbar rounded-lg border bg-popover p-1 shadow-md"
       style={{ maxHeight: 'var(--suggestion-menu-max-height, 40vh)' }}
     >
-      {}
       <span className="sr-only" aria-live="polite" aria-atomic="true">
         {selectedItem ? announcementText(selectedItem) : ''}
       </span>
-      {error && (
-        <div className="rounded-md px-2 py-1.5 text-xs text-amber-700 dark:text-amber-300">
-          {error}
-        </div>
-      )}
+      {error && <div className="rounded-md px-2 py-1.5 text-xs text-warning">{error}</div>}
       {items.map((item, idx) => {
         const isSelected = idx === selectedIndex;
         const key = itemKey(item);

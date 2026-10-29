@@ -1,9 +1,10 @@
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, statSync } from 'node:fs';
 import type { Server as HttpServer } from 'node:http';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import {
   ASSET_EXTENSIONS,
+  currentCliCommandName,
   DEFAULT_SERVER_HOST,
   EXECUTABLE_BLOCKLIST_EXTENSIONS,
   INLINE_RENDERABLE_EXTENSIONS,
@@ -17,7 +18,7 @@ import {
   type ServerRuntimeConfig,
   SKILLS_STORE_DIRNAME,
 } from '@inkeep/open-knowledge-core';
-import { okUserHomeDir } from '@inkeep/open-knowledge-core/server';
+import { okProjectLogsDir, okUserHomeDir } from '@inkeep/open-knowledge-core/server';
 import { resolveGitDirDetailed } from '@inkeep/open-knowledge-core/shadow-repo-layout';
 import { context, propagation } from '@opentelemetry/api';
 import sirv from 'sirv';
@@ -32,27 +33,33 @@ import { createAssetServeMiddleware } from './asset-serve-middleware.ts';
 import { bootElapsedMs, recordBootPhase, startBootTimings } from './boot-timings.ts';
 import type { Config } from './config/schema.ts';
 import { installCrashCapture } from './crash-capture.ts';
-import { normalizeFsPath } from './fs-traced.ts';
+import { normalizeFsPath, tracedUtimesSync } from './fs-traced.ts';
 import {
   assertGitAvailable,
   type GitDetected,
   GitNotAvailableError,
+  GitProbeTimeoutError,
   GitTooOldError,
 } from './git-preflight.ts';
-import { emitPreflightFailureSpan } from './git-preflight-telemetry.ts';
+import {
+  describeGitPreflightFailure,
+  emitPreflightFailureSpan,
+} from './git-preflight-telemetry.ts';
+import { createShellHeaderSetter } from './http/shell-csp.ts';
 import {
   attachCollabClientCounter,
   attachIdleShutdown,
   type CollabClientCounter,
   type IdleShutdownHandle,
 } from './idle-shutdown.ts';
-import { scanGlobalInPlaceSkills, scanInPlaceSkills } from './in-place-skills.ts';
+import { scanGlobalInPlaceSkillsAsync, scanInPlaceSkills } from './in-place-skills.ts';
 import { buildIngressPolicy, ExposureConsentError } from './ingress-policy.ts';
 import { resolveLocalSinkConfig } from './local-sink-resolver.ts';
 import { getLogger, loggerFactory, type PinoLogger } from './logger.ts';
 import { createMcpHttpHandler } from './mcp-http.ts';
 import { mountMcpAndApi, type ReadinessState } from './mcp-mount.ts';
 import { MissingOkConfigError } from './missing-ok-config-error.ts';
+import { prepareProjectLogsDir } from './project-logs-retention.ts';
 import { createProjectRuntime, type ProjectRuntime } from './project-runtime.ts';
 import {
   createServer,
@@ -152,6 +159,9 @@ export interface BootServerOptions
     | 'ephemeral'
     | 'configHomedirOverride'
     | 'acpRegistryFetchImpl'
+    | 'watcherBackend'
+    | 'watcherClock'
+    | 'freshnessIntervalMs'
   > {
   config: Config;
   skipAutoInit?: boolean;
@@ -174,9 +184,13 @@ export interface BootServerOptions
 
 export type ServerExitReason = 'external-signal' | 'idle-shutdown' | 'parent-exit' | 'unspecified';
 
+export interface ServerExitDetail {
+  signal?: NodeJS.Signals;
+}
+
 export interface BootedServer {
   httpServer: HttpServer;
-  destroy: (reason?: ServerExitReason) => Promise<void>;
+  destroy: (reason?: ServerExitReason, detail?: ServerExitDetail) => Promise<void>;
   lockDir: string;
   contentDir: string;
   port: number;
@@ -195,10 +209,12 @@ export async function bootServer(opts: BootServerOptions): Promise<BootedServer>
   startBootTimings();
 
   const sinkProjectDir = opts.projectDir ?? opts.contentDir;
+  const projectLogsDir = okProjectLogsDir(sinkProjectDir);
   const localSinkConfig = resolveLocalSinkConfig({
     projectDir: sinkProjectDir,
   });
   if (localSinkConfig) {
+    prepareProjectLogsDir(sinkProjectDir, { authorityRegistryPath: opts.authorityRegistryPath });
     const denylist = localSinkConfig.telemetry.attributeDenylist;
     const redactPaths: string[] = [];
     for (const key of denylist) {
@@ -228,7 +244,9 @@ export async function bootServer(opts: BootServerOptions): Promise<BootedServer>
 
   const startupTraceparent = process.env.OK_STARTUP_TRACEPARENT;
   const bootSpan = () =>
-    withSpan('ok.boot', { attributes: spanAttributes }, async () => bootServerInner(opts));
+    withSpan('ok.boot', { attributes: spanAttributes }, async () =>
+      bootServerInner(opts, projectLogsDir),
+    );
   const runBoot = (): Promise<BootedServer> => {
     if (startupTraceparent) {
       try {
@@ -250,9 +268,9 @@ export async function bootServer(opts: BootServerOptions): Promise<BootedServer>
     throw err;
   }
   const innerDestroy = booted.destroy;
-  booted.destroy = async (reason) => {
+  booted.destroy = async (reason, detail) => {
     try {
-      await innerDestroy(reason);
+      await innerDestroy(reason, detail);
     } finally {
       crashCapture.uninstall();
     }
@@ -260,7 +278,10 @@ export async function bootServer(opts: BootServerOptions): Promise<BootedServer>
   return booted;
 }
 
-async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
+async function bootServerInner(
+  opts: BootServerOptions,
+  projectLogsDir: string,
+): Promise<BootedServer> {
   const skipAutoInit = opts.skipAutoInit ?? false;
   const log = opts.log ?? getLogger('boot');
 
@@ -336,7 +357,7 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
   if (!existsSync(gitignorePath)) {
     getLogger('boot').warn(
       { path: gitignorePath },
-      `Note: ${OK_DIR}/.gitignore is missing — per-machine state files in ${OK_DIR}/ may show up as untracked changes. Run \`ok init\` to add the recommended ignore entries.`,
+      `Note: ${OK_DIR}/.gitignore is missing — per-machine state files in ${OK_DIR}/ may show up as untracked changes. Run \`${currentCliCommandName()} init\` to add the recommended ignore entries.`,
     );
   }
 
@@ -344,18 +365,21 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
   try {
     if (opts.gitEnabled !== false) preflight();
   } catch (err) {
-    if (err instanceof GitNotAvailableError || err instanceof GitTooOldError) {
-      const detectedVersion = err instanceof GitTooOldError ? err.detected : '';
-      const reason = err instanceof GitTooOldError ? 'too_old' : 'not_available';
+    if (
+      err instanceof GitNotAvailableError ||
+      err instanceof GitProbeTimeoutError ||
+      err instanceof GitTooOldError
+    ) {
+      const failure = describeGitPreflightFailure(err);
       emitPreflightFailureSpan(err);
       log.warn(
         {
           event: 'git_preflight_fail',
           platform: err.platform,
-          reason,
-          detectedVersion,
+          reason: failure.reason,
+          detectedVersion: failure.detectedVersion,
         },
-        reason === 'not_available' ? 'git binary not found' : 'git binary too old',
+        failure.logMessage,
       );
       process.stderr.write(`${err.message}\n`);
     }
@@ -411,6 +435,9 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
     singleDocRelPath: opts.singleDocRelPath,
     ephemeral: opts.ephemeral,
     configHomedirOverride: opts.configHomedirOverride,
+    watcherBackend: opts.watcherBackend,
+    watcherClock: opts.watcherClock,
+    freshnessIntervalMs: opts.freshnessIntervalMs,
   });
 
   const {
@@ -467,6 +494,7 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
         gzip: true,
         etag: true,
         dev: true,
+        setHeaders: createShellHeaderSetter(opts.reactShellDistDir),
       })
     : undefined;
 
@@ -480,7 +508,7 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
         permissions: serverInstance.acpPermissions,
         sessionManager,
         agentPresenceBroadcaster,
-        resolveEmbed: serverInstance.resolveEmbed,
+        localApi: serverInstance.localApi,
         isExcludedPath: (rel) => serverInstance.contentFilter.isExcluded(rel),
         isIgnoredPath: (rel) => serverInstance.contentFilter.isPathIgnored(rel),
         getLoadedDocText: (docName) =>
@@ -541,30 +569,13 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
     acpThreadManager,
   });
 
-  let destroy: (reason?: ServerExitReason) => Promise<void> = async () => {
+  let destroy: BootedServer['destroy'] = async () => {
     throw new Error('bootServer: destroy() invoked before initialization — boot did not complete');
   };
 
   collabClientCounter = attachCollabClientCounter(httpServer);
 
   let idleHandle: IdleShutdownHandle | null = null;
-  if (opts.idleShutdownMs !== null) {
-    const idleMs = opts.idleShutdownMs ?? DEFAULT_IDLE_THRESHOLD_MS;
-    const idleHandler =
-      opts.idleShutdownHandler ??
-      ((destroyFn) => async () => {
-        await destroyFn();
-      });
-    idleHandle = attachIdleShutdown({
-      httpServer,
-      counter: collabClientCounter,
-      thresholdMs: idleMs,
-      log,
-      onShutdown: idleHandler(async () => {
-        await destroy('idle-shutdown');
-      }),
-    });
-  }
 
   const listenAddresses = [...new Set(effectiveBindAddresses)];
   const primaryAddress = listenAddresses[0];
@@ -693,10 +704,23 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
       if (timer !== undefined) clearTimeout(timer);
     }
   };
-  destroy = async (reason: ServerExitReason = 'unspecified'): Promise<void> => {
+  destroy = async (
+    reason: ServerExitReason = 'unspecified',
+    detail: ServerExitDetail = {},
+  ): Promise<void> => {
     if (destroyed) return;
     destroyed = true;
-    log.info({ reason, pid: process.pid, lockDir }, `[server] shutdown initiated (${reason})`);
+    try {
+      const directory = lstatSync(projectLogsDir);
+      if (directory.isDirectory() && !directory.isSymbolicLink()) {
+        const now = new Date();
+        tracedUtimesSync(projectLogsDir, now, now);
+      }
+    } catch {}
+    log.info(
+      { reason, signal: detail.signal ?? null, pid: process.pid, lockDir },
+      `[server] shutdown initiated (${reason})`,
+    );
     readinessState = 'draining';
     const errors: unknown[] = [];
     const runStep = async (
@@ -786,7 +810,8 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
     const m = await migrateStoreSkillsInPlace({
       projectDir,
       skillsRoot: resolve(opts.contentDir, OK_DIR, SKILLS_STORE_DIRNAME),
-      inPlaceNames: genuineInPlaceNames(opts.contentDir, scanInPlaceSkills(opts.contentDir)),
+      inPlaceNames: async () =>
+        genuineInPlaceNames(opts.contentDir, scanInPlaceSkills(opts.contentDir)),
     });
     if (m.migrated.length + m.skipped.length > 0) {
       log.info?.(
@@ -811,7 +836,7 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
       projectDir: home,
       skillsRoot: resolve(home, OK_DIR, SKILLS_STORE_DIRNAME),
       hostRoots: USER_HOST_ROOTS_BY_PRECEDENCE,
-      inPlaceNames: genuineInPlaceNames(home, scanGlobalInPlaceSkills(home)),
+      inPlaceNames: async () => genuineInPlaceNames(home, await scanGlobalInPlaceSkillsAsync(home)),
     });
     if (gm.migrated.length + gm.skipped.length > 0) {
       log.info?.(
@@ -828,6 +853,24 @@ async function bootServerInner(opts: BootServerOptions): Promise<BootedServer> {
       { err, event: 'global-store-skill-migration-failed' },
       'Global store-skill in-place migration failed (non-fatal).',
     );
+  }
+
+  if (opts.idleShutdownMs !== null) {
+    const idleMs = opts.idleShutdownMs ?? DEFAULT_IDLE_THRESHOLD_MS;
+    const idleHandler =
+      opts.idleShutdownHandler ??
+      ((destroyFn) => async () => {
+        await destroyFn();
+      });
+    idleHandle = attachIdleShutdown({
+      httpServer,
+      counter: collabClientCounter,
+      thresholdMs: idleMs,
+      log,
+      onShutdown: idleHandler(async () => {
+        await destroy('idle-shutdown');
+      }),
+    });
   }
 
   return {

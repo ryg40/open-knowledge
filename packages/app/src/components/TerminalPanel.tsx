@@ -3,10 +3,13 @@ import '@xterm/xterm/css/xterm.css';
 import {
   assertNeverPtyAdoptReason,
   assertNeverPtyCreateReason,
+  assetOpenRefusalRevealsInstead,
 } from '@inkeep/open-knowledge-core/desktop-bridge';
 import {
-  buildCliLaunchArgString,
+  BRACKETED_PASTE_ENABLE_MARKER,
+  buildPosixCliLaunch,
   buildStartupInjectionBytes,
+  buildTerminalInputBytes,
   buildWindowsCliLaunch,
   quoteWindowsShellPath,
   shellSingleQuote,
@@ -25,6 +28,7 @@ import { useTheme } from 'next-themes';
 import { use, useEffect, useRef, useState } from 'react';
 import { ConfigContext } from '@/lib/config-context';
 import type { OkDesktopBridge, OkPtyNotice } from '@/lib/desktop-bridge-types';
+import { revealEditor } from '@/lib/reveal-editor';
 import { cn } from '@/lib/utils';
 import { getPageListCache } from '../editor/page-list-cache';
 import { filePathToDocName, hashFromDocName, hashFromFolderPath } from '../lib/doc-hash';
@@ -35,6 +39,7 @@ import {
   terminalCommandFor,
   windowsTerminalCommandFor,
 } from './handoff/terminal-command-events';
+import { registerBracketedPasteProbe } from './handoff/terminal-paste-mode';
 import { TerminalAgentConnectionBanner } from './TerminalAgentConnectionBanner';
 import { TerminalCliMissingBanner } from './TerminalCliMissingBanner';
 import { TerminalCliUnverifiedBanner } from './TerminalCliUnverifiedBanner';
@@ -54,6 +59,7 @@ import { useLiveXtermTheme } from './use-live-xterm-theme';
 const PTY_RESIZE_THROTTLE_MS = 100;
 
 export const STAGE_PASTE_SETTLE_MS = 500;
+export const STAGE_PASTE_CAP_MS = 4000;
 
 interface TerminalPanelProps {
   readonly bridge: OkDesktopBridge;
@@ -89,7 +95,6 @@ export function TerminalPanel({
       style={{ backgroundColor: xtermTheme.background }}
       className={cn('relative flex h-full w-full flex-col overflow-hidden', className)}
     >
-      {}
       <div className="relative min-h-0 flex-1">
         <TerminalSession
           key={restartKey}
@@ -196,6 +201,19 @@ function TerminalSession({
     let pendingShellNotices: OkPtyNotice[] = [];
     let launchCapabilityLimited = false;
     let readinessScan: ((data: string) => void) | undefined;
+    const armReadinessScan = (marker: string, onReady: () => void): void => {
+      let acc = '';
+      readinessScan = (data) => {
+        acc += data;
+        if (acc.includes(marker)) {
+          readinessScan = undefined;
+          onReady();
+          return;
+        }
+        if (acc.length > marker.length + 256) acc = acc.slice(-(marker.length + 256));
+      };
+    };
+    let unregisterPasteProbe: () => void = () => undefined;
     let injectCapTimer: ReturnType<typeof setTimeout> | undefined;
     let titleDisposable: { dispose(): void } | undefined;
     let linkProviderDisposable: { dispose(): void } | undefined;
@@ -268,9 +286,11 @@ function TerminalSession({
     const activateFileLink = (target: TerminalLinkTarget) => {
       switch (target.kind) {
         case 'doc':
+          revealEditor();
           window.location.hash = hashFromDocName(filePathToDocName(target.relPath));
           return;
         case 'folder':
+          revealEditor();
           window.location.hash = hashFromFolderPath(target.relPath);
           return;
         case 'external':
@@ -283,7 +303,7 @@ function TerminalSession({
             .openAsset(target.relPath)
             .then((result) => {
               if (result.ok) return;
-              if (result.reason === 'extension-blocked') {
+              if (assetOpenRefusalRevealsInstead(result.reason)) {
                 void bridge.shell
                   .revealAsset(target.relPath)
                   .catch((err) => console.warn('[terminal] revealAsset failed:', err));
@@ -377,7 +397,17 @@ function TerminalSession({
       if (cancelled || sessionEnded || terminalInputEnabledRef.current) return;
       terminalInputEnabledRef.current = true;
       setStatus('running');
-      term.focus();
+      const active = document.activeElement;
+      const sessionHost = term.element?.closest('[data-session-id]') ?? term.element;
+      const focusUnclaimed =
+        active === null || active === document.body || sessionHost?.contains(active) === true;
+      const hostRect = sessionHost?.getBoundingClientRect();
+      const hostOnScreen =
+        sessionHost?.closest('[inert]') == null &&
+        hostRect !== undefined &&
+        hostRect.width > 0 &&
+        hostRect.height > 0;
+      if (focusUnclaimed || hostOnScreen) term.focus();
     };
 
     term.attachCustomKeyEventHandler((event) => {
@@ -502,6 +532,11 @@ function TerminalSession({
     const attachSession = (livePtyId: string): void => {
       ptyId = livePtyId;
       ptyIdRef.current = livePtyId;
+      unregisterPasteProbe();
+      unregisterPasteProbe = registerBracketedPasteProbe(
+        livePtyId,
+        () => term.modes.bracketedPasteMode,
+      );
       onPtyIdRef.current?.(livePtyId);
       for (const notice of pendingShellNotices) {
         if (notice.ptyId !== livePtyId) continue;
@@ -610,11 +645,11 @@ function TerminalSession({
 
     const resolveLaunchCommand = async (
       intent: TerminalCliLaunchIntent,
-    ): Promise<string | TerminalLaunchCommand | undefined> => {
-      const buildLaunch = (opts: Parameters<typeof buildCliLaunchArgString>[2]) =>
+    ): Promise<TerminalLaunchCommand | undefined> => {
+      const buildLaunch = (opts: Parameters<typeof buildPosixCliLaunch>[2]) =>
         bridge.platform === 'win32'
           ? buildWindowsCliLaunch(intent.cli, intent.prompt, opts)
-          : buildCliLaunchArgString(intent.cli, intent.prompt, opts);
+          : buildPosixCliLaunch(intent.cli, intent.prompt, opts);
       if (intent.cli === 'claude') {
         try {
           const fresh = await bridge.terminal.claudePreflight();
@@ -623,6 +658,7 @@ function TerminalSession({
             return buildLaunch({
               mcpPreApprove: fresh.mcpPreApprovable === true,
               mcpServerName: fresh.mcpServerName,
+              ...(bridge.cliCommandName ? { cliCommandName: bridge.cliCommandName } : {}),
               autoApproveOkTools:
                 autoApproveOkToolsRef.current && fresh.okToolsAutoApprovable === true,
             });
@@ -796,17 +832,10 @@ function TerminalSession({
         };
         injectCapTimer = setTimeout(inject, cfg?.capMs ?? settleMs);
         if (marker != null) {
-          let acc = '';
-          readinessScan = (data) => {
+          armReadinessScan(marker, () => {
             if (fired || stagePasteTimer !== undefined) return;
-            acc += data;
-            if (acc.includes(marker)) {
-              readinessScan = undefined;
-              stagePasteTimer = setTimeout(inject, settleMs);
-              return;
-            }
-            if (acc.length > marker.length + 256) acc = acc.slice(-(marker.length + 256));
-          };
+            stagePasteTimer = setTimeout(inject, settleMs);
+          });
         } else {
           stagePasteTimer = setTimeout(inject, settleMs);
         }
@@ -815,11 +844,22 @@ function TerminalSession({
           '[terminal] TerminalLaunchIntent carried both prompt and stagePaste; dropping stagePaste',
         );
       } else if (launchCommand !== undefined && staged != null && staged !== '') {
-        stagePasteTimer = setTimeout(() => {
+        let stageFired = false;
+        const stage = (): void => {
+          if (stageFired) return;
+          stageFired = true;
+          readinessScan = undefined;
+          if (stagePasteTimer !== undefined) clearTimeout(stagePasteTimer);
+          if (injectCapTimer !== undefined) clearTimeout(injectCapTimer);
           if (cancelled || !terminalInputEnabledRef.current || launchCapabilityLimited) return;
-          sendInput(staged);
+          sendInput(buildTerminalInputBytes(staged, term.modes.bracketedPasteMode));
           term.focus();
-        }, STAGE_PASTE_SETTLE_MS);
+        };
+        injectCapTimer = setTimeout(stage, STAGE_PASTE_CAP_MS);
+        armReadinessScan(BRACKETED_PASTE_ENABLE_MARKER, () => {
+          if (stageFired || stagePasteTimer !== undefined) return;
+          stagePasteTimer = setTimeout(stage, STAGE_PASTE_SETTLE_MS);
+        });
       }
     })().catch((err) => {
       console.error('[terminal] mount sequence failed:', err);
@@ -843,6 +883,7 @@ function TerminalSession({
       if (stagePasteTimer !== undefined) clearTimeout(stagePasteTimer);
       if (injectCapTimer !== undefined) clearTimeout(injectCapTimer);
       readinessScan = undefined;
+      unregisterPasteProbe();
       ptyIdRef.current = null;
       onPtyIdRef.current?.(null);
       termRef.current = null;
@@ -982,7 +1023,6 @@ function TerminalSession({
           </TerminalNoticeBanner>
         ) : null
       ) : null}
-      {}
       <div className="relative min-h-0 flex-1">
         <div
           ref={containerRef}

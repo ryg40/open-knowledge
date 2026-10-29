@@ -51,7 +51,7 @@ pnpm run dev
 
 ## Process safety
 
-Never signal a pid you did not spawn. Signal a held `ChildProcess` before it exits (its group only then); never a pid from a file, `ps` or stdout, a `?? <n>` fallback or literal `0`/`1`/`-1`. Gate: `ok/no-sentinel-signal-target`.
+Never signal a pid you did not spawn. Signal a held `ChildProcess` before it exits (its group only then); never a pid from a file, `ps` or stdout, a `?? <n>` fallback or literal `0`/`1`/`-1`. The one pid from a file you may signal is a `server.lock` pid at the two places that stop a server through its lock, `runStop` in the CLI and `terminateServerByPid` in the desktop app, and only after `assessLockHolder` confirms, immediately before each signal, that the process holding that pid is the one that wrote the lock. Two acts in the maintainers' gate tooling, which this repository does not carry, go further, and nothing else does: the lifeline watcher the guard of each gate step forks into the step's process group may run `kill -s KILL 0`, which ends the group it belongs to; and after the step's first process exits, its supervisor may still signal the step's group while that lifeline, a live member, holds the group. Gate: `ok/no-sentinel-signal-target`.
 
 ## Comment policy
 
@@ -79,19 +79,20 @@ Shell scripts are declared in scope by `no-comments.config.jsonc`, but the sweep
 ## Public Mirror Rules
 
 - This repo is generated from an allowlist. Do not rely on hidden source-only folders being present.
-- Public PRs are reviewed by maintainers and accepted changes sync back here automatically. A PR may close rather than show as merged; that is expected for this mirror.
+- Do not open pull requests here. Report bugs and feature requests as detailed issues using `CONTRIBUTING.md`. Maintainers publish changes through the mirror; its sync pull requests are automation.
 - Top-level public docs such as `README.md`, `CONTRIBUTING.md`, and `AGENTS.md` are overlay files. Keep them public-safe and standalone.
 - Do not add secrets, private customer context, internal-only specs, local paths, or generated debug artifacts.
 - Keep dependency updates paired with `pnpm-lock.yaml`. Run `pnpm run notices` when third-party notices may change.
 
 ## Changesets
 
-Every behavior-changing PR ships a `.changeset/<kebab-name>.md` file. The body becomes the user-facing entry on the next beta's GitHub Release and on the aggregated stable Release notes — that's how npm consumers and desktop auto-update users learn what changed. Write release-note copy, not a commit-message reprise.
+Every behavior-changing PR ships a `.changeset/<kebab-name>.md` file. The body becomes the user-facing entry on the next beta's GitHub Release and on the stable Release notes — that's how npm consumers and desktop auto-update users learn what changed. Write release-note copy, not a commit-message reprise.
 
 - Create one with `pnpm run changeset`, or hand-write a file named `.changeset/<descriptive-kebab-slug>.md`.
+- Use a name no shipped changeset has used. A stable that carried the name counts it as released, so the new notes would never appear; the PR check refuses the file and asks for a rename.
 - Front-matter: at minimum `'@inkeep/open-knowledge': patch`. OpenKnowledge follows semver with a **pre-1.0 shift-down**: while we're below `1.0.0`, what semver would call a major (breaking API change) is encoded as `minor`, and what semver would call a minor (new feature) is encoded as `patch`. Most changesets are `patch`. `minor` is rare — reserve it for large API contract changes or large feature additions. **Never declare `major` pre-1.0** (see the `"//"` line in `.changeset/config.json`).
 
-**Changelog authoring and review.** Use one short sentence for the user-visible outcome; a second only for a necessary qualification or upgrade action. Maximum 50 words per changeset body, across all paragraphs and bullets. Omit implementation details, internal identifiers and exhaustive edge cases; link migration instructions. Reviewers check accuracy, required actions and brevity; request technical detail in docs. Never split one explanation across changesets to evade the budget.
+**Changelog authoring and review.** Use one short sentence for the user-visible outcome; a second only for a necessary qualification or upgrade action. Maximum 50 words per changeset body, across paragraphs and bullets. Omit implementation details, internal identifiers and exhaustive edge cases; link migration instructions. Reviewers check accuracy, required actions and brevity; request technical detail in docs. Never split one explanation across changesets to evade the budget.
 
 - Don't write inline references to sibling-package versions (e.g. `@inkeep/open-knowledge-core@0.5.0-beta.6`) — the fixed-group lock-step bumps are computed at release time and any number you'd write would be wrong.
 - Skip changesets for docs-only edits, test-only edits, or CI-only edits that don't change runtime behavior.

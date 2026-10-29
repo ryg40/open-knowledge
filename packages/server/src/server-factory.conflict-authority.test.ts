@@ -12,8 +12,9 @@ import {
   SyncConflictsSuccessSchema,
 } from '@inkeep/open-knowledge-core';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import * as Y from 'yjs';
+import { bootServer } from '../../../test-support/boot-server.test-helper.ts';
 import { configureTestGitRepository } from '../../../test-support/configure-git-fixture.test-helper.ts';
-import { bootServer } from './boot.ts';
 import { ConfigSchema } from './config/schema.ts';
 import * as headWatcher from './head-watcher.ts';
 import type { ServerInstance } from './server-factory.ts';
@@ -89,17 +90,39 @@ async function listConflictFiles(port: number): Promise<string[]> {
   return data.conflicts.map((c) => c.file);
 }
 
-async function writeDocProbe(port: number, docName: string, markdown: string): Promise<number> {
+interface ProbeAnswer {
+  status: number;
+  outcome: unknown;
+}
+
+async function writeDocProbe(
+  port: number,
+  docName: string,
+  markdown: string,
+): Promise<ProbeAnswer> {
   const res = await fetch(`http://127.0.0.1:${port}/api/agent-write-md`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ docName, markdown, position: 'replace', agentId: 'probe' }),
   });
-  return res.status;
+  const body = (await res.json()) as { outcome?: unknown };
+  return { status: res.status, outcome: body.outcome };
 }
 
-async function writeProbe(port: number, markdown: string): Promise<number> {
+async function writeProbe(port: number, markdown: string): Promise<ProbeAnswer> {
   return writeDocProbe(port, DOC_NAME, markdown);
+}
+
+function expectAdmitted(answer: ProbeAnswer): void {
+  expect(answer).toEqual(
+    answer.status === 503
+      ? { status: 503, outcome: 'projection-held' }
+      : { status: 200, outcome: 'applied' },
+  );
+}
+
+function expectRefusedByConflict(answer: ProbeAnswer): void {
+  expect(answer).toEqual({ status: 409, outcome: 'refused' });
 }
 
 async function resolveConflictOverHttp(
@@ -242,7 +265,7 @@ describe('PRD-8318: a merge-native conflict resolved with raw git unfreezes the 
           20_000,
           'the seeded merge-native entry to be listed',
         );
-        expect(await writeProbe(held.port, '# blocked\n')).toBe(409);
+        expectRefusedByConflict(await writeProbe(held.port, '# blocked\n'));
 
         const opts = { cwd: tmpDir };
         await checkoutOurs(held.port, replacement);
@@ -265,7 +288,8 @@ describe('PRD-8318: a merge-native conflict resolved with raw git unfreezes the 
           'the conflict ledger to empty after the external resolve',
         );
 
-        expect(await writeProbe(held.port, '# probe\n')).toBe(200);
+        expectAdmitted(await writeProbe(held.port, '# probe\n'));
+        expect(await held.readSource()).toContain('# probe');
       } finally {
         await held.release();
         await held.destroy();
@@ -282,7 +306,7 @@ describe('PRD-8318: a merge-native conflict resolved with raw git unfreezes the 
         20_000,
         'the seeded merge-native entry to be listed',
       );
-      expect(await writeProbe(held.port, '# blocked\n')).toBe(409);
+      expectRefusedByConflict(await writeProbe(held.port, '# blocked\n'));
 
       writeFileSync(resolve(tmpDir, DOC_FILE), 'line1\nLOCAL\nline3\n', 'utf-8');
 
@@ -303,7 +327,7 @@ describe('PRD-8318: a merge-native conflict resolved with raw git unfreezes the 
       );
       expect(stillUnmerged.stdout).toContain(DOC_FILE);
       expect(await listConflictFiles(held.port)).toContain(DOC_FILE);
-      expect(await writeProbe(held.port, '# still blocked\n')).toBe(409);
+      expectRefusedByConflict(await writeProbe(held.port, '# still blocked\n'));
 
       await execFileAsync('git', ['add', '--', DOC_FILE], opts);
       await execFileAsync('git', ['commit', '--no-edit'], opts);
@@ -315,7 +339,8 @@ describe('PRD-8318: a merge-native conflict resolved with raw git unfreezes the 
       );
 
       expect(existsSync(resolve(tmpDir, '.git', 'MERGE_HEAD'))).toBe(false);
-      expect(await writeProbe(held.port, '# probe\n')).toBe(200);
+      expectAdmitted(await writeProbe(held.port, '# probe\n'));
+      expect(await held.readSource()).toContain('# probe');
     } finally {
       await held.release();
       await held.destroy();
@@ -353,7 +378,8 @@ describe('PRD-8318: a merge-native conflict resolved with raw git unfreezes the 
         );
 
         expect(existsSync(resolve(tmpDir, '.git', 'MERGE_HEAD'))).toBe(true);
-        expect(await writeProbe(held.port, '# probe\n')).toBe(200);
+        expectAdmitted(await writeProbe(held.port, '# probe\n'));
+        expect(await held.readSource()).toContain('# probe');
       } finally {
         await held.release();
         await held.destroy();
@@ -479,7 +505,7 @@ describe('PRD-8318: a merge-native conflict resolved with raw git unfreezes the 
         'the initial file-watcher scan to index the scratch doc',
       );
 
-      expect(await writeDocProbe(held.port, SCRATCH_DOC, `# ${CONTROL_MARKER}\n`)).toBe(200);
+      expectAdmitted(await writeDocProbe(held.port, SCRATCH_DOC, `# ${CONTROL_MARKER}\n`));
       await pollUntil(
         () => readScratch().includes(CONTROL_MARKER),
         30_000,
@@ -493,7 +519,23 @@ describe('PRD-8318: a merge-native conflict resolved with raw git unfreezes the 
       });
 
       held.serverInstance.durabilityState.setBatchInProgress(true);
-      expect(await writeDocProbe(held.port, SCRATCH_DOC, `# ${DEFERRED_MARKER}\n`)).toBe(200);
+      const scratch = await held.serverInstance.hocuspocus.openDirectConnection(SCRATCH_DOC);
+      try {
+        await scratch.transact((doc) => {
+          const paragraph = new Y.XmlElement('paragraph');
+          paragraph.insert(0, [new Y.XmlText(DEFERRED_MARKER)]);
+          doc.getXmlFragment('default').push([paragraph]);
+        });
+        const debounceId = `onStoreDocument-${SCRATCH_DOC}`;
+        await pollUntil(
+          () => held.serverInstance.hocuspocus.debouncer.isDebounced(debounceId),
+          15_000,
+          'the edit to schedule a store',
+        );
+        await held.serverInstance.hocuspocus.debouncer.executeNow(debounceId);
+      } finally {
+        await scratch.disconnect();
+      }
       expect(readScratch()).toContain(CONTROL_MARKER);
       expect(readScratch()).not.toContain(DEFERRED_MARKER);
 

@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 import type { MessageDescriptor } from '@lingui/core';
 import { msg } from '@lingui/core/macro';
 import { Trans, useLingui } from '@lingui/react/macro';
@@ -414,7 +415,7 @@ export function CloneDialog({
                           </div>
                         ) : (
                           suggestions.map((repo, i) => (
-                            // biome-ignore lint/a11y/useKeyWithClickEvents: WAI-ARIA combobox pattern — keyboard is handled on the input (Arrow/Enter via handleComboKeyDown) and routed to the highlighted option through aria-activedescendant; per-option key handlers would double-fire.
+                            // oxlint-disable-next-line jsx-a11y/click-events-have-key-events -- WAI-ARIA combobox pattern — keyboard is handled on the input (Arrow/Enter via handleComboKeyDown) and routed to the highlighted option through aria-activedescendant; per-option key handlers would double-fire.
                             <div
                               key={repo.full_name}
                               id={`${listboxId}-opt-${i}`}

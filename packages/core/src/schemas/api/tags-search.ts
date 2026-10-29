@@ -1,12 +1,20 @@
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { z } from 'zod';
 import { MANAGED_ARTIFACT_SCOPES } from '../../constants/cc1.ts';
+import { topLevelFrontmatterRecord } from '../../frontmatter/schema.ts';
 import {
   SkillTargetEditorSchema,
   SkillUserTargetEditorSchema,
 } from '../../skill-targets/schema.ts';
 import { SkillCostTiersSchema } from '../../skills-catalog/skill-cost.ts';
-import { agentIdentityFields, summaryField } from './_shared.ts';
+import { isMarkdownSkillFilePath } from '../../util/skill-file-path.ts';
+import {
+  agentContentField,
+  agentIdentityFields,
+  checkAgentContent,
+  summaryField,
+} from './_shared.ts';
+import { agentWriteOutcomeWireFields } from './agent-write-outcome.ts';
 
 export const TagSummaryEntrySchema = z
   .object({
@@ -70,7 +78,7 @@ export type FolderConfigGetSuccess = z.infer<typeof FolderConfigGetSuccessSchema
 export const FolderConfigPutRequestSchema = z
   .object({
     path: z.string(),
-    frontmatter: z.record(z.string(), z.unknown()).optional(),
+    frontmatter: topLevelFrontmatterRecord(z.unknown()).optional(),
   })
   .loose() satisfies StandardSchemaV1;
 export type FolderConfigPutRequest = z.infer<typeof FolderConfigPutRequestSchema>;
@@ -129,7 +137,7 @@ export const TemplatePutRequestSchema = z
   .object({
     folder: z.string(),
     name: z.string(),
-    body: z.string().optional(),
+    body: agentContentField.optional(),
     frontmatter: TemplateFrontmatterSchema.optional(),
     ...agentIdentityFields,
     summary: summaryField,
@@ -139,6 +147,7 @@ export type TemplatePutRequest = z.infer<typeof TemplatePutRequestSchema>;
 
 export const TemplatePutSuccessSchema = z
   .object({
+    ...agentWriteOutcomeWireFields,
     path: z.string().min(1),
     created: z.boolean(),
     warnings: z.array(z.string()),
@@ -161,6 +170,7 @@ export type TemplateImportRequest = z.infer<typeof TemplateImportRequestSchema>;
 
 export const TemplateImportSuccessSchema = z
   .object({
+    ...agentWriteOutcomeWireFields,
     path: z.string().min(1),
     created: z.boolean(),
     warnings: z.array(z.string()),
@@ -182,7 +192,7 @@ export const TemplateMoveRequestSchema = z
     fromName: z.string(),
     toFolder: z.string(),
     toName: z.string(),
-    body: z.string().optional(),
+    body: agentContentField.optional(),
     frontmatter: TemplateFrontmatterSchema.optional(),
     ...agentIdentityFields,
     summary: summaryField,
@@ -209,7 +219,32 @@ export function containsXmlTag(s: string): boolean {
   return XML_TAG_REGEX.test(s);
 }
 
-export const TEMPLATE_NAME_REGEX = /^[A-Za-z0-9_-]+$/;
+export const TEMPLATE_NAME_REGEX = /^(?:(?!\p{DI})[\p{L}\p{M}\p{N}_-])+$/u;
+
+export const TEMPLATE_NAME_RULE =
+  'letters and digits in any script, `_` or `-` only (no spaces, dots, slashes or invisible characters)';
+
+export function canonicalTemplateName(name: string): string {
+  return name.normalize('NFC');
+}
+
+export function templateRenameTarget(storedName: string, draft: string): string | null {
+  const trimmed = draft.trim();
+  if (trimmed === storedName) return null;
+  const target = canonicalTemplateName(trimmed);
+  return target === storedName ? null : target;
+}
+
+export function findTemplateByName<T extends { name: string }>(
+  templates: readonly T[],
+  requested: string,
+): T | undefined {
+  const key = canonicalTemplateName(requested);
+  return (
+    templates.find((t) => t.name === requested) ??
+    templates.find((t) => canonicalTemplateName(t.name) === key)
+  );
+}
 
 export const SkillFrontmatterSchema = z
   .object({
@@ -347,7 +382,7 @@ export const SkillPutRequestSchema = z
   .object({
     scope: SkillScopeSchema.default('project'),
     name: z.string().meta({ description: 'Managed skill name to create or update.' }),
-    body: z.string().optional(),
+    body: agentContentField.optional(),
     frontmatter: SkillFrontmatterSchema,
     ...agentIdentityFields,
     summary: summaryField,
@@ -367,6 +402,7 @@ const authoringWarningCodesField = z.array(z.enum(SKILL_AUTHORING_WARNING_CODES)
 
 export const SkillPutSuccessSchema = z
   .object({
+    ...agentWriteOutcomeWireFields,
     path: z.string().min(1),
     created: z.boolean(),
     warnings: z.array(z.string()),
@@ -443,7 +479,7 @@ export const SkillMoveRequestSchema = z
     scope: SkillScopeSchema.default('project'),
     fromName: z.string(),
     toName: z.string(),
-    body: z.string().optional(),
+    body: agentContentField.optional(),
     frontmatter: SkillFrontmatterSchema.optional(),
     ...agentIdentityFields,
     summary: summaryField,
@@ -652,11 +688,17 @@ export const SkillFilePutRequestSchema = z
     ...agentIdentityFields,
     summary: summaryField,
   })
-  .strict() satisfies StandardSchemaV1;
+  .strict()
+  .superRefine((value, context) => {
+    if (isMarkdownSkillFilePath(value.path)) {
+      checkAgentContent(value.content, context, ['content']);
+    }
+  }) satisfies StandardSchemaV1;
 export type SkillFilePutRequest = z.infer<typeof SkillFilePutRequestSchema>;
 
 export const SkillFilePutSuccessSchema = z
   .object({
+    ...agentWriteOutcomeWireFields,
     path: z.string().min(1),
     created: z.boolean(),
     kind: SkillFileKindSchema,

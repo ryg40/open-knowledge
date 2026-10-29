@@ -226,14 +226,12 @@ export class ProviderPool {
   private readonly clearDataTimeoutMs: number;
   private flushOnHideEnabled = true;
   private readonly unsyncedWorkListeners = new Set<() => void>();
+  private replaysInFlight = 0;
   private onChange: PoolChangeCallback | null = null;
   private tabIdentity: { principalId: string; tabSessionId: string } | null = null;
   private serverRestartRecoveryState: ServerRestartRecoveryState = IDLE_SERVER_RESTART_RECOVERY;
   private cachedServerInstanceId: string | null = null;
-  private pendingServerInstanceKnown: {
-    promise: Promise<string>;
-    resolve: (id: string) => void;
-  } | null = null;
+  private pendingServerInstanceKnown: PromiseWithResolvers<string> | null = null;
   private recoveryMismatchStaleClaim: string | undefined;
   private readonly handledStaleClaims = new Set<string>();
   private readonly bufferedUpdates = new Map<string, BufferedReplayUpdate>();
@@ -319,12 +317,8 @@ export class ProviderPool {
     if (this.pendingServerInstanceKnown !== null) {
       return this.pendingServerInstanceKnown.promise;
     }
-    let resolve!: (id: string) => void;
-    const promise = new Promise<string>((res) => {
-      resolve = res;
-    });
-    this.pendingServerInstanceKnown = { promise, resolve };
-    return promise;
+    this.pendingServerInstanceKnown = Promise.withResolvers<string>();
+    return this.pendingServerInstanceKnown.promise;
   }
 
   private buildPersistence(
@@ -1348,14 +1342,20 @@ export class ProviderPool {
     };
     const onSyncedReplay = (): void => {
       provider.off('synced', onSyncedReplay);
-      void runReplay().catch((err: unknown) => {
-        this.emitStructuredClientRecoveryEvent({
-          event: 'ok-buffer-replay-unexpected-error',
-          ...this.recoveryTelemetryBase(docName),
-          errorName: err instanceof Error ? err.name : 'non-error-throw',
-          errorMessage: err instanceof Error ? err.message : String(err),
+      this.replaysInFlight += 1;
+      void runReplay()
+        .catch((err: unknown) => {
+          this.emitStructuredClientRecoveryEvent({
+            event: 'ok-buffer-replay-unexpected-error',
+            ...this.recoveryTelemetryBase(docName),
+            errorName: err instanceof Error ? err.name : 'non-error-throw',
+            errorMessage: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => {
+          this.replaysInFlight -= 1;
+          this.emitUnsyncedWork();
         });
-      });
     };
     provider.on('synced', onSyncedReplay);
 
@@ -1765,12 +1765,11 @@ export class ProviderPool {
     if (inFlight !== undefined) {
       return inFlight;
     }
-    let resolveWork: () => void = () => {};
-    let rejectWork: (err: unknown) => void = () => {};
-    const work = new Promise<void>((resolve, reject) => {
-      resolveWork = resolve;
-      rejectWork = reject;
-    });
+    const {
+      promise: work,
+      resolve: resolveWork,
+      reject: rejectWork,
+    } = Promise.withResolvers<void>();
     this.pendingClears.set(docName, work);
     const finalize = () => {
       if (this.pendingClears.get(docName) === work) {
@@ -1842,7 +1841,9 @@ export class ProviderPool {
   private discardBufferedUpdate(docName: string): void {
     const buffered = this.bufferedUpdates.get(docName);
     this.bufferedUpdates.delete(docName);
-    if (buffered === undefined || !buffered.durable) return;
+    if (buffered === undefined) return;
+    this.emitUnsyncedWork();
+    if (!buffered.durable) return;
     void consumeReplayOutboxEntry({
       branch: buffered.branch,
       docName,
@@ -1950,6 +1951,34 @@ export class ProviderPool {
       if (entry.kind === 'active' && entry.provider.unsyncedChanges > 0) return true;
     }
     return false;
+  }
+
+  hasUnsavedWork(): boolean {
+    return this.hasAnyUnsyncedWork() || this.hasPendingReplay();
+  }
+
+  hasPendingReplay(): boolean {
+    if (this.replaysInFlight > 0) return true;
+    for (const buffered of this.bufferedUpdates.values()) {
+      if (!buffered.durable) return true;
+    }
+    return false;
+  }
+
+  openDocNames(): string[] {
+    const docNames: string[] = [];
+    for (const [docName, entry] of this._entries) {
+      if (entry.kind === 'active') docNames.push(docName);
+    }
+    return docNames;
+  }
+
+  docNamesToOpenForReplay(): string[] {
+    const docNames: string[] = [];
+    for (const [docName, buffered] of this.bufferedUpdates) {
+      if (!buffered.durable && !this.entries.has(docName)) docNames.push(docName);
+    }
+    return docNames;
   }
 
   addUnsyncedWorkListener(cb: () => void): () => void {

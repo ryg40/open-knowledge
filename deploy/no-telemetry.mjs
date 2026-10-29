@@ -52,7 +52,10 @@ const layers = [
     make: true,
   },
 ];
-const recordDirectories = ['telemetry', 'logs', 'loss-capture'].map((name) => join(local, name));
+const recordDirectories = [
+  ...['telemetry', 'logs', 'loss-capture'].map((name) => join(local, name)),
+  join(user, 'logs', 'projects'),
+];
 const recordFiles = [
   { directory: local, name: /^tolerance-telemetry.*\.jsonl$/ },
   { directory: user, name: /^skill-install-events.*\.jsonl$/ },

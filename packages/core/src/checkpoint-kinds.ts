@@ -2,6 +2,12 @@ const OK_CHECKPOINT_PREFIX = 'ok-checkpoint-v1: ';
 
 export type AutoConsolidationTrigger = 'dead-chain' | 'session-close' | 'boot' | 'ttl';
 
+const KEPT_LIVE_REASONS = ['check-failed', 'too-large', 'conflict-markers', 'no-base'] as const;
+type KeptLiveReason = (typeof KEPT_LIVE_REASONS)[number];
+
+const NO_ENGINE_FILE_TYPES = ['mermaid', 'excalidraw', 'text', 'config'] as const;
+type NoEngineFileType = (typeof NO_ENGINE_FILE_TYPES)[number];
+
 export type ParsedCheckpoint =
   | {
       kind: 'bridge-merge-loss';
@@ -82,11 +88,41 @@ export type ParsedCheckpoint =
       metadata: { diskBytes: number; discardedBytes: number };
     }
   | {
+      kind: 'external-change-both-kept';
+      docName: string | null;
+      size: number | null;
+      metadata: { side: 'ours' | 'theirs'; keptBlocks: number };
+    }
+  | {
+      kind: 'external-change-kept-live';
+      docName: string | null;
+      size: number | null;
+      metadata: { side: 'ours' | 'theirs'; reason: KeptLiveReason };
+    }
+  | {
+      kind: 'external-change-no-engine';
+      docName: string | null;
+      size: number | null;
+      metadata: { side: 'ours' | 'theirs'; fileType: NoEngineFileType };
+    }
+  | {
       kind: 'auto-consolidation';
       docName: string | null;
       size: number | null;
       metadata: { foldedRefs: number; trigger: string };
     };
+
+function isMergeSide(value: unknown): value is 'ours' | 'theirs' {
+  return value === 'ours' || value === 'theirs';
+}
+
+function isKeptLiveReason(value: unknown): value is KeptLiveReason {
+  return (KEPT_LIVE_REASONS as readonly unknown[]).includes(value);
+}
+
+function isNoEngineFileType(value: unknown): value is NoEngineFileType {
+  return (NO_ENGINE_FILE_TYPES as readonly unknown[]).includes(value);
+}
 
 export function parseCheckpoint(body: string): ParsedCheckpoint | null {
   if (!body) return null;
@@ -269,6 +305,46 @@ export function parseCheckpoint(body: string): ParsedCheckpoint | null {
       }
       return null;
     }
+    if (kind === 'external-change-both-kept') {
+      const m = metadata as { side?: unknown; keptBlocks?: unknown };
+      if (
+        isMergeSide(m.side) &&
+        typeof m.keptBlocks === 'number' &&
+        Number.isFinite(m.keptBlocks)
+      ) {
+        return {
+          kind: 'external-change-both-kept',
+          docName,
+          size,
+          metadata: { side: m.side, keptBlocks: m.keptBlocks },
+        };
+      }
+      return null;
+    }
+    if (kind === 'external-change-kept-live') {
+      const m = metadata as { side?: unknown; reason?: unknown };
+      if (isMergeSide(m.side) && isKeptLiveReason(m.reason)) {
+        return {
+          kind: 'external-change-kept-live',
+          docName,
+          size,
+          metadata: { side: m.side, reason: m.reason },
+        };
+      }
+      return null;
+    }
+    if (kind === 'external-change-no-engine') {
+      const m = metadata as { side?: unknown; fileType?: unknown };
+      if (isMergeSide(m.side) && isNoEngineFileType(m.fileType)) {
+        return {
+          kind: 'external-change-no-engine',
+          docName,
+          size,
+          metadata: { side: m.side, fileType: m.fileType },
+        };
+      }
+      return null;
+    }
     if (kind === 'auto-consolidation') {
       const m = metadata as { foldedRefs?: unknown; trigger?: unknown };
       if (
@@ -401,6 +477,24 @@ export const CHECKPOINT_KIND_REGISTRY = {
     bundleExposure: 'metadata',
     chainAnchor: false,
   },
+  'external-change-both-kept': {
+    visibility: 'surfaced',
+    gcBucket: 'external-change-both-kept',
+    bundleExposure: 'metadata',
+    chainAnchor: false,
+  },
+  'external-change-kept-live': {
+    visibility: 'surfaced',
+    gcBucket: 'external-change-kept-live',
+    bundleExposure: 'metadata',
+    chainAnchor: false,
+  },
+  'external-change-no-engine': {
+    visibility: 'surfaced',
+    gcBucket: 'external-change-no-engine',
+    bundleExposure: 'metadata',
+    chainAnchor: false,
+  },
   'auto-consolidation': {
     visibility: 'hidden',
     gcBucket: 'auto-consolidation',
@@ -489,6 +583,24 @@ export const CHECKPOINT_SAMPLE_BY_KIND = {
     docName: '.ok/templates/daily',
     size: 12,
     metadata: { diskBytes: 41, discardedBytes: 66 },
+  },
+  'external-change-both-kept': {
+    kind: 'external-change-both-kept',
+    docName: 'notes',
+    size: 12,
+    metadata: { side: 'theirs', keptBlocks: 1 },
+  },
+  'external-change-kept-live': {
+    kind: 'external-change-kept-live',
+    docName: 'notes',
+    size: 12,
+    metadata: { side: 'theirs', reason: 'check-failed' },
+  },
+  'external-change-no-engine': {
+    kind: 'external-change-no-engine',
+    docName: 'flow.mmd',
+    size: 12,
+    metadata: { side: 'theirs', fileType: 'mermaid' },
   },
   'auto-consolidation': {
     kind: 'auto-consolidation',

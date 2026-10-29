@@ -117,9 +117,9 @@ Port, user ID and project name examples repeat values from the table. Review the
 
 | Fact | Value | Source |
 |---|---|---|
-| Portable release tag | `portable-v0.3.4` | Target release for this file. Not verified: the tag exists. `git tag --list 'portable-v*'` lists available tags. |
+| Portable release tag | `portable-v0.3.5` | Target release for this file. Not verified: the tag exists. `git tag --list 'portable-v*'` lists available tags. |
 | Portable version | `0.3.4` | The release tag without `portable-v` |
-| Upstream version | `0.83.2` | `ARG OK_VERSION` in `deploy/Dockerfile` |
+| Upstream version | `0.88.12` | `ARG OK_VERSION` in `deploy/Dockerfile` |
 | Image tag | `open-knowledge:<upstream version>-p<portable version>` | The "Release identity" format in `deploy/docs/deployment.md`, with this release's versions |
 | Base image | `node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20` | `ARG NODE_IMAGE` in `deploy/Dockerfile` |
 | Node.js in the base image | `v24.21.0` | `node --version` in the image |
@@ -131,7 +131,7 @@ Port, user ID and project name examples repeat values from the table. Review the
 | Dockerfile frontend image | `docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e` | The `# syntax=` line of `deploy/Dockerfile` |
 | Scanner image | `zricethezav/gitleaks:v8.28.0@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854` | `default_image=` in `scripts/tenant/scan.sh` |
 | npm tarball of the native addons | `open-knowledge-<upstream version>.tgz` from `registry.npmjs.org` | Stage `native` of `deploy/Dockerfile` |
-| Tarball sha512 | `sha512-SdAjilt0vHnGsMPhBBP0WyAWeQJ4FZl+uQX0VKCEx7v41/0PjL0VHLORzBmjZ3RwYPCzm4xNSFVG7E80on+Xdw==` | `ARG OK_NPM_INTEGRITY` in `deploy/Dockerfile` |
+| Tarball sha512 | `sha512-C1cz0Wp6dYRysz92o/TJr6FuNVk7itFC8WAoOBEqDzzpOBuHzfKM05LfrQI+qCVh6LVNRqbzgUYN4cLl3ehcYw==` | `ARG OK_NPM_INTEGRITY` in `deploy/Dockerfile` |
 | pnpm version | `12.8.1` | `packageManager` in `package.json` |
 | Port in the container | `8080` | `PORT` in `deploy/compose.yaml`, `EXPOSE` in `deploy/Dockerfile` |
 | Default published address and port | `127.0.0.1:8080` | `OK_PUBLISH_ADDRESS` and `OK_PUBLISH_PORT` in `deploy/compose.yaml` |
@@ -174,7 +174,7 @@ These commands give you a running container with the fewest steps. They skip ste
 1. Get the source and build the image.
 
    ```sh
-   RELEASE_TAG=portable-v0.3.4
+   RELEASE_TAG=portable-v0.3.5
    git clone --branch "$RELEASE_TAG" https://github.com/<organization>/<repository>.git open-knowledge
    cd open-knowledge
    UPSTREAM_VERSION=$(awk -F= '/^ARG OK_VERSION=/ { print $2; exit }' deploy/Dockerfile)
@@ -321,7 +321,7 @@ This step changes nothing on the machine.
 Clone the release repository at the release tag. The tag gives you one fixed commit of the branch `portable`.
 
 ```sh
-RELEASE_TAG=portable-v0.3.4
+RELEASE_TAG=portable-v0.3.5
 git clone --branch "$RELEASE_TAG" https://github.com/<organization>/<repository>.git open-knowledge
 cd open-knowledge
 git describe --tags

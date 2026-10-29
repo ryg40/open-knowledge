@@ -30,7 +30,10 @@ import { useSavedThemes } from '@/lib/saved-themes-client';
 import { ColorThemePicker, type ColorThemePickerProps } from './ColorThemePicker';
 
 interface SavedThemesTilesProps
-  extends Omit<ColorThemePickerProps, 'themes' | 'unavailableThemes' | 'selection' | 'onAssign'> {
+  extends Omit<
+    ColorThemePickerProps,
+    'themes' | 'unavailableThemes' | 'selection' | 'onAssign' | 'createTileRef'
+  > {
   appearance: ColorThemeSelectionInput | undefined;
   onAssign: (
     slot: 'light' | 'dark',
@@ -61,6 +64,8 @@ export function SavedThemesTiles({ appearance, onAssign, ...pickerProps }: Saved
   const [createError, setCreateError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const createNameRef = useRef<HTMLInputElement>(null);
+  const pendingEditThemeIdRef = useRef<string | null>(null);
+  const createTileRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -178,9 +183,9 @@ export function SavedThemesTiles({ appearance, onAssign, ...pickerProps }: Saved
     onAssign(activeSlot, result.id, selection, [...themes, createdTheme]);
     await refresh();
     setCreateName('');
+    pendingEditThemeIdRef.current = result.id;
     setCreateOpen(false);
     setIsCreating(false);
-    selectThemeToEdit(result.id);
   }
 
   const unavailableThemes = warnings.map((warning) => {
@@ -242,7 +247,7 @@ export function SavedThemesTiles({ appearance, onAssign, ...pickerProps }: Saved
       {loadError ? (
         <div
           role="alert"
-          className="flex items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-foreground"
+          className="flex items-center justify-between gap-2 rounded-md border border-destructive/30 px-3 py-2 text-sm text-foreground"
         >
           <span>{t`Saved themes couldn’t load. The last available theme list is still shown.`}</span>
           <Button type="button" variant="outline" size="xs" onClick={() => void refresh()}>
@@ -252,8 +257,8 @@ export function SavedThemesTiles({ appearance, onAssign, ...pickerProps }: Saved
       ) : null}
       <div role="status">
         {truncated ? (
-          <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-foreground">
-            <TriangleAlert aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-amber-600" />
+          <div className="flex items-start gap-2 rounded-md border border-warning/30 px-3 py-2 text-sm text-foreground">
+            <TriangleAlert aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning" />
             <span>{t`Some saved themes aren’t shown because the theme folder exceeds the scan limit.`}</span>
           </div>
         ) : null}
@@ -275,6 +280,7 @@ export function SavedThemesTiles({ appearance, onAssign, ...pickerProps }: Saved
           onDelete: removeTheme,
         }}
         createControl={{ onCreate: () => setCreateOpen(true) }}
+        createTileRef={createTileRef}
         onAssign={(slot, id) => onAssign(slot, id, selection, themes)}
       />
       <Dialog
@@ -283,7 +289,18 @@ export function SavedThemesTiles({ appearance, onAssign, ...pickerProps }: Saved
           if (!isCreating) setCreateOpen(open);
         }}
       >
-        <DialogContent>
+        <DialogContent
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            const pendingId = pendingEditThemeIdRef.current;
+            if (pendingId === null) {
+              createTileRef.current?.focus();
+              return;
+            }
+            pendingEditThemeIdRef.current = null;
+            selectThemeToEdit(pendingId);
+          }}
+        >
           <DialogHeader className="gap-2">
             <DialogTitle>{t`Name your theme`}</DialogTitle>
             <DialogDescription>{t`Give it a name before editing its colors.`}</DialogDescription>

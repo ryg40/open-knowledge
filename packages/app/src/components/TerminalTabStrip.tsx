@@ -8,14 +8,15 @@ import {
   useSortable,
 } from '@dnd-kit/sortable';
 import { Trans, useLingui } from '@lingui/react/macro';
+import { PanelBottomIcon, PanelRightIcon, XIcon } from 'lucide-react';
 import {
-  ChevronDownIcon,
-  ChevronRightIcon,
-  PanelBottomIcon,
-  PanelRightIcon,
-  XIcon,
-} from 'lucide-react';
-import { type ReactElement, type ReactNode, useEffect, useRef, useState } from 'react';
+  type ReactElement,
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import { Button } from '@/components/ui/button';
 import {
   ContextMenu,
@@ -25,6 +26,7 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { InputGroup, InputGroupInput } from '@/components/ui/input-group';
+import { PANE_CARD_TOP_BAR_CLASS } from '@/components/ui/pane-card';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
@@ -84,22 +86,27 @@ export interface TerminalTabDescriptor {
 export type SessionPanelEdge = 'bottom' | 'right';
 type SessionKind = 'terminal' | 'agent';
 
-function BottomTerminalPlacementMenu({
+function StripRowMenu({
   children,
-  onMoveRight,
+  items,
+  disabled,
+  focusFallback,
 }: {
   readonly children: ReactElement;
-  readonly onMoveRight?: () => void;
+  readonly items: ReactNode;
+  readonly disabled: boolean;
+  readonly focusFallback?: RefObject<HTMLElement | null>;
 }) {
   const keyboardTriggerRef = useRef<HTMLElement | null>(null);
-  if (onMoveRight == null) return children;
+  if (items == null) return children;
 
   return (
     <ContextMenu>
       <ContextMenuTrigger
         asChild
+        disabled={disabled}
         onKeyDown={(event) => {
-          if (!shouldOpenTabContextMenu(event)) return;
+          if (disabled || !shouldOpenTabContextMenu(event)) return;
           event.preventDefault();
           keyboardTriggerRef.current =
             document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -118,18 +125,14 @@ function BottomTerminalPlacementMenu({
       </ContextMenuTrigger>
       <ContextMenuContent
         onCloseAutoFocus={(event) => {
-          if (keyboardTriggerRef.current == null) return;
+          const trigger = keyboardTriggerRef.current;
+          if (trigger == null) return;
           event.preventDefault();
-          keyboardTriggerRef.current.focus();
           keyboardTriggerRef.current = null;
+          (trigger.isConnected ? trigger : focusFallback?.current)?.focus();
         }}
       >
-        <ContextMenuGroup>
-          <ContextMenuItem onSelect={onMoveRight}>
-            <PanelRightIcon aria-hidden="true" />
-            <Trans>Move to right panel</Trans>
-          </ContextMenuItem>
-        </ContextMenuGroup>
+        <ContextMenuGroup>{items}</ContextMenuGroup>
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -142,15 +145,16 @@ interface TerminalTabStripProps {
   readonly onSelect: (id: string) => void;
   readonly onTabActivate?: (id: string) => void;
   readonly newButton?: ReactNode;
+  readonly leadingControls?: ReactNode;
   readonly trailingControls?: ReactNode;
+  readonly rowMenu?: ReactNode;
+  readonly rowMenuFocusFallback?: RefObject<HTMLElement | null>;
   readonly onClose: (id: string) => void;
   readonly onRename?: (id: string, label: string) => void;
   readonly onReorder?: (newOrderIds: readonly string[]) => void;
   readonly onDragActiveChange?: (active: boolean) => void;
   readonly edge?: SessionPanelEdge;
   readonly onPlacementChange?: (placement: SessionPanelEdge) => void;
-  readonly reserveRightRevealTabGutter?: boolean;
-  readonly onCollapse?: () => void;
   readonly children?: ReactNode;
   readonly className?: string;
   readonly draggable?: boolean;
@@ -163,21 +167,24 @@ export function TerminalTabStrip({
   onSelect,
   onTabActivate,
   newButton,
+  leadingControls,
   trailingControls,
+  rowMenu,
+  rowMenuFocusFallback,
   onClose,
   onRename,
   onReorder,
   onDragActiveChange,
   edge,
   onPlacementChange,
-  reserveRightRevealTabGutter,
-  onCollapse,
   children,
   className,
   draggable,
 }: TerminalTabStripProps) {
   const { t } = useLingui();
   const rightEdge = edge === 'right';
+  const isElectronHost = typeof window !== 'undefined' && window.okDesktop != null;
+  const windowDragRegion = draggable || isElectronHost;
   const placementTarget: SessionPanelEdge = rightEdge ? 'bottom' : 'right';
   const placementLabel = rightEdge ? t`Move Terminal to bottom` : t`Move Terminal to right`;
   const onMoveRight =
@@ -275,18 +282,38 @@ export function TerminalTabStrip({
       onValueChange={onSelect}
       className={cn('flex min-h-0 min-w-0 flex-1 flex-col', className)}
     >
-      <BottomTerminalPlacementMenu onMoveRight={onMoveRight}>
+      <StripRowMenu
+        items={
+          onMoveRight != null ? (
+            <ContextMenuItem onSelect={onMoveRight}>
+              <PanelRightIcon aria-hidden="true" />
+              <Trans>Move to right panel</Trans>
+            </ContextMenuItem>
+          ) : (
+            rowMenu
+          )
+        }
+        disabled={renamingId != null}
+        focusFallback={rowMenuFocusFallback}
+      >
         <div
           ref={rowRef}
           data-terminal-tab-row=""
-          data-electron-drag={draggable ? '' : undefined}
+          data-dock-handle={draggable ? undefined : ''}
+          data-electron-drag={windowDragRegion ? '' : undefined}
           className={cn(
             'flex shrink-0 flex-row items-center gap-1 px-1.5 py-1',
-            rightEdge && reserveRightRevealTabGutter && 'pr-9',
+            !draggable && PANE_CARD_TOP_BAR_CLASS,
+            windowDragRegion && '[-webkit-app-region:drag]',
             draggable &&
-              'h-[62px] [-webkit-app-region:drag] pr-[22px] pl-[calc(var(--ok-titlebar-reserve-left,1rem)+0.75rem)]',
+              'h-[62px] pr-[22px] pl-[calc(var(--ok-titlebar-reserve-left,1rem)+0.75rem)]',
           )}
         >
+          {leadingControls != null ? (
+            <div className={cn('shrink-0', windowDragRegion && '[-webkit-app-region:no-drag]')}>
+              {leadingControls}
+            </div>
+          ) : null}
           <DndContext
             sensors={sensors}
             autoScroll={TAB_REORDER_AUTO_SCROLL}
@@ -303,12 +330,11 @@ export function TerminalTabStrip({
               items={sessions.map((session) => session.id)}
               strategy={horizontalListSortingStrategy}
             >
-              {}
               <div
                 onWheel={scrollTabStripOnWheel}
                 className={cn(
                   'grid h-auto w-fit max-w-full min-w-0 grid-flow-col items-center justify-start gap-0.5 overflow-x-auto overflow-y-hidden [grid-auto-columns:minmax(8rem,9rem)] [scrollbar-width:none] scroll-fade-mask-x',
-                  draggable && '[-webkit-app-region:no-drag]',
+                  windowDragRegion && '[-webkit-app-region:no-drag]',
                 )}
               >
                 <TabsList
@@ -364,7 +390,7 @@ export function TerminalTabStrip({
                                     ? TAB_SELECTED_SURFACE_IMPORTANT_CLASS
                                     : isHovered && TAB_HOVER_SURFACE_IMPORTANT_CLASS,
                                   isRenaming && 'w-full opacity-0',
-                                  draggable && '[-webkit-app-region:no-drag]',
+                                  windowDragRegion && '[-webkit-app-region:no-drag]',
                                 )}
                               >
                                 {session.icon}
@@ -405,7 +431,7 @@ export function TerminalTabStrip({
                           style={{ gridColumn: index + 1, gridRow: 1 }}
                           className={cn(
                             'z-20 h-7 w-full rounded-md border-0 bg-transparent dark:bg-transparent',
-                            draggable && '[-webkit-app-region:no-drag]',
+                            windowDragRegion && '[-webkit-app-region:no-drag]',
                           )}
                         >
                           <InputGroupInput
@@ -444,7 +470,7 @@ export function TerminalTabStrip({
                           'z-20 mr-0.5 justify-self-end opacity-0 transition-opacity focus-visible:opacity-100',
                           (isActive || hoveredId === session.id) && 'opacity-100',
                           tabReorderBounds != null && 'pointer-events-none opacity-0',
-                          draggable && '[-webkit-app-region:no-drag]',
+                          windowDragRegion && '[-webkit-app-region:no-drag]',
                         )}
                         onMouseEnter={() => setHoveredId(session.id)}
                         onMouseLeave={() => setHoveredId(null)}
@@ -461,17 +487,14 @@ export function TerminalTabStrip({
               </div>
             </SortableContext>
           </DndContext>
-          {}
           {newButton != null ? (
-            <div className={cn('shrink-0', draggable && '[-webkit-app-region:no-drag]')}>
+            <div className={cn('shrink-0', windowDragRegion && '[-webkit-app-region:no-drag]')}>
               {newButton}
             </div>
           ) : null}
-          {}
           <div className="flex-1" />
-          {}
           {trailingControls != null ? (
-            <div className={cn('shrink-0', draggable && '[-webkit-app-region:no-drag]')}>
+            <div className={cn('shrink-0', windowDragRegion && '[-webkit-app-region:no-drag]')}>
               {trailingControls}
             </div>
           ) : null}
@@ -483,7 +506,10 @@ export function TerminalTabStrip({
                   variant="ghost"
                   size="icon-xs"
                   aria-label={placementLabel}
-                  className="shrink-0 cursor-pointer text-muted-foreground hover:text-foreground"
+                  className={cn(
+                    'shrink-0 cursor-pointer text-muted-foreground hover:text-foreground',
+                    windowDragRegion && '[-webkit-app-region:no-drag]',
+                  )}
                   onClick={() => onPlacementChange(placementTarget)}
                 >
                   {rightEdge ? (
@@ -498,38 +524,8 @@ export function TerminalTabStrip({
               </TooltipContent>
             </Tooltip>
           ) : null}
-          {onCollapse != null ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label={
-                    sessionKind === 'terminal' ? t`Collapse Terminal` : t`Collapse agent panel`
-                  }
-                  className="shrink-0 cursor-pointer text-muted-foreground hover:text-foreground"
-                  onClick={onCollapse}
-                >
-                  {}
-                  {rightEdge ? (
-                    <ChevronRightIcon aria-hidden="true" />
-                  ) : (
-                    <ChevronDownIcon aria-hidden="true" />
-                  )}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" sideOffset={8}>
-                {sessionKind === 'terminal' ? (
-                  <Trans>Collapse Terminal</Trans>
-                ) : (
-                  <Trans>Collapse agent panel</Trans>
-                )}
-              </TooltipContent>
-            </Tooltip>
-          ) : null}
         </div>
-      </BottomTerminalPlacementMenu>
+      </StripRowMenu>
       {children}
     </Tabs>
   );

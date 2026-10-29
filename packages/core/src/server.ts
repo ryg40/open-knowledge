@@ -1,3 +1,4 @@
+export { type AppShellPolicyFailure, createAppShellPolicies } from './app-shell-csp.ts';
 export {
   type CollectConfigDiagnosticsOptions,
   collectConfigDiagnostics,
@@ -26,6 +27,7 @@ export {
   writeConfigPatch,
 } from './config/write-config-patch.ts';
 export { okUserHomeDir } from './constants/ok-user-home.ts';
+export { filesystemIdentity, statMtime, statMtimeMs } from './filesystem-identity.ts';
 export {
   LOCALE_OVERRIDE_ENV_VAR,
   type LocaleEnvironment,
@@ -51,4 +53,10 @@ export {
   withFileLock,
   withFileLockSync,
 } from './util/file-lock.ts';
+export {
+  isProjectLogsKey,
+  okProjectLogsDir,
+  projectLogsKeyForCanonicalPath,
+  projectSpawnErrorLogPath,
+} from './util/project-logs-dir.ts';
 export { openSpawnErrorLog } from './util/spawn-error-log-open.ts';

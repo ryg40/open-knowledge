@@ -7,9 +7,13 @@ import {
   assertGitAvailable,
   type GitDetected,
   GitNotAvailableError,
+  GitProbeTimeoutError,
   GitTooOldError,
 } from './git-preflight.ts';
-import { emitPreflightFailureSpan } from './git-preflight-telemetry.ts';
+import {
+  describeGitPreflightFailure,
+  emitPreflightFailureSpan,
+} from './git-preflight-telemetry.ts';
 import { assertSafeProjectRoot } from './home-project-root.ts';
 import { getLogger } from './logger.ts';
 
@@ -165,16 +169,21 @@ export async function ensureProjectGit(projectRoot: string): Promise<EnsureProje
   try {
     detected = assertGitAvailable();
   } catch (err) {
-    if (err instanceof GitNotAvailableError || err instanceof GitTooOldError) {
+    if (
+      err instanceof GitNotAvailableError ||
+      err instanceof GitProbeTimeoutError ||
+      err instanceof GitTooOldError
+    ) {
+      const failure = describeGitPreflightFailure(err);
       emitPreflightFailureSpan(err);
       log.warn(
         {
           event: 'git_preflight_fail',
           platform: err.platform,
-          reason: err instanceof GitTooOldError ? 'too_old' : 'not_available',
-          detectedVersion: err instanceof GitTooOldError ? err.detected : '',
+          reason: failure.reason,
+          detectedVersion: failure.detectedVersion,
         },
-        err instanceof GitTooOldError ? 'git binary too old' : 'git binary not found',
+        failure.logMessage,
       );
     } else {
       log.warn(
@@ -200,9 +209,14 @@ export async function ensureProjectGit(projectRoot: string): Promise<EnsureProje
 
   let stderr = '';
   try {
+    const { stdout: defaultBranch } = await execFileAsync(
+      gitBin,
+      ['config', '--default', 'main', '--get', 'init.defaultBranch'],
+      withHiddenWindowsConsole({ cwd: abs, encoding: 'utf-8' }),
+    );
     const result = await execFileAsync(
       gitBin,
-      ['init', '--initial-branch=main', abs],
+      ['init', `--initial-branch=${defaultBranch.trim()}`, abs],
       withHiddenWindowsConsole({ encoding: 'utf-8' }),
     );
     stderr = result.stderr ?? '';
@@ -231,7 +245,7 @@ export async function ensureProjectGit(projectRoot: string): Promise<EnsureProje
     return { didInit: true, repaired: true };
   }
 
-  log.info({ path: abs, branch: 'main' }, 'initialized .git/');
+  log.info({ path: abs }, 'initialized .git/');
 
   return { didInit: true };
 }

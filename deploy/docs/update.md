@@ -46,12 +46,16 @@ SMOKE_PORT=18080 scripts/tenant/update.sh qualify --version X.Y.Z --workdir .loc
 
 The work directory must not be a symlink or an ancestor of the checkout.
 The command creates a separate clone under that directory, without shared Git objects or installed hooks from another clone.
-It starts from `local-dev` and fetches only `upstream/main`, with `--no-tags`.
+It starts from `local-dev` and fetches `upstream/main`, with `--no-tags`.
 It sets the scratch remote's push URL to `DISABLED`.
 
-The selected commit must be the unique first-parent `main reset: post-stable v<version>` commit.
+The command first selects the unique first-parent `main reset: post-stable v<version>` commit.
 Its `packages/cli/package.json` must declare the requested version.
-A matching tag name alone does not select a release.
+When no reset commit exists, it fetches only `refs/tags/v<version>` into `FETCH_HEAD`.
+That tag must resolve to a commit on the first-parent history of `upstream/main`.
+Its package version must be the requested version or upstream's unstamped source placeholder.
+An absent tag, an unrelated commit, or a different package version fails selection.
+The scratch clone marks the selected commit with a local `<version>` tag for the content check.
 
 The trial merges that commit into `sync/v<version>`.
 A conflict fails the merge. The command does not resolve it.
@@ -117,7 +121,7 @@ scripts/tenant/update.sh notes --from X.Y.Z --to X.Y.Z --workdir .local/update-n
 ```
 
 The target must be newer than the starting version.
-The command fetches upstream into another scratch clone and resolves both post-stable commits.
+The command fetches upstream into another scratch clone and resolves both release commits with the same selection rules.
 It reads public GitHub release notes without authentication, for stable releases after `--from` through `--to`.
 Missing target notes fail the action instead of producing an empty success.
 

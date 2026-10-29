@@ -25,7 +25,11 @@ import { getEditorSingleFileMode } from '../extensions/editor-mode-context.ts';
 import { buildUnresolvedWikiLinkAttrs } from '../extensions/wiki-link-helpers.ts';
 import { HttpResponseParseError } from '../http-client.ts';
 import { singleFileUploadMessage } from './upload-admission.ts';
-import { reportUploadFailure, type UploadFailureReport } from './upload-failure.ts';
+import {
+  attachmentFolderRefusalMessage,
+  reportUploadFailure,
+  type UploadFailureReport,
+} from './upload-failure.ts';
 
 const uploadPluginKey = new PluginKey<UploadPluginState>('imageUpload');
 
@@ -37,7 +41,7 @@ interface UploadPluginState {
 function createSkeletonWidget(file?: File): HTMLElement {
   const el = document.createElement('div');
   el.className =
-    'image-upload-skeleton w-full h-40 rounded-md bg-muted animate-pulse motion-reduce:animate-none my-2';
+    'image-upload-skeleton w-full h-40 rounded-md bg-foreground/10 animate-pulse motion-reduce:animate-none my-2';
   el.setAttribute('data-upload-widget', 'loading');
   el.setAttribute('role', 'status');
   const fileName = file?.name;
@@ -291,7 +295,7 @@ export async function uploadAndInsert(
       return;
     }
     console.error('[uploadAndInsert] Server error:', problem.data);
-    showError(editor, uploadId, problem.data.title);
+    showError(editor, uploadId, attachmentFolderRefusalMessage(problem.data) ?? problem.data.title);
     return;
   }
 

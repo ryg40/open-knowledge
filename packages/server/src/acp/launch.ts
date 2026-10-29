@@ -1,14 +1,21 @@
-import { type ChildProcess, spawn } from 'node:child_process';
-import { constants, existsSync, statSync } from 'node:fs';
+import { type ChildProcess, type StdioOptions, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { closeSync, constants, createReadStream, existsSync, statSync } from 'node:fs';
 import { access, chmod, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
-import { augmentAgentSpawnPath, OK_HOSTED_AGENT_ENV } from '@inkeep/open-knowledge-core';
+import { stripVTControlCharacters } from 'node:util';
+import {
+  augmentAgentSpawnPath,
+  envWithoutDevChannel,
+  OK_HOSTED_AGENT_ENV,
+} from '@inkeep/open-knowledge-core';
 import { okUserHomeDir } from '@inkeep/open-knowledge-core/server';
 import { z } from 'zod';
 import {
   tracedMkdir,
   tracedMkdirSync,
+  tracedOpenUnlinkedSync,
   tracedRm,
   tracedWriteFile,
   tracedWriteFileSync,
@@ -32,10 +39,15 @@ export type ResolvedLaunch = {
   pathFromOverlay: boolean;
 } & ({ kind: 'npx' } | { kind: 'uvx' } | { kind: 'binary' } | { kind: 'custom' });
 
+export type NpxCacheEntry = string & { readonly __brand: 'NpxCacheEntry' };
+
 export const MINIMUM_NPX_NODE_MAJOR = 22;
+
+const NPX_REFUSE_INSTALL = ['--yes=false', '--loglevel=error'] as const;
 
 export class AgentLaunchError extends Error {
   readonly machineDetail?: string;
+  readonly npxCacheEntry?: NpxCacheEntry;
   readonly code:
     | 'unsupported-platform'
     | 'no-distribution'
@@ -44,11 +56,12 @@ export class AgentLaunchError extends Error {
   constructor(
     code: AgentLaunchError['code'],
     message: string,
-    options?: ErrorOptions & { machineDetail?: string },
+    options?: ErrorOptions & { machineDetail?: string; npxCacheEntry?: NpxCacheEntry },
   ) {
     super(message, options);
     this.name = 'AgentLaunchError';
     this.code = code;
+    this.npxCacheEntry = options?.npxCacheEntry;
     this.machineDetail =
       options?.machineDetail === undefined
         ? undefined
@@ -70,8 +83,7 @@ function isDir(dir: string): boolean {
 
 export function mergedEnv(overlay?: Record<string, string>): Record<string, string> {
   const base: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v === undefined) continue;
+  for (const [k, v] of Object.entries(envWithoutDevChannel(process.env))) {
     if (k.toLowerCase() === 'npm_config_overrides') continue;
     base[k] = v;
   }
@@ -110,9 +122,10 @@ type ResolvedNpmAcquisition =
   | { outcome: ProbedNpmOutcome; acquired: string; source: 'memo'; elapsedMs: 0 }
   | (NpmPackageResolution & { source: 'probe' | 'joined' });
 
-type NpmAcquisitionOptions = {
+type RegistryAcquisitionOptions = {
   reacquire?: boolean;
-  onProbeStart?: () => void;
+  install?: boolean;
+  onAcquiring?: () => void;
   onResolved?: (resolution: ResolvedNpmAcquisition) => void;
 };
 
@@ -128,7 +141,7 @@ export function resolveRegistryLaunch(
   log: PinoLogger,
   binaryCacheDir: string | undefined,
   prepare: PrepareRegistryLaunch,
-  acquisition?: NpmAcquisitionOptions,
+  acquisition?: RegistryAcquisitionOptions,
 ): Promise<ResolvedLaunch | null>;
 export async function resolveRegistryLaunch(
   agent: RegistryAgent,
@@ -136,8 +149,17 @@ export async function resolveRegistryLaunch(
   log: PinoLogger,
   binaryCacheDir: string = defaultBinaryCacheDir(),
   prepare?: PrepareRegistryLaunch,
-  acquisition?: NpmAcquisitionOptions,
+  acquisition?: RegistryAcquisitionOptions,
 ): Promise<ResolvedLaunch | null> {
+  let acquiringReported = false;
+  const reporting: RegistryAcquisitionOptions = {
+    ...acquisition,
+    onAcquiring: () => {
+      if (acquiringReported) return;
+      acquiringReported = true;
+      acquisition?.onAcquiring?.();
+    },
+  };
   const dist = agent.distribution;
   if (dist.npx !== undefined) {
     const raw: ResolvedLaunch = {
@@ -154,14 +176,18 @@ export async function resolveRegistryLaunch(
         dist.npx.package,
       );
     if (pin?.groups === undefined) return launch;
-    const selected = await acquireNpmPackage(
+    const acquired = await acquireNpmPackage(
       launch,
       pin.groups.name,
       pin.groups.version,
       log,
-      acquisition,
+      reporting,
     );
-    return { ...launch, args: ['-y', selected, ...(dist.npx.args ?? [])] };
+    if (acquisition?.install === true) {
+      await ensureNpmPackageInstalled(launch, acquired, log, reporting);
+      return { ...launch, args: [...NPX_REFUSE_INSTALL, acquired, ...(dist.npx.args ?? [])] };
+    }
+    return { ...launch, args: ['-y', acquired, ...(dist.npx.args ?? [])] };
   }
   if (dist.uvx !== undefined) {
     const pin = /^(?<name>[A-Za-z0-9][A-Za-z0-9._-]*)(?:==|@)(?<version>\d+\.\d+\.\d+)$/.exec(
@@ -195,7 +221,9 @@ export async function resolveRegistryLaunch(
       );
     }
     const target = dist.binary[platformKey];
-    const root = await ensureBinaryInstalled(agent.id, agent.version, target, binaryCacheDir, log);
+    const root = await ensureBinaryInstalled(agent.id, agent.version, target, binaryCacheDir, log, {
+      onDownloadStart: reporting.onAcquiring,
+    });
     const cmd = resolve(root, target.cmd.replace(/\\/g, '/'));
     if (!isWithin(root, cmd)) {
       throw new AgentLaunchError(
@@ -266,14 +294,32 @@ const NPX_CACHE_PACKAGE_JSON =
 
 const PARENT_SEGMENT = /(?:^|[\\/])\.\.(?:[\\/]|$)/;
 
-export function staleNpxCacheEntry(detail: string): string | null {
+export function staleNpxCacheEntry(detail: string): NpxCacheEntry | null {
   if (!/\bENOENT\b/.test(detail)) return null;
   for (const pattern of NPM_ENOENT_PATH_LINES) {
     const path = pattern.exec(detail)?.[1];
     const entry = path === undefined ? undefined : NPX_CACHE_PACKAGE_JSON.exec(path)?.[1];
-    if (entry !== undefined && !PARENT_SEGMENT.test(entry)) return entry;
+    if (entry !== undefined && !PARENT_SEGMENT.test(entry)) return entry as NpxCacheEntry;
   }
   return null;
+}
+
+export function npxInstallRefused(detail: string): boolean {
+  return /^npm (?:error|ERR!) npx canceled due to missing packages and no YES option: /m.test(
+    stripVTControlCharacters(detail),
+  );
+}
+
+function refusesNpxInstall(args: readonly string[]): boolean {
+  return NPX_REFUSE_INSTALL.every((flag, index) => args[index] === flag);
+}
+
+export function allowNpxInstall(args: readonly string[]): string[] {
+  return refusesNpxInstall(args) ? ['-y', ...args.slice(NPX_REFUSE_INSTALL.length)] : [...args];
+}
+
+export function refusedNpxPackage(args: readonly string[]): string | undefined {
+  return refusesNpxInstall(args) ? args[NPX_REFUSE_INSTALL.length] : undefined;
 }
 
 async function npmCommand(launch: ResolvedLaunch): Promise<string | null> {
@@ -368,15 +414,187 @@ type AcquiredNpmPackage =
 
 const acquiredNpmPackages = new Map<string, AcquiredNpmPackage>();
 
+type InstalledNpmPackage = { state: 'installing'; install: Promise<void> } | { state: 'installed' };
+
+const installedNpmPackages = new Map<string, InstalledNpmPackage>();
+
 export function resetAcquisitionCache(): void {
   acquiredNpmPackages.clear();
+  installedNpmPackages.clear();
+}
+
+function sortedLaunchEnv(launch: ResolvedLaunch): [string, string][] {
+  return Object.entries(launch.env).sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  );
 }
 
 function acquisitionKey(launch: ResolvedLaunch, name: string, ceiling: string): string {
-  const env = Object.entries(launch.env).sort(([left], [right]) =>
-    left < right ? -1 : left > right ? 1 : 0,
+  return JSON.stringify([launch.cmd, sortedLaunchEnv(launch), name, ceiling]);
+}
+
+export function ensureNpmPackageInstalled(
+  launch: ResolvedLaunch,
+  acquired: string,
+  log: PinoLogger,
+  acquisition: RegistryAcquisitionOptions,
+): Promise<void> {
+  const key = JSON.stringify([launch.cmd, sortedLaunchEnv(launch), acquired]);
+  const cached = installedNpmPackages.get(key);
+  if (cached?.state === 'installing') {
+    acquisition.onAcquiring?.();
+    return cached.install;
+  }
+  if (cached?.state === 'installed' && acquisition.reacquire !== true) return Promise.resolve();
+  acquisition.onAcquiring?.();
+  const install = installNpmPackage(launch, acquired, log);
+  const entry: InstalledNpmPackage = { state: 'installing', install };
+  installedNpmPackages.set(key, entry);
+  const replace = (next: InstalledNpmPackage | null): void => {
+    if (installedNpmPackages.get(key) !== entry) return;
+    if (next === null) installedNpmPackages.delete(key);
+    else installedNpmPackages.set(key, next);
+  };
+  void install.then(
+    () => replace({ state: 'installed' }),
+    () => replace(null),
   );
-  return JSON.stringify([launch.cmd, env, name, ceiling]);
+  return install;
+}
+
+async function installNpmPackage(
+  launch: ResolvedLaunch,
+  acquired: string,
+  log: PinoLogger,
+): Promise<void> {
+  const startedAt = Date.now();
+  const installLaunch = {
+    ...launch,
+    kind: 'npx' as const,
+    args: ['--yes', `--package=${acquired}`, '--call=exit 0'],
+  };
+  let stderr = '';
+  let rawStderr = '';
+  const stderrCapture = createDiagnosticStderrCapture(
+    (line) => {
+      stderr = `${stderr}${line}\n`.slice(-ACQUISITION_DETAIL_MAX_CHARS);
+    },
+    (rawLine) => {
+      rawStderr = `${rawStderr}${rawLine}\n`.slice(-ACQUISITION_DETAIL_MAX_CHARS);
+    },
+  );
+  const { code, signal, spawnFailure } =
+    process.platform === 'win32'
+      ? await runPipedInstall(installLaunch, acquired, stderrCapture, log)
+      : await runFileBackedInstall(installLaunch, acquired, stderrCapture, log);
+  if (spawnFailure === undefined && code === 0) {
+    log.info(
+      { package: acquired, elapsedMs: Date.now() - startedAt },
+      '[acp-launch] agent package installed',
+    );
+    return;
+  }
+  const detail = `${stderr}${spawnFailure ?? ''}`.trim() || (signal ?? `exit code ${code}`);
+  const npxCacheEntry = staleNpxCacheEntry(rawStderr) ?? undefined;
+  if (npxCacheEntry === undefined) {
+    const refusal = spawnFailure === undefined ? packageAcquisitionFailure(launch, detail) : null;
+    if (refusal !== null) throw refusal;
+  }
+  throw new AgentLaunchError('install-failed', `Could not install ${acquired}.`, {
+    machineDetail: detail,
+    npxCacheEntry,
+  });
+}
+
+interface InstallExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  spawnFailure: string | undefined;
+}
+
+type DiagnosticStderrCapture = ReturnType<typeof createDiagnosticStderrCapture>;
+
+function awaitInstallExit(
+  child: ChildProcess,
+  acquired: string,
+  log: PinoLogger,
+): Promise<InstallExit> {
+  let spawnFailure: string | undefined;
+  child.once('spawn', () => {
+    log.info({ package: acquired, installPid: child.pid }, '[acp-launch] installing agent package');
+  });
+  child.once('error', (err) => {
+    spawnFailure = err.message;
+  });
+  return new Promise((resolvePromise) =>
+    child.once('close', (code, signal) => resolvePromise({ code, signal, spawnFailure })),
+  );
+}
+
+async function runFileBackedInstall(
+  launch: ResolvedLaunch & { kind: 'npx' },
+  acquired: string,
+  capture: DiagnosticStderrCapture,
+  log: PinoLogger,
+): Promise<InstallExit> {
+  const stderrPath = join(acpNpxIsolatedCwd(), `.install-stderr-${process.pid}-${randomUUID()}`);
+  let fd: number;
+  try {
+    fd = tracedOpenUnlinkedSync(stderrPath);
+  } catch (err) {
+    return {
+      code: null,
+      signal: null,
+      spawnFailure: err instanceof Error ? err.message : String(err),
+    };
+  }
+  try {
+    return await awaitInstallExit(
+      spawnLaunch(launch, undefined, ['ignore', 'ignore', fd]),
+      acquired,
+      log,
+    );
+  } finally {
+    await replayInstallStderr(fd, capture).catch((err: unknown) => {
+      log.warn(
+        { err, package: acquired },
+        '[acp-launch] could not read the agent package install output',
+      );
+    });
+  }
+}
+
+async function replayInstallStderr(fd: number, capture: DiagnosticStderrCapture): Promise<void> {
+  try {
+    for await (const chunk of createReadStream('', {
+      fd,
+      start: 0,
+      encoding: 'utf8',
+      autoClose: false,
+    })) {
+      capture.write(chunk);
+    }
+  } finally {
+    capture.end();
+    closeSync(fd);
+  }
+}
+
+/* UPSTREAM(libuv/libuv#1659, microsoft/terminal#12464): an inherited stdio descriptor drops
+   CREATE_NO_WINDOW and Windows Terminal may show the console cmd.exe then opens. */
+function runPipedInstall(
+  launch: ResolvedLaunch & { kind: 'npx' },
+  acquired: string,
+  capture: DiagnosticStderrCapture,
+  log: PinoLogger,
+): Promise<InstallExit> {
+  const child = spawnAcpAgent(launch);
+  child.stdin?.end();
+  child.stdout?.resume();
+  child.stderr?.setEncoding('utf8');
+  child.stderr?.on('data', capture.write);
+  child.stderr?.on('end', capture.end);
+  return awaitInstallExit(child, acquired, log);
 }
 
 function heldNpmPackage(entry: AcquiredNpmPackage | undefined): HeldNpmPackage | null {
@@ -396,7 +614,7 @@ function acquireNpmPackage(
   name: string,
   ceiling: string,
   log: PinoLogger,
-  acquisition?: NpmAcquisitionOptions,
+  acquisition?: RegistryAcquisitionOptions,
 ): Promise<string> {
   const key = acquisitionKey(launch, name, ceiling);
   const cached = acquiredNpmPackages.get(key);
@@ -411,6 +629,7 @@ function acquireNpmPackage(
     return Promise.resolve(held.acquired);
   }
   const joined = openNpmProbe(cached);
+  if (joined !== null) acquisition?.onAcquiring?.();
   const probe = joined ?? beginNpmAcquisition(key, held, launch, name, ceiling, log, acquisition);
   const source: 'probe' | 'joined' = joined === null ? 'probe' : 'joined';
   return probe.then((resolved) => {
@@ -426,7 +645,7 @@ function beginNpmAcquisition(
   name: string,
   ceiling: string,
   log: PinoLogger,
-  acquisition?: NpmAcquisitionOptions,
+  acquisition?: RegistryAcquisitionOptions,
 ): Promise<NpmPackageResolution> {
   const probe = acquireNpmPackageUncached(launch, name, ceiling, log, acquisition);
   const entry: AcquiredNpmPackage =
@@ -456,7 +675,7 @@ async function acquireNpmPackageUncached(
   name: string,
   ceiling: string,
   log: PinoLogger,
-  acquisition?: NpmAcquisitionOptions,
+  acquisition?: RegistryAcquisitionOptions,
 ): Promise<NpmPackageResolution> {
   let descriptor = `${name}@${ceiling}`;
   const npm = await npmCommand(launch);
@@ -467,7 +686,7 @@ async function acquireNpmPackageUncached(
     );
     return { outcome: 'forwarded', acquired: descriptor, elapsedMs: 0 };
   }
-  acquisition?.onProbeStart?.();
+  acquisition?.onAcquiring?.();
   const probeStartedAt = Date.now();
   let result = await probeNpmPackage(launch, descriptor, npm);
   let bounded = false;
@@ -574,6 +793,7 @@ function prependPath(dir: string, existing: string | undefined): string {
 
 export interface EnsureBinaryInstallOptions {
   fetchImpl?: typeof fetch;
+  onDownloadStart?: () => void;
   beforeCommit?: () => Promise<void>;
   commitLockTimeoutMs?: number;
 }
@@ -659,13 +879,61 @@ async function writeInstallFailureMarker(
   });
 }
 
-export async function ensureBinaryInstalled(
+interface InFlightBinaryInstall {
+  result: Promise<string>;
+  downloading: boolean;
+  downloadStartListeners: Array<() => void>;
+}
+
+const inFlightBinaryInstalls = new Map<string, InFlightBinaryInstall>();
+
+export function ensureBinaryInstalled(
   id: string,
   version: string,
   target: RegistryBinaryTarget,
   cacheDir: string,
   log: PinoLogger,
   opts: EnsureBinaryInstallOptions = {},
+): Promise<string> {
+  const key = JSON.stringify([
+    resolve(cacheDir),
+    id,
+    version,
+    target.archive,
+    target.cmd,
+    target.sha256 ?? null,
+  ]);
+  const running = inFlightBinaryInstalls.get(key);
+  if (running !== undefined) {
+    if (opts.onDownloadStart !== undefined) {
+      if (running.downloading) opts.onDownloadStart();
+      else running.downloadStartListeners.push(opts.onDownloadStart);
+    }
+    return running.result;
+  }
+  const entry: InFlightBinaryInstall = {
+    result: Promise.resolve(''),
+    downloading: false,
+    downloadStartListeners: opts.onDownloadStart === undefined ? [] : [opts.onDownloadStart],
+  };
+  entry.result = installBinary(id, version, target, cacheDir, log, {
+    ...opts,
+    onDownloadStart: () => {
+      entry.downloading = true;
+      for (const notify of entry.downloadStartListeners) notify();
+    },
+  }).finally(() => inFlightBinaryInstalls.delete(key));
+  inFlightBinaryInstalls.set(key, entry);
+  return entry.result;
+}
+
+async function installBinary(
+  id: string,
+  version: string,
+  target: RegistryBinaryTarget,
+  cacheDir: string,
+  log: PinoLogger,
+  opts: EnsureBinaryInstallOptions,
 ): Promise<string> {
   const versionDir = join(cacheDir, sanitizeSegment(id), sanitizeSegment(version));
   const markerPath = installFailureMarkerPath(dirname(versionDir), version);
@@ -682,13 +950,23 @@ export async function ensureBinaryInstalled(
           );
         }
         await tracedRm(markerPath, { force: true });
+        opts.onDownloadStart?.();
         log.info({ id, version, archive: target.archive }, '[acp-launch] downloading agent binary');
         const isZip = /\.zip$/i.test(new URL(target.archive).pathname);
         const archivePath = join(stagingDir, isZip ? 'archive.zip' : 'archive.tar.gz');
+        const downloadStartedAt = Date.now();
         const sha = await downloadToFileWithSha(target.archive, archivePath, {
-          signal: AbortSignal.timeout(120_000),
           fetchImpl: opts.fetchImpl,
+          onRetry: ({ attempt, receivedBytes, totalBytes, resumeFromBytes, error }) =>
+            log.warn(
+              { id, version, attempt, receivedBytes, totalBytes, resumeFromBytes, err: error },
+              '[acp-launch] agent binary download interrupted, retrying',
+            ),
         });
+        log.info(
+          { id, version, elapsedMs: Date.now() - downloadStartedAt },
+          '[acp-launch] agent binary downloaded',
+        );
         if (target.sha256 !== undefined) {
           if (sha !== target.sha256.toLowerCase()) {
             throw new Error(`archive checksum mismatch: expected ${target.sha256}, got ${sha}`);
@@ -1067,6 +1345,14 @@ export function spawnAcpAgent(
   projectCwd: string,
 ): ChildProcess;
 export function spawnAcpAgent(launch: ResolvedLaunch, projectCwd?: string): ChildProcess {
+  return spawnLaunch(launch, projectCwd, ['pipe', 'pipe', 'pipe']);
+}
+
+function spawnLaunch(
+  launch: ResolvedLaunch,
+  projectCwd: string | undefined,
+  stdio: StdioOptions,
+): ChildProcess {
   if (launch.kind === 'npx' && projectCwd !== undefined) {
     throw new Error('spawnAcpAgent does not accept a project cwd for npx launches.');
   }
@@ -1083,7 +1369,7 @@ export function spawnAcpAgent(launch: ResolvedLaunch, projectCwd?: string): Chil
   return spawn(cmd, args, {
     cwd,
     env: withHostedAgentMarker(launch.env),
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio,
     shell: false,
     detached: !win,
     windowsHide: true,

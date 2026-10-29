@@ -4,6 +4,7 @@ import {
   type ClassifiedGitAuthError,
   classifyGitAuthError,
   credentialHostFromRemoteUrl,
+  currentCliCommandName,
   isBranchNotFoundGitError,
   isLoginFixableGitAuthError,
   shellSingleQuote,
@@ -15,6 +16,7 @@ import {
   type CredentialUrlMatchReader,
   type GitHubAccountSource,
   GitNotAvailableError,
+  GitProbeTimeoutError,
   GitTooOldError,
   loginShapedUserinfoUser,
   redactShareSubprocessStderr,
@@ -329,7 +331,7 @@ export async function runClone(
 
   try {
     const { runInit } = await import('./init.ts');
-    const initResult = await runInit({ cwd: targetDir, mcp: false });
+    const initResult = await runInit({ cwd: targetDir, projectRootMode: 'cwd', mcp: false });
     if (initResult.contentUpdated.length > 0) {
       const msg = `auto-init: updated ${initResult.contentUpdated.join(', ')}`;
       if (opts.json) emit(true, { type: 'warning', message: msg });
@@ -384,7 +386,7 @@ function quoteIfNeeded(s: string): string {
 function reconstructCloneCommand(url: string, branch: string | null | undefined): string {
   const branchSuffix =
     typeof branch === 'string' && branch.length > 0 ? ` -b ${quoteIfNeeded(branch)}` : '';
-  return `ok clone ${quoteIfNeeded(url)}${branchSuffix}`;
+  return `${currentCliCommandName()} clone ${quoteIfNeeded(url)}${branchSuffix}`;
 }
 
 export function formatCloneAuthFailure(opts: {
@@ -405,7 +407,7 @@ export function formatCloneAuthFailure(opts: {
       `✗ Couldn't clone ${displayUrl} — authentication is required.`,
       '',
       '  To fix:',
-      '    1. Run: ok auth login',
+      `    1. Run: ${currentCliCommandName()} auth login`,
       `    2. Then re-run: ${reRun}`,
     ].join('\n');
   }
@@ -435,7 +437,7 @@ export function formatCloneAuthFailure(opts: {
     '',
     '  To fix:',
     '    1. Create a token with `repo` scope at https://github.com/settings/tokens',
-    '    2. Run: ok auth pat',
+    `    2. Run: ${currentCliCommandName()} auth pat`,
     `    3. Then re-run: ${reconstructCloneCommand(displayUrl, opts.branch)}`,
   ].join('\n');
 }
@@ -585,7 +587,11 @@ export function cloneCommand(getConfig: () => Config): Command {
             await startCmd.parseAsync([], { from: 'user' });
           }
         } catch (err) {
-          if (err instanceof GitNotAvailableError || err instanceof GitTooOldError) {
+          if (
+            err instanceof GitNotAvailableError ||
+            err instanceof GitProbeTimeoutError ||
+            err instanceof GitTooOldError
+          ) {
             if (opts.json) {
               emit(true, { type: 'error', message: err.message });
             } else {

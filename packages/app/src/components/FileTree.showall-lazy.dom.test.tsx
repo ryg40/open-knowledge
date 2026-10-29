@@ -266,7 +266,7 @@ vi.doMock('@pierre/trees/react', () => ({
       <div data-testid="fake-pierre-tree" role="tree" onClickCapture={onClickCapture}>
         {header}
         {[...model.items.values()].map((item) => (
-          // biome-ignore lint/a11y/useKeyWithClickEvents: stub row standing in for Pierre's own row button; the keyboard path lives in the real library.
+          // oxlint-disable-next-line jsx-a11y/click-events-have-key-events -- stub row standing in for Pierre's own row button; the keyboard path lives in the real library.
           <div
             key={item.path}
             role="treeitem"
@@ -565,10 +565,7 @@ describe('FileTree showAll lazy root seed', () => {
   });
 
   test('paints the first NDJSON chunk before the stream completes (incremental seed)', async () => {
-    let releaseRest: () => void = () => {};
-    const gate = new Promise<void>((resolve) => {
-      releaseRest = resolve;
-    });
+    const { promise: gate, resolve: releaseRest } = Promise.withResolvers<void>();
     const encoder = new TextEncoder();
     showAllResponseFactory = () =>
       new Response(
@@ -602,10 +599,7 @@ describe('FileTree showAll lazy root seed', () => {
   });
 
   test('a first chunk of only hidden entries does not clear the skeleton (no empty-state flash)', async () => {
-    let releaseVisible: () => void = () => {};
-    const gate = new Promise<void>((resolve) => {
-      releaseVisible = resolve;
-    });
+    const { promise: gate, resolve: releaseVisible } = Promise.withResolvers<void>();
     const encoder = new TextEncoder();
     showAllResponseFactory = () =>
       new Response(

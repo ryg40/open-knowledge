@@ -8,6 +8,7 @@ import { atomicTempPath } from '@inkeep/open-knowledge-core/server';
 import {
   CHECKPOINT_KIND_REGISTRY,
   CHECKPOINT_KINDS,
+  CHECKPOINT_SAMPLE_BY_KIND,
   type CheckpointKind,
   formatCheckpointBodyLine,
   parseCheckpoint,
@@ -26,6 +27,7 @@ import {
   DEFAULT_CHECKPOINT_RETENTION,
   FANOUT_INDEX_NAME,
   GIT_UPSTREAM_WRITER,
+  gitDirExcludePatterns,
   type InMemoryCheckpointParams,
   initShadowRepo,
   isShadowExcludesDegraded,
@@ -127,6 +129,49 @@ describe('initShadowRepo', () => {
 
     expect(shadow1.gitDir).toBe(shadow2.gitDir);
     expect(existsSync(resolve(shadow2.gitDir, 'HEAD'))).toBe(true);
+  });
+
+  test('sub-projects whose names differ only in non-Latin letters get separate shadow repos', async () => {
+    const repo = resolve(tmpDir, 'repo');
+    mkdirSync(repo, { recursive: true });
+    await simpleGit(repo).init();
+    configureTestGitRepository(repo);
+    const projectA = resolve(repo, 'ノート');
+    const projectB = resolve(repo, '日記帳');
+    mkdirSync(projectA, { recursive: true });
+    mkdirSync(projectB, { recursive: true });
+
+    const shadowA = await initShadowRepo(projectA);
+    const shadowB = await initShadowRepo(projectB);
+
+    expect(shadowA.gitDir).not.toBe(shadowB.gitDir);
+    for (const [shadow, project] of [
+      [shadowA, projectA],
+      [shadowB, projectB],
+    ] as const) {
+      const sg = simpleGit().env({ GIT_DIR: shadow.gitDir });
+      expect((await sg.raw('config', 'core.worktree')).trim()).toBe(project);
+    }
+    expect((await initShadowRepo(projectA)).gitDir).toBe(shadowA.gitDir);
+  });
+
+  test("an earlier version's lossy shadow repo stays with its owner after upgrade", async () => {
+    const repo = resolve(tmpDir, 'repo');
+    mkdirSync(repo, { recursive: true });
+    await simpleGit(repo).init();
+    configureTestGitRepository(repo);
+    const owner = resolve(repo, 'ノート');
+    const other = resolve(repo, '日記帳');
+    mkdirSync(owner, { recursive: true });
+    mkdirSync(other, { recursive: true });
+    const legacyDir = resolve(repo, '.git', 'ok-___');
+    execFileSync('git', ['init', '--bare', '--quiet', legacyDir]);
+    execFileSync('git', ['config', 'core.worktree', owner], {
+      env: { ...process.env, GIT_DIR: legacyDir },
+    });
+
+    expect((await initShadowRepo(owner)).gitDir).toBe(legacyDir);
+    expect((await initShadowRepo(other)).gitDir).not.toBe(legacyDir);
   });
 
   test('R9 rename shim: legacy .git/openknowledge/ is renamed to .git/ok/', async () => {
@@ -675,8 +720,18 @@ describe('parkBranch', () => {
 
     const state = await readParkedState(shadow, 'feature', SERVICE_WRITER.id, 'guide');
     expect(state).not.toBeNull();
-    expect(state?.markdown).toBe('# Guide v2');
-    expect(state?.diskSnapshot).toBe('# Guide v1');
+    expect(state?.markdown).toBe('# Guide v2\n');
+    expect(state?.diskSnapshot).toBe('# Guide v1\n');
+  });
+
+  test('readParkedState returns the parked markdown byte for byte', async () => {
+    const parked = '\n  # Guide v2\r\n\nbody  \n\n';
+    await parkBranch(shadow, 'feature', SERVICE_WRITER.id, [
+      { docName: 'guide', markdown: parked, diskSnapshot: '# Guide v1\n' },
+    ]);
+
+    const state = await readParkedState(shadow, 'feature', SERVICE_WRITER.id, 'guide');
+    expect(state?.markdown).toBe(parked);
   });
 
   test('readParkedState returns null when no park exists', async () => {
@@ -1626,6 +1681,36 @@ describe('gcCheckpointRefs (bridge-correctness SPEC §6 R7 + review iteration 5)
           metadata: { diskBytes: 41, discardedBytes: 66 },
         });
         return;
+      case 'external-change-both-kept':
+        await saveInMemoryCheckpoint(shadow, 'content/docs', {
+          kind,
+          docName: 'n.md',
+          contents: `n${tag}\n`,
+          label: 'l',
+          date,
+          metadata: { side: 'theirs', keptBlocks: 1 },
+        });
+        return;
+      case 'external-change-kept-live':
+        await saveInMemoryCheckpoint(shadow, 'content/docs', {
+          kind,
+          docName: 'o.md',
+          contents: `o${tag}\n`,
+          label: 'l',
+          date,
+          metadata: { side: 'theirs', reason: 'check-failed' },
+        });
+        return;
+      case 'external-change-no-engine':
+        await saveInMemoryCheckpoint(shadow, 'content/docs', {
+          kind,
+          docName: 'p.mmd',
+          contents: `p${tag}\n`,
+          label: 'l',
+          date,
+          metadata: { side: 'theirs', fileType: 'mermaid' },
+        });
+        return;
       case 'auto-consolidation':
         await writeAutoConsolidationCheckpoint(shadow, tag === '' ? 1 : Number(tag));
         return;
@@ -1661,6 +1746,76 @@ describe('gcCheckpointRefs (bridge-correctness SPEC §6 R7 + review iteration 5)
 
     expect(result.scanned).toBe(CHECKPOINT_KINDS.length);
     expect(result.retained).toBe(CHECKPOINT_KINDS.length);
+  });
+
+  test('a document-scoped history kind keeps its cap per document and never expires', async () => {
+    const { gcCheckpointRefs } = await import('./shadow-repo.ts');
+    const seed = (docName: string, rank: number): Promise<string> =>
+      saveInMemoryCheckpoint(shadow, 'content/docs', {
+        kind: 'external-change-both-kept',
+        docName,
+        contents: `${docName} ${rank}\n`,
+        label: 'l',
+        date: seedDate(rank),
+        metadata: { side: 'theirs', keptBlocks: 1 },
+      });
+    const quiet = [await seed('quiet.md', 1), await seed('quiet.md', 2)];
+    const busy: string[] = [];
+    for (let rank = 3; rank <= 8; rank++) busy.push(await seed('busy.md', rank));
+
+    const result = await gcCheckpointRefs(shadow, 'main', {
+      ...DEFAULT_CHECKPOINT_RETENTION,
+      maxExternalChangeBothKeptPerDocument: 3,
+      ttlMs: 1,
+    });
+
+    expect(result.deletedExternalChangeBothKept).toBe(3);
+    const remaining = (
+      await shadowGit(shadow).raw(
+        'for-each-ref',
+        '--format=%(objectname)',
+        'refs/checkpoints/main/',
+      )
+    )
+      .trim()
+      .split('\n')
+      .sort();
+    expect(remaining).toEqual([...quiet, ...busy.slice(3)].sort());
+  });
+
+  test('outside versions of files with no merge engine keep a per-document cap and never expire', async () => {
+    const { gcCheckpointRefs } = await import('./shadow-repo.ts');
+    const seed = (docName: string, rank: number): Promise<string> =>
+      saveInMemoryCheckpoint(shadow, 'content/docs', {
+        kind: 'external-change-no-engine',
+        docName,
+        contents: `${docName} ${rank}\n`,
+        label: 'l',
+        date: seedDate(rank),
+        metadata: { side: 'theirs', fileType: 'excalidraw' },
+      });
+    const quiet = await seed('quiet.excalidraw', 1);
+    const busy: string[] = [];
+    for (let rank = 2; rank <= 5; rank++) busy.push(await seed('busy.excalidraw', rank));
+
+    const result = await gcCheckpointRefs(shadow, 'main', {
+      ...DEFAULT_CHECKPOINT_RETENTION,
+      maxExternalChangeNoEnginePerDocument: 2,
+      ttlMs: 1,
+    });
+
+    expect(result.deletedExternalChangeNoEngine).toBe(2);
+    const remaining = (
+      await shadowGit(shadow).raw(
+        'for-each-ref',
+        '--format=%(objectname)',
+        'refs/checkpoints/main/',
+      )
+    )
+      .trim()
+      .split('\n')
+      .sort();
+    expect(remaining).toEqual([quiet, ...busy.slice(2)].sort());
   });
 
   test('every registered kind is actually REAPED at its own limit, not merely bucketed', async () => {
@@ -1744,13 +1899,18 @@ describe('checkpoint chain anchoring', () => {
       .split(/\s+/)
       .slice(1);
 
-  test('a kind anchors the chain exactly when its retention bucket is count-only', async () => {
+  test('a kind that anchors the chain is count-only, and a single-document kind never anchors', async () => {
     const { GC_BUCKET_POLICY } = await import('./shadow-repo.ts');
     for (const kind of CHECKPOINT_KINDS) {
       const { chainAnchor, gcBucket } = CHECKPOINT_KIND_REGISTRY[kind];
-      expect(`${kind}:chainAnchor=${chainAnchor}`).toBe(
-        `${kind}:chainAnchor=${!GC_BUCKET_POLICY[gcBucket].applyTtl}`,
-      );
+      if (chainAnchor) {
+        expect(`${kind}:applyTtl=${GC_BUCKET_POLICY[gcBucket].applyTtl}`).toBe(
+          `${kind}:applyTtl=false`,
+        );
+      }
+      if (CHECKPOINT_SAMPLE_BY_KIND[kind].docName !== null) {
+        expect(`${kind}:chainAnchor=${chainAnchor}`).toBe(`${kind}:chainAnchor=false`);
+      }
     }
   });
 
@@ -2169,6 +2329,7 @@ describe('shadow repo excludes OpenKnowledge machine-local state', () => {
     fsTracedRecorder.renameSources.length = 0;
 
     const written = applySkillWrite({
+      boundary: projectRoot,
       skillsRoot,
       name: 'trip-log',
       body: '# Steps\n\nDo the thing.',
@@ -2295,7 +2456,7 @@ describe('shadow repo excludes OpenKnowledge machine-local state', () => {
       expect(
         warnings.some((message) =>
           message.includes(
-            '[shadow-repo] could not read the index to clear machine-local entries — none were dropped and an unknown number are still staged',
+            '[shadow-repo] could not read the index to clear excluded entries — none were dropped and an unknown number are still staged',
           ),
         ),
       ).toBe(true);
@@ -2335,9 +2496,7 @@ describe('shadow repo excludes OpenKnowledge machine-local state', () => {
       const infos = infoSpy.mock.calls.map((call) => String(call[1] ?? ''));
       expect(
         infos.some((message) =>
-          message.includes(
-            '[shadow-repo] dropped machine-local entries a previous build had staged',
-          ),
+          message.includes('[shadow-repo] dropped excluded entries a previous build had staged'),
         ),
       ).toBe(false);
     } finally {
@@ -2507,5 +2666,179 @@ describe('shadow repo excludes OpenKnowledge machine-local state', () => {
     const status = await sg.raw('status', '--porcelain', '--untracked-files=all');
 
     expect(status).not.toContain('.ok/local/');
+  });
+});
+
+describe('shadow repo excludes a git dir that lives inside the work tree under another name', () => {
+  let projectRoot: string;
+  let shadow: ShadowHandle;
+
+  const writer: WriterIdentity = {
+    id: 'human-ada',
+    name: 'Ada Lovelace',
+    email: 'ada@example.com',
+  };
+
+  function treePaths(handle: ShadowHandle, ref: string): string[] {
+    return execFileSync('git', ['ls-tree', '-r', '--name-only', ref], {
+      cwd: handle.workTree,
+      env: { ...process.env, GIT_DIR: handle.gitDir },
+      encoding: 'utf-8',
+    })
+      .split('\n')
+      .map((path) => path.trim())
+      .filter((path) => path.length > 0);
+  }
+
+  beforeEach(async () => {
+    projectRoot = resolve(tmpDir, 'project');
+    mkdirSync(projectRoot, { recursive: true });
+    const git = simpleGit(projectRoot);
+    await git.init();
+    await git.raw('config', 'user.name', 'Test');
+    await git.raw('config', 'user.email', 'test@test.com');
+    execFileSync('mv', ['.git', '.git.nosync'], { cwd: projectRoot });
+    symlinkSync('.git.nosync', resolve(projectRoot, '.git'));
+    writeFileSync(resolve(projectRoot, 'intro.md'), '# Hello\n');
+    shadow = await initShadowRepo(projectRoot);
+  });
+
+  test('derives anchored excludes for the symlink target and the shadow dir', () => {
+    expect(gitDirExcludePatterns(shadow)).toEqual(['/.git.nosync/', '/.git.nosync/ok/']);
+    const exclude = readFileSync(resolve(shadow.gitDir, 'info/exclude'), 'utf-8');
+    expect(exclude).toContain('/.git.nosync/\n');
+  });
+
+  test('a regular .git directory needs no extra excludes', async () => {
+    const plainRoot = resolve(tmpDir, 'plain');
+    mkdirSync(plainRoot, { recursive: true });
+    await simpleGit(plainRoot).init();
+    const plainShadow = await initShadowRepo(plainRoot);
+    expect(gitDirExcludePatterns(plainShadow)).toEqual([]);
+  });
+
+  test('WIP commits never stage the shadow repo or the project git dir', async () => {
+    await commitWip(shadow, writer, '.', 'WIP: first');
+    writeFileSync(resolve(projectRoot, 'intro.md'), '# Hello again\n');
+    await commitWip(shadow, writer, '.', 'WIP: second');
+
+    const paths = treePaths(shadow, `refs/wip/main/${writer.id}`);
+    expect(paths).toContain('intro.md');
+    expect(paths.filter((path) => path.startsWith('.git.nosync/'))).toEqual([]);
+  });
+
+  test('the fan-out tree never stages the shadow repo or the project git dir', async () => {
+    await commitWip(shadow, writer, '.', 'WIP: seed objects');
+    const tree = await buildWipTree(shadow, '.');
+    const paths = treePaths(shadow, tree);
+    expect(paths).toContain('intro.md');
+    expect(paths.filter((path) => path.startsWith('.git.nosync/'))).toEqual([]);
+  });
+
+  test('a fan-out index that already staged the git dir is swept on the next build', async () => {
+    const fanoutIndex = resolve(shadow.gitDir, FANOUT_INDEX_NAME);
+    const excludeFile = resolve(shadow.gitDir, 'info/exclude');
+    const realExclude = readFileSync(excludeFile, 'utf-8');
+    writeFileSync(excludeFile, '');
+    try {
+      execFileSync('git', ['add', '-A', '.'], {
+        cwd: shadow.workTree,
+        env: {
+          ...process.env,
+          GIT_DIR: shadow.gitDir,
+          GIT_WORK_TREE: shadow.workTree,
+          GIT_INDEX_FILE: fanoutIndex,
+        },
+      });
+    } finally {
+      writeFileSync(excludeFile, realExclude);
+    }
+
+    const tree = await buildWipTree(shadow, '.');
+    expect(treePaths(shadow, tree).filter((path) => path.startsWith('.git.nosync/'))).toEqual([]);
+  });
+
+  test('a git dir reached through a `.git` pointer file is fully excluded from staging', async () => {
+    const pointerRoot = resolve(tmpDir, 'pointer-project');
+    mkdirSync(pointerRoot, { recursive: true });
+    const gitData = resolve(pointerRoot, '.gitdata');
+    execFileSync('git', ['init', `--separate-git-dir=${gitData}`, pointerRoot]);
+    execFileSync('git', ['config', 'user.name', 'Test'], {
+      cwd: pointerRoot,
+      env: { ...process.env, GIT_DIR: gitData },
+    });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], {
+      cwd: pointerRoot,
+      env: { ...process.env, GIT_DIR: gitData },
+    });
+    writeFileSync(resolve(pointerRoot, 'intro.md'), '# Hello\n');
+    const pointerShadow = await initShadowRepo(pointerRoot);
+
+    expect(gitDirExcludePatterns(pointerShadow)).toEqual(['/.gitdata/', '/.gitdata/ok/']);
+
+    await commitWip(pointerShadow, writer, '.', 'WIP: pointer');
+    const paths = treePaths(pointerShadow, `refs/wip/main/${writer.id}`);
+    expect(paths).toContain('intro.md');
+    expect(paths.filter((path) => path.startsWith('.gitdata/'))).toEqual([]);
+  });
+
+  test('a git dir that resolves outside the work tree contributes no excludes', async () => {
+    const externalRoot = resolve(tmpDir, 'external-project');
+    mkdirSync(externalRoot, { recursive: true });
+    const externalGitDir = resolve(tmpDir, 'external-store');
+    execFileSync('git', ['init', `--separate-git-dir=${externalGitDir}`, externalRoot]);
+    execFileSync('git', ['config', 'user.name', 'Test'], {
+      cwd: externalRoot,
+      env: { ...process.env, GIT_DIR: externalGitDir },
+    });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], {
+      cwd: externalRoot,
+      env: { ...process.env, GIT_DIR: externalGitDir },
+    });
+    writeFileSync(resolve(externalRoot, 'intro.md'), '# Hello\n');
+    const externalShadow = await initShadowRepo(externalRoot);
+
+    expect(gitDirExcludePatterns(externalShadow)).toEqual([]);
+    const exclude = readFileSync(resolve(externalShadow.gitDir, 'info/exclude'), 'utf-8');
+    expect(exclude).not.toContain('/../');
+  });
+
+  test('a git dir named with a glob metacharacter still lets other content stage', async () => {
+    const metaRoot = resolve(tmpDir, 'meta-project');
+    mkdirSync(metaRoot, { recursive: true });
+    const git = simpleGit(metaRoot);
+    await git.init();
+    await git.raw('config', 'user.name', 'Test');
+    await git.raw('config', 'user.email', 'test@test.com');
+    execFileSync('mv', ['.git', '*'], { cwd: metaRoot });
+    symlinkSync('*', resolve(metaRoot, '.git'));
+    mkdirSync(resolve(metaRoot, 'docs'), { recursive: true });
+    writeFileSync(resolve(metaRoot, 'docs/note.md'), '# Note\n');
+    writeFileSync(resolve(metaRoot, 'intro.md'), '# Hello\n');
+    const metaShadow = await initShadowRepo(metaRoot);
+
+    expect(gitDirExcludePatterns(metaShadow)).toEqual(['/\\*/', '/\\*/ok/']);
+
+    await commitWip(metaShadow, writer, '.', 'WIP: meta');
+    const paths = treePaths(metaShadow, `refs/wip/main/${writer.id}`);
+    expect(paths).toContain('docs/note.md');
+    expect(paths).toContain('intro.md');
+    expect(paths.some((path) => path.startsWith('*/'))).toBe(false);
+  });
+
+  test('a git dir name containing a newline is skipped, not written as a broken pattern', async () => {
+    const nlRoot = resolve(tmpDir, 'newline-project');
+    mkdirSync(nlRoot, { recursive: true });
+    const git = simpleGit(nlRoot);
+    await git.init();
+    await git.raw('config', 'user.name', 'Test');
+    await git.raw('config', 'user.email', 'test@test.com');
+    const weird = 'git\nweird';
+    execFileSync('mv', ['.git', weird], { cwd: nlRoot });
+    symlinkSync(weird, resolve(nlRoot, '.git'));
+    writeFileSync(resolve(nlRoot, 'intro.md'), '# Hello\n');
+    const nlShadow = await initShadowRepo(nlRoot);
+
+    expect(gitDirExcludePatterns(nlShadow)).toEqual([]);
   });
 });

@@ -5,6 +5,10 @@ export function shellSingleQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
+export function fishSingleQuote(s: string): string {
+  return `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+}
+
 export interface TerminalLaunchCommand {
   readonly executable: string;
   readonly args: readonly string[];
@@ -294,7 +298,9 @@ function buildClaudeSettingsJson(opts: BuildCliLaunchOptions): string | null {
   }
   if (opts.autoApproveOkTools === true) {
     settings.permissions = {
-      allow: [`mcp__${server}`, 'Bash(ok open:*)'],
+      allow: opts.cliCommandName
+        ? [`mcp__${server}`, `Bash(${opts.cliCommandName} open:*)`]
+        : [`mcp__${server}`],
       ask: OK_GATED_TOOL_NAMES.map((tool) => `mcp__${server}__${tool}`),
     };
   }
@@ -304,16 +310,45 @@ function buildClaudeSettingsJson(opts: BuildCliLaunchOptions): string | null {
   return JSON.stringify(settings);
 }
 
-function buildClaudeSettingsArg(opts: BuildCliLaunchOptions): string {
-  const settingsJson = buildClaudeSettingsJson(opts);
-  return settingsJson === null ? '' : `--settings ${shellSingleQuote(settingsJson)}`;
-}
-
 const ESC = '\x1b';
 const BRACKETED_PASTE_START = `${ESC}[200~`;
 const BRACKETED_PASTE_END = `${ESC}[201~`;
 
-const BRACKETED_PASTE_ENABLE_MARKER = '\x1b[?2004h';
+const TERMINAL_LINE_BREAK_RE = /\r\n?/g;
+const TERMINAL_UNSAFE_CONTROL_RE = new RegExp(
+  '[' + '\\u0000-\\u0008' + '\\u000b-\\u001f' + '\\u007f-\\u009f' + ']',
+  'g',
+);
+const TRAILING_LINE_BREAKS_RE = /\n*$/;
+
+export const TERMINAL_CONTROL_LABEL_NOTICE =
+  'Control characters in the text above are shown as <control-NNNN> labels; the source document holds the raw characters.';
+
+function controlLabel(control: string): string {
+  const codePoint = control.codePointAt(0) ?? 0;
+  return `<control-${codePoint.toString(16).toUpperCase().padStart(4, '0')}>`;
+}
+
+export function toTerminalPromptText(text: string): string {
+  let labeled = false;
+  const printable = text
+    .replace(TERMINAL_LINE_BREAK_RE, '\n')
+    .replace(TERMINAL_UNSAFE_CONTROL_RE, (control) => {
+      labeled = true;
+      return controlLabel(control);
+    });
+  if (!labeled) return printable;
+  const trailing = TRAILING_LINE_BREAKS_RE.exec(printable)?.[0] ?? '';
+  const body = printable.slice(0, printable.length - trailing.length);
+  return `${body}\n\n${TERMINAL_CONTROL_LABEL_NOTICE}${trailing}`;
+}
+
+export function buildTerminalInputBytes(text: string, bracketedPaste: boolean): string {
+  const printable = toTerminalPromptText(text);
+  return bracketedPaste ? `${BRACKETED_PASTE_START}${printable}${BRACKETED_PASTE_END}` : printable;
+}
+
+export const BRACKETED_PASTE_ENABLE_MARKER = '\x1b[?2004h';
 const HERMES_INJECT_DEBOUNCE_MS = 300;
 const HERMES_INJECT_CAP_MS = 4000;
 const WINDOWS_INJECT_SETTLE_MS = 800;
@@ -410,6 +445,7 @@ export interface BuildCliLaunchOptions {
   readonly mcpPreApprove?: boolean;
   readonly autoApproveOkTools?: boolean;
   readonly mcpServerName?: string;
+  readonly cliCommandName?: string;
 }
 
 export function buildWindowsCliLaunch(
@@ -452,38 +488,28 @@ export function buildWindowsCliLaunch(
   };
 }
 
-export function buildCliLaunchArgString(
+export function buildPosixCliLaunch(
   cli: TerminalCli,
   prompt: string | null | undefined,
   opts: BuildCliLaunchOptions = {},
-): string {
+): TerminalLaunchCommand {
   const info: TerminalCliInfo = TERMINAL_CLIS[cli];
   const server = approvedServerName(opts);
+  const settingsJson = cli === 'claude' ? buildClaudeSettingsJson(opts) : null;
   const fixedArgs =
-    cli === 'claude'
-      ? buildClaudeSettingsArg(opts)
+    settingsJson !== null
+      ? ['--settings', settingsJson]
       : cli === 'codex' && opts.autoApproveOkTools === true && server !== null
-        ? `-c ${shellSingleQuote(codexAutoApproveSetting(server, '"'))}`
-        : '';
-  const fixedPrefix = fixedArgs ? `${fixedArgs} ` : '';
-  const sub = info.subcommand ? `${info.subcommand} ` : '';
+        ? ['-c', codexAutoApproveSetting(server, '"')]
+        : [];
+  const args = [...(info.subcommand ? [info.subcommand] : []), ...fixedArgs];
   if (info.startupInjection != null || prompt == null || prompt.length === 0) {
-    return `${info.bin} ${sub}${fixedPrefix}`.trimEnd();
+    return { executable: info.bin, args };
   }
-  const promptFlag = info.promptFlag ? `${info.promptFlag} ` : '';
-  return `${info.bin} ${sub}${fixedPrefix}${promptFlag}${shellSingleQuote(prompt)}`;
-}
-
-export function buildCliLaunchCommand(
-  cli: TerminalCli,
-  prompt: string,
-  opts: BuildCliLaunchOptions = {},
-): string {
-  return `${buildCliLaunchArgString(cli, prompt, opts)}\r`;
-}
-
-export function buildClaudeLaunchCommand(prompt: string, opts: BuildCliLaunchOptions = {}): string {
-  return buildCliLaunchCommand('claude', prompt, opts);
+  return {
+    executable: info.bin,
+    args: [...args, ...(info.promptFlag ? [info.promptFlag] : []), toTerminalPromptText(prompt)],
+  };
 }
 
 export function startupInjectionFor(
@@ -501,6 +527,5 @@ export function buildStartupInjectionBytes(
 ): string | null {
   const injection = startupInjectionFor(cli, platform);
   if (injection == null || prompt == null || prompt.length === 0) return null;
-  const safe = prompt.replaceAll(ESC, '');
-  return `${BRACKETED_PASTE_START}${safe}${BRACKETED_PASTE_END}${injection.submit}`;
+  return `${buildTerminalInputBytes(prompt, true)}${injection.submit}`;
 }

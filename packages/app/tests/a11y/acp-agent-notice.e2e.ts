@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import AxeBuilder from '@axe-core/playwright';
 import type { Locator, Page } from '@playwright/test';
-import { expect, test } from '../stress/_helpers';
+import { expect, test, threadRosterDelivered } from '../stress/_helpers';
 
 interface EnvelopeFixture {
   agents: Record<string, { source: string; id: string; name: string }>;
@@ -46,7 +46,7 @@ const ANNOUNCER = '[data-testid="agent-thread-warning-announcer"]';
 const THREAD_ROOT = '[data-agent-thread-root]';
 const COMPOSER = '[data-testid="agent-thread-composer"]';
 const AGENTS_PANEL = '[data-agents-panel-mount]';
-const AGENTS_PANEL_REVEAL = '[data-terminal-reveal="right"]';
+const AGENTS_HEADER_BUTTON = 'header-pane-button-agents';
 const DOCK_EMPTY = '[data-testid="sessions-dock-empty"]';
 const TRANSCRIPT = '[data-testid="agent-thread-transcript"]';
 const EMPTY_AGENT_CATALOG = { agents: [], stale: false, maxThreads: 8 };
@@ -79,26 +79,8 @@ function readAnnouncements(page: Page): Promise<string[]> {
   );
 }
 
-function threadRosterDelivered(page: Page): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error('thread socket never delivered its roster')),
-      30_000,
-    );
-    page.on('websocket', (socket) => {
-      if (!socket.url().includes('/collab/thread')) return;
-      socket.on('framereceived', (frame) => {
-        if (typeof frame.payload !== 'string') return;
-        if (!frame.payload.includes('"op":"threads"')) return;
-        clearTimeout(timer);
-        resolve();
-      });
-    });
-  });
-}
-
 async function openAgentsPanel(page: Page): Promise<void> {
-  await page.locator(AGENTS_PANEL_REVEAL).click({ timeout: PANEL_OPEN_TIMEOUT_MS });
+  await page.getByTestId(AGENTS_HEADER_BUTTON).click({ timeout: PANEL_OPEN_TIMEOUT_MS });
   await expect(
     page.locator(AGENTS_PANEL).locator(DOCK_EMPTY),
     'the agents panel did not open onto an empty session dock: it is either collapsed to zero width or a session was seeded into it',
@@ -218,6 +200,7 @@ function readTypography(card: Locator) {
       };
     };
     return {
+      width: el.getBoundingClientRect().width,
       devicePixelRatio: window.devicePixelRatio,
       label: measure(el.querySelector('p')),
       body: measure(el.lastElementChild as HTMLElement | null),
@@ -257,9 +240,11 @@ test.describe('narrow window', () => {
     await expect(card).toBeVisible({ timeout: 15_000 });
 
     await page.setViewportSize({ width: 320, height: 640 });
-    await page.waitForFunction(() => document.documentElement.clientWidth === 320, null, {
-      timeout: 10_000,
-    });
+    await expect(async () => {
+      const { width } = await readCardMetrics(card);
+      expect(width).toBeGreaterThan(0);
+      expect(width).toBeLessThanOrEqual(320);
+    }).toPass({ timeout: 10_000 });
 
     const metrics = await readCardMetrics(card);
     expect(metrics.width).toBeGreaterThan(0);
@@ -303,11 +288,14 @@ test.describe('400% browser zoom', () => {
     const unzoomed = await readCardMetrics(card);
 
     await page.setViewportSize({ width: 320, height: 256 });
-    await page.waitForFunction(() => document.documentElement.clientWidth === 320, null, {
-      timeout: 10_000,
-    });
+    await expect(async () => {
+      const { width } = await readCardMetrics(card);
+      expect(width).toBeGreaterThan(0);
+      expect(width).toBeLessThanOrEqual(320);
+    }).toPass({ timeout: 10_000 });
 
     const zoomed = await readTypography(card);
+    expect(zoomed.width).toBeLessThanOrEqual(320);
     expect(zoomed.devicePixelRatio).toBe(4);
 
     expect(zoomed.label.fontSize).toBeGreaterThanOrEqual(unzoomed.fontSize);

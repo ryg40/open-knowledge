@@ -6,6 +6,12 @@ export type MapDrivenSpliceFallbackReason =
   | 'parse-error'
   | 'missing-position';
 
+export type ResidualMergeSpliceUnavailableReason =
+  | MapDrivenSpliceFallbackReason
+  | 'composition-adjusted'
+  | 'doc-edge-runs'
+  | 'not-settled';
+
 export type MapDrivenSpliceMemoSkipReason =
   | 'narrowed'
   | 'empty-children'
@@ -13,10 +19,78 @@ export type MapDrivenSpliceMemoSkipReason =
   | 'position-not-numeric'
   | 'compose-failed';
 
+export type StoreDiskCompareOutcome =
+  | 'match'
+  | 'changed'
+  | 'drift'
+  | 'absent'
+  | 'stale-refused'
+  | StorePendingReason;
+
+export type StorePendingReason =
+  | 'pending-unreadable'
+  | 'pending-exhausted'
+  | 'pending-base-moved'
+  | 'pending-no-intake'
+  | 'pending-intake-failed'
+  | 'pending-intake-failed-no-base'
+  | 'pending-conflict';
+
+export type ReceiptIntakeSkip = 'echo' | 'superseded';
+
+export type ReceiptAtLoad = 'unchanged' | 'changed' | 'missing';
+
+export type EnginelessStoreOutcome =
+  | 'match'
+  | 'kept-live'
+  | 'held-no-history-or-backup'
+  | 'held-unreadable'
+  | 'held-exhausted'
+  | 'held-not-utf8'
+  | 'absent';
+
+export type EnginelessIntakeOutcome =
+  | 'applied'
+  | 'kept-live'
+  | 'unchanged'
+  | 'held-no-history-or-backup'
+  | 'held-not-utf8';
+
+export type ManagedArtifactMergeOutcome =
+  | 'applied'
+  | 'unchanged'
+  | 'merged'
+  | 'both-kept'
+  | 'kept-live'
+  | 'stash-fallback'
+  | 'held';
+
+type ManagedArtifactMergeKey = `${'store' | 'intake'}:${ManagedArtifactMergeOutcome}`;
+
+export type ConfigOutsideChangeOutcome =
+  | 'applied'
+  | 'applied-displaced'
+  | 'rejected'
+  | 'invalid-kept-live'
+  | 'held-no-history-or-backup'
+  | 'held-not-utf8'
+  | 'held-exhausted'
+  | 'deferred';
+
+type ConfigOutsideChangeKey = `${'store' | 'intake'}:${ConfigOutsideChangeOutcome}`;
+
 export interface ReconciliationMetrics {
   reconcileCount: number;
   conflictCount: number;
   reconcileInsertDedupSkipped: number;
+  reconcileCheckFailed: number;
+  reconcileConstructCheckSkipped: number;
+  reconcileBothKept: number;
+  reconcileBothKeptBlocks: number;
+  reconcileKeptLive: number;
+  mergeHistoryCheckpointCreated: number;
+  mergeHistoryCheckpointFailures: number;
+  mergeHistoryUnavailable: number;
   staleExternalWriteRefused: number;
   concurrentOverwriteRefused: number;
   batchCount: number;
@@ -74,6 +148,11 @@ export interface ReconciliationMetrics {
   mapDrivenSpliceMemoHits: number;
   mapDrivenSpliceMemoSkips: Partial<Record<MapDrivenSpliceMemoSkipReason, number>>;
   observerAResidualMergeRuns: number;
+  observerAResidualMergeSpliceLanded: number;
+  observerAResidualMergeSpliceBlockedLossy: number;
+  observerAResidualMergeSpliceUnavailable: Partial<
+    Record<ResidualMergeSpliceUnavailableReason, number>
+  >;
   /**
    * Count of Observer A duplication-gate recoveries: a substantive body line materialized more times
    * in the fragment than clean Y.Text justified, provenance-confirmed as a server-versus-client
@@ -94,12 +173,29 @@ export interface ReconciliationMetrics {
   persistenceDuplicationSpared: number;
   persistenceDuplicationBaselineMissing: number;
   persistenceDuplicationBaselineRefusals: number;
-  persistenceDivergenceRealign: number;
-  persistenceDivergenceRealignCheckpointCreated: number;
-  persistenceDivergenceRealignDeduped: number;
+  storeDiskCompare: Partial<Record<StoreDiskCompareOutcome, number>>;
+  storeDiskCompareReadRetries: number;
+  storeRestatRefused: number;
+  receiptIntakeSkip: Partial<Record<ReceiptIntakeSkip, number>>;
+  receiptAtLoad: Partial<Record<ReceiptAtLoad, number>>;
+  receiptPersistFailures: number;
+  receiptRecordsUnreadable: number;
+  receiptRecordsOtherVersion: number;
+  receiptLogRefused: number;
   managedArtifactReconcile: number;
   managedArtifactReconcileCheckpointCreated: number;
   managedArtifactReconcileDeduped: number;
+  managedArtifactMerge: Partial<Record<ManagedArtifactMergeKey, number>>;
+  enginelessStore: Partial<Record<EnginelessStoreOutcome, number>>;
+  enginelessIntake: Partial<Record<EnginelessIntakeOutcome, number>>;
+  configOutsideChange: Partial<Record<ConfigOutsideChangeKey, number>>;
+  noEngineHistoryCheckpointCreated: number;
+  noEngineHistoryCheckpointFailures: number;
+  heldSaves: number;
+  heldSaveRetries: number;
+  heldSaveRetryFailures: number;
+  displacedVersionBackups: number;
+  displacedVersionBackupFailures: number;
   reDeriveBackstopTripped: number;
   /**
    * Count of Observer A settlement checks that detected a drain settling split-brain beyond
@@ -126,12 +222,41 @@ export interface ReconciliationMetrics {
   removalRedirectChainCycles: number;
   authDocLineageMismatchCount: number;
   authDocLineageGuardErrors: number;
+  freshnessPasses: number;
+  freshnessPassesIncomplete: number;
+  freshnessFinds: number;
+  freshnessFilesHashed: number;
+  freshnessCarryOver: number;
+  watcherErrors: number;
+  watcherResubscribes: number;
+  watcherRootMissing: number;
+  watcherUnreadableEntries: number;
+  inPlaceSkillRescanFailures: number;
+  watcherResubscribesAbandoned: number;
+  vanishPending: number;
+  vanishPairedIdentity: number;
+  vanishPairedHash: number;
+  vanishRecreated: number;
+  vanishDeleted: number;
+  vanishShutdown: number;
+  vanishUnconfirmed: number;
+  outsideRenameRecordFailures: number;
+  outsideRenameClaimFailures: number;
+  branchSwitchRecheckShortfalls: number;
 }
 
 const counters: ReconciliationMetrics = {
   reconcileCount: 0,
   conflictCount: 0,
   reconcileInsertDedupSkipped: 0,
+  reconcileCheckFailed: 0,
+  reconcileConstructCheckSkipped: 0,
+  reconcileBothKept: 0,
+  reconcileBothKeptBlocks: 0,
+  reconcileKeptLive: 0,
+  mergeHistoryCheckpointCreated: 0,
+  mergeHistoryCheckpointFailures: 0,
+  mergeHistoryUnavailable: 0,
   staleExternalWriteRefused: 0,
   concurrentOverwriteRefused: 0,
   batchCount: 0,
@@ -189,6 +314,9 @@ const counters: ReconciliationMetrics = {
   mapDrivenSpliceMemoSkips: {},
   mapDrivenSpliceFallback: {},
   observerAResidualMergeRuns: 0,
+  observerAResidualMergeSpliceLanded: 0,
+  observerAResidualMergeSpliceBlockedLossy: 0,
+  observerAResidualMergeSpliceUnavailable: {},
   observerADuplicationRederives: 0,
   observerADuplicationCheckpointCreated: 0,
   observerAApplyLoss: 0,
@@ -204,12 +332,29 @@ const counters: ReconciliationMetrics = {
   persistenceDuplicationSpared: 0,
   persistenceDuplicationBaselineMissing: 0,
   persistenceDuplicationBaselineRefusals: 0,
-  persistenceDivergenceRealign: 0,
-  persistenceDivergenceRealignCheckpointCreated: 0,
-  persistenceDivergenceRealignDeduped: 0,
+  storeDiskCompare: {},
+  storeDiskCompareReadRetries: 0,
+  storeRestatRefused: 0,
+  receiptIntakeSkip: {},
+  receiptAtLoad: {},
+  receiptPersistFailures: 0,
+  receiptRecordsUnreadable: 0,
+  receiptRecordsOtherVersion: 0,
+  receiptLogRefused: 0,
   managedArtifactReconcile: 0,
   managedArtifactReconcileCheckpointCreated: 0,
   managedArtifactReconcileDeduped: 0,
+  managedArtifactMerge: {},
+  enginelessStore: {},
+  enginelessIntake: {},
+  configOutsideChange: {},
+  noEngineHistoryCheckpointCreated: 0,
+  noEngineHistoryCheckpointFailures: 0,
+  heldSaves: 0,
+  heldSaveRetries: 0,
+  heldSaveRetryFailures: 0,
+  displacedVersionBackups: 0,
+  displacedVersionBackupFailures: 0,
   reDeriveBackstopTripped: 0,
   bridgeSplitBrainRederives: 0,
   bridgeSplitBrainRederivesSuppressed: 0,
@@ -231,6 +376,27 @@ const counters: ReconciliationMetrics = {
   removalRedirectChainCycles: 0,
   authDocLineageMismatchCount: 0,
   authDocLineageGuardErrors: 0,
+  freshnessPasses: 0,
+  freshnessPassesIncomplete: 0,
+  freshnessFinds: 0,
+  freshnessFilesHashed: 0,
+  freshnessCarryOver: 0,
+  watcherErrors: 0,
+  watcherResubscribes: 0,
+  watcherRootMissing: 0,
+  watcherUnreadableEntries: 0,
+  inPlaceSkillRescanFailures: 0,
+  watcherResubscribesAbandoned: 0,
+  vanishPending: 0,
+  vanishPairedIdentity: 0,
+  vanishPairedHash: 0,
+  vanishRecreated: 0,
+  vanishDeleted: 0,
+  vanishShutdown: 0,
+  vanishUnconfirmed: 0,
+  outsideRenameRecordFailures: 0,
+  outsideRenameClaimFailures: 0,
+  branchSwitchRecheckShortfalls: 0,
 };
 
 export function incrementReconcile(): void {
@@ -243,6 +409,35 @@ export function incrementConflict(): void {
 
 export function incrementReconcileInsertDedupSkipped(): void {
   counters.reconcileInsertDedupSkipped++;
+}
+
+export function incrementReconcileCheckFailed(): void {
+  counters.reconcileCheckFailed++;
+}
+
+export function incrementReconcileConstructCheckSkipped(): void {
+  counters.reconcileConstructCheckSkipped++;
+}
+
+export function incrementReconcileBothKept(keptBlocks: number): void {
+  counters.reconcileBothKept++;
+  counters.reconcileBothKeptBlocks += keptBlocks;
+}
+
+export function incrementReconcileKeptLive(): void {
+  counters.reconcileKeptLive++;
+}
+
+export function incrementMergeHistoryCheckpointCreated(): void {
+  counters.mergeHistoryCheckpointCreated++;
+}
+
+export function incrementMergeHistoryCheckpointFailures(): void {
+  counters.mergeHistoryCheckpointFailures++;
+}
+
+export function incrementMergeHistoryUnavailable(): void {
+  counters.mergeHistoryUnavailable++;
 }
 
 export function incrementStaleExternalWriteRefused(): void {
@@ -428,6 +623,21 @@ export function incrementObserverAResidualMergeRuns(): void {
   counters.observerAResidualMergeRuns++;
 }
 
+export function incrementObserverAResidualMergeSpliceLanded(): void {
+  counters.observerAResidualMergeSpliceLanded++;
+}
+
+export function incrementObserverAResidualMergeSpliceBlockedLossy(): void {
+  counters.observerAResidualMergeSpliceBlockedLossy++;
+}
+
+export function incrementObserverAResidualMergeSpliceUnavailable(
+  reason: ResidualMergeSpliceUnavailableReason,
+): void {
+  counters.observerAResidualMergeSpliceUnavailable[reason] =
+    (counters.observerAResidualMergeSpliceUnavailable[reason] ?? 0) + 1;
+}
+
 export function incrementObserverADuplicationRederives(): void {
   counters.observerADuplicationRederives++;
 }
@@ -488,16 +698,40 @@ export function incrementPersistenceDuplicationBaselineRefusals(): void {
   counters.persistenceDuplicationBaselineRefusals++;
 }
 
-export function incrementPersistenceDivergenceRealign(): void {
-  counters.persistenceDivergenceRealign++;
+export function incrementStoreDiskCompare(outcome: StoreDiskCompareOutcome): void {
+  counters.storeDiskCompare[outcome] = (counters.storeDiskCompare[outcome] ?? 0) + 1;
 }
 
-export function incrementPersistenceDivergenceRealignCheckpointCreated(): void {
-  counters.persistenceDivergenceRealignCheckpointCreated++;
+export function incrementStoreDiskCompareReadRetries(): void {
+  counters.storeDiskCompareReadRetries++;
 }
 
-export function incrementPersistenceDivergenceRealignDeduped(): void {
-  counters.persistenceDivergenceRealignDeduped++;
+export function incrementStoreRestatRefused(): void {
+  counters.storeRestatRefused++;
+}
+
+export function incrementReceiptIntakeSkip(kind: ReceiptIntakeSkip): void {
+  counters.receiptIntakeSkip[kind] = (counters.receiptIntakeSkip[kind] ?? 0) + 1;
+}
+
+export function incrementReceiptAtLoad(outcome: ReceiptAtLoad): void {
+  counters.receiptAtLoad[outcome] = (counters.receiptAtLoad[outcome] ?? 0) + 1;
+}
+
+export function incrementReceiptPersistFailures(): void {
+  counters.receiptPersistFailures++;
+}
+
+export function incrementReceiptRecordsUnreadable(count = 1): void {
+  counters.receiptRecordsUnreadable += count;
+}
+
+export function incrementReceiptRecordsOtherVersion(count: number): void {
+  counters.receiptRecordsOtherVersion += count;
+}
+
+export function incrementReceiptLogRefused(): void {
+  counters.receiptLogRefused++;
 }
 
 export function incrementManagedArtifactReconcile(): void {
@@ -510,6 +744,58 @@ export function incrementManagedArtifactReconcileCheckpointCreated(): void {
 
 export function incrementManagedArtifactReconcileDeduped(): void {
   counters.managedArtifactReconcileDeduped++;
+}
+
+export function incrementManagedArtifactMerge(
+  site: 'store' | 'intake',
+  outcome: ManagedArtifactMergeOutcome,
+): void {
+  const key: ManagedArtifactMergeKey = `${site}:${outcome}`;
+  counters.managedArtifactMerge[key] = (counters.managedArtifactMerge[key] ?? 0) + 1;
+}
+
+export function incrementEnginelessStore(outcome: EnginelessStoreOutcome): void {
+  counters.enginelessStore[outcome] = (counters.enginelessStore[outcome] ?? 0) + 1;
+}
+
+export function incrementEnginelessIntake(outcome: EnginelessIntakeOutcome): void {
+  counters.enginelessIntake[outcome] = (counters.enginelessIntake[outcome] ?? 0) + 1;
+}
+
+export function incrementConfigOutsideChange(
+  site: 'store' | 'intake',
+  outcome: ConfigOutsideChangeOutcome,
+): void {
+  const key: ConfigOutsideChangeKey = `${site}:${outcome}`;
+  counters.configOutsideChange[key] = (counters.configOutsideChange[key] ?? 0) + 1;
+}
+
+export function incrementHeldSave(): void {
+  counters.heldSaves++;
+}
+
+export function incrementHeldSaveRetry(): void {
+  counters.heldSaveRetries++;
+}
+
+export function incrementHeldSaveRetryFailures(): void {
+  counters.heldSaveRetryFailures++;
+}
+
+export function incrementDisplacedVersionBackups(): void {
+  counters.displacedVersionBackups++;
+}
+
+export function incrementDisplacedVersionBackupFailures(): void {
+  counters.displacedVersionBackupFailures++;
+}
+
+export function incrementNoEngineHistoryCheckpointCreated(): void {
+  counters.noEngineHistoryCheckpointCreated++;
+}
+
+export function incrementNoEngineHistoryCheckpointFailures(): void {
+  counters.noEngineHistoryCheckpointFailures++;
 }
 
 export function incrementReDeriveBackstopTripped(): void {
@@ -600,6 +886,101 @@ export function incrementAuthDocLineageGuardError(): void {
   counters.authDocLineageGuardErrors++;
 }
 
+export function incrementFreshnessPasses(): void {
+  counters.freshnessPasses++;
+}
+
+export function incrementFreshnessPassesIncomplete(): void {
+  counters.freshnessPassesIncomplete++;
+}
+
+export function addFreshnessFinds(count: number): void {
+  counters.freshnessFinds += count;
+}
+
+export function addFreshnessFilesHashed(count: number): void {
+  counters.freshnessFilesHashed += count;
+}
+
+export function addFreshnessCarryOver(count: number): void {
+  counters.freshnessCarryOver += count;
+}
+
+export function incrementWatcherErrors(): void {
+  counters.watcherErrors++;
+}
+
+export function incrementWatcherResubscribes(): void {
+  counters.watcherResubscribes++;
+}
+
+export function incrementWatcherRootMissing(): void {
+  counters.watcherRootMissing++;
+}
+
+export function incrementWatcherUnreadableEntries(): void {
+  counters.watcherUnreadableEntries++;
+}
+
+export function incrementInPlaceSkillRescanFailures(): void {
+  counters.inPlaceSkillRescanFailures++;
+}
+
+export function incrementWatcherResubscribesAbandoned(): void {
+  counters.watcherResubscribesAbandoned++;
+}
+
+export type VanishOutcome =
+  | 'pending'
+  | 'paired-identity'
+  | 'paired-hash'
+  | 'recreated'
+  | 'deleted'
+  | 'shutdown'
+  | 'unconfirmed';
+
+export function recordVanishOutcome(outcome: VanishOutcome): void {
+  switch (outcome) {
+    case 'pending':
+      counters.vanishPending++;
+      return;
+    case 'paired-identity':
+      counters.vanishPairedIdentity++;
+      return;
+    case 'paired-hash':
+      counters.vanishPairedHash++;
+      return;
+    case 'recreated':
+      counters.vanishRecreated++;
+      return;
+    case 'deleted':
+      counters.vanishDeleted++;
+      return;
+    case 'shutdown':
+      counters.vanishShutdown++;
+      return;
+    case 'unconfirmed':
+      counters.vanishUnconfirmed++;
+      return;
+    default: {
+      const unhandled: never = outcome;
+      throw new Error(`unhandled vanish outcome: ${String(unhandled)}`);
+    }
+  }
+}
+
+export function incrementOutsideRenameRecordFailures(): void {
+  counters.outsideRenameRecordFailures++;
+}
+
+export function incrementOutsideRenameClaimFailures(): void {
+  counters.outsideRenameClaimFailures++;
+}
+
+export function incrementBranchSwitchRecheckShortfalls(): void {
+  counters.branchSwitchRecheckShortfalls++;
+}
+
 export function incrementCollabSocketFilteredError(code: 'EPIPE' | 'ECONNRESET'): void {
   if (code === 'EPIPE') counters.collabSocketEpipeCount++;
   else counters.collabSocketEconnresetCount++;
@@ -650,8 +1031,18 @@ export function getMetrics(): ReconciliationMetrics {
     ...counters,
     cc1LastSeq: { ...counters.cc1LastSeq },
     bridgeToleranceApplied: { ...counters.bridgeToleranceApplied },
+    storeDiskCompare: { ...counters.storeDiskCompare },
+    receiptIntakeSkip: { ...counters.receiptIntakeSkip },
+    receiptAtLoad: { ...counters.receiptAtLoad },
+    managedArtifactMerge: { ...counters.managedArtifactMerge },
+    enginelessStore: { ...counters.enginelessStore },
+    enginelessIntake: { ...counters.enginelessIntake },
+    configOutsideChange: { ...counters.configOutsideChange },
     mapDrivenSpliceFallback: { ...counters.mapDrivenSpliceFallback },
     mapDrivenSpliceMemoSkips: { ...counters.mapDrivenSpliceMemoSkips },
+    observerAResidualMergeSpliceUnavailable: {
+      ...counters.observerAResidualMergeSpliceUnavailable,
+    },
   };
 }
 
@@ -659,6 +1050,14 @@ export function resetMetrics(): void {
   counters.reconcileCount = 0;
   counters.conflictCount = 0;
   counters.reconcileInsertDedupSkipped = 0;
+  counters.reconcileCheckFailed = 0;
+  counters.reconcileConstructCheckSkipped = 0;
+  counters.reconcileBothKept = 0;
+  counters.reconcileBothKeptBlocks = 0;
+  counters.reconcileKeptLive = 0;
+  counters.mergeHistoryCheckpointCreated = 0;
+  counters.mergeHistoryCheckpointFailures = 0;
+  counters.mergeHistoryUnavailable = 0;
   counters.staleExternalWriteRefused = 0;
   counters.concurrentOverwriteRefused = 0;
   counters.batchCount = 0;
@@ -716,6 +1115,9 @@ export function resetMetrics(): void {
   counters.mapDrivenSpliceMemoHits = 0;
   counters.mapDrivenSpliceMemoSkips = {};
   counters.observerAResidualMergeRuns = 0;
+  counters.observerAResidualMergeSpliceLanded = 0;
+  counters.observerAResidualMergeSpliceBlockedLossy = 0;
+  counters.observerAResidualMergeSpliceUnavailable = {};
   counters.observerADuplicationRederives = 0;
   counters.observerADuplicationCheckpointCreated = 0;
   counters.observerAApplyLoss = 0;
@@ -731,12 +1133,29 @@ export function resetMetrics(): void {
   counters.persistenceDuplicationSpared = 0;
   counters.persistenceDuplicationBaselineMissing = 0;
   counters.persistenceDuplicationBaselineRefusals = 0;
-  counters.persistenceDivergenceRealign = 0;
-  counters.persistenceDivergenceRealignCheckpointCreated = 0;
-  counters.persistenceDivergenceRealignDeduped = 0;
+  counters.storeDiskCompare = {};
+  counters.storeDiskCompareReadRetries = 0;
+  counters.storeRestatRefused = 0;
+  counters.receiptIntakeSkip = {};
+  counters.receiptAtLoad = {};
+  counters.receiptPersistFailures = 0;
+  counters.receiptRecordsUnreadable = 0;
+  counters.receiptRecordsOtherVersion = 0;
+  counters.receiptLogRefused = 0;
   counters.managedArtifactReconcile = 0;
   counters.managedArtifactReconcileCheckpointCreated = 0;
   counters.managedArtifactReconcileDeduped = 0;
+  counters.managedArtifactMerge = {};
+  counters.enginelessStore = {};
+  counters.enginelessIntake = {};
+  counters.configOutsideChange = {};
+  counters.noEngineHistoryCheckpointCreated = 0;
+  counters.noEngineHistoryCheckpointFailures = 0;
+  counters.heldSaves = 0;
+  counters.heldSaveRetries = 0;
+  counters.heldSaveRetryFailures = 0;
+  counters.displacedVersionBackups = 0;
+  counters.displacedVersionBackupFailures = 0;
   counters.reDeriveBackstopTripped = 0;
   counters.bridgeSplitBrainRederives = 0;
   counters.bridgeSplitBrainRederivesSuppressed = 0;
@@ -758,4 +1177,25 @@ export function resetMetrics(): void {
   counters.removalRedirectChainCycles = 0;
   counters.authDocLineageMismatchCount = 0;
   counters.authDocLineageGuardErrors = 0;
+  counters.freshnessPasses = 0;
+  counters.freshnessPassesIncomplete = 0;
+  counters.freshnessFinds = 0;
+  counters.freshnessFilesHashed = 0;
+  counters.freshnessCarryOver = 0;
+  counters.watcherErrors = 0;
+  counters.watcherResubscribes = 0;
+  counters.watcherRootMissing = 0;
+  counters.watcherUnreadableEntries = 0;
+  counters.inPlaceSkillRescanFailures = 0;
+  counters.watcherResubscribesAbandoned = 0;
+  counters.vanishPending = 0;
+  counters.vanishPairedIdentity = 0;
+  counters.vanishPairedHash = 0;
+  counters.vanishRecreated = 0;
+  counters.vanishDeleted = 0;
+  counters.vanishShutdown = 0;
+  counters.vanishUnconfirmed = 0;
+  counters.outsideRenameRecordFailures = 0;
+  counters.outsideRenameClaimFailures = 0;
+  counters.branchSwitchRecheckShortfalls = 0;
 }

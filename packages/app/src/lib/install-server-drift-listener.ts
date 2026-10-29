@@ -1,14 +1,19 @@
+// oxlint-disable ok/no-custom-toast -- pre-rule backlog: this toast.custom awaits a typed toast; delete this line once it is replaced. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-custom-toast
 import { t } from '@lingui/core/macro';
 import { createElement } from 'react';
 import { toast } from 'sonner';
 import { ServerDriftToast } from '@/components/ServerDriftToast';
+import { okCliCommandName } from '@/lib/channel-cli-copy';
 import type {
   OkDesktopBridge,
   OkServerRestartFailure,
   OkServerRestartOutcome,
   OkServerVersionDriftInfo,
 } from '@/lib/desktop-bridge-types';
-import { otherChannelRestartMessage } from '@/lib/restart-collab-server';
+import {
+  otherChannelRestartMessage,
+  unverifiedHolderRestartMessage,
+} from '@/lib/restart-collab-server';
 
 export function restartDisruptionWarning(): string {
   return t`Restarting closes this project's server. Connected agents (Claude Code, Codex, Cursor) will see their OpenKnowledge MCP connection close unexpectedly — you may need to restart the agent, or toggle its OpenKnowledge MCP server off and on, to reconnect.`;
@@ -33,8 +38,12 @@ export function restartFailureMessage(failure: OkServerRestartFailure): string {
       return otherChannelRestartMessage(failure.holderChannel);
     case 'eperm':
       return t`Couldn't restart the server — it's running under a different account. Restart your computer to clear it, then reopen this project.`;
-    case 'other':
-      return t`Couldn't restart the server automatically. Try running \`ok stop all\` in a terminal, then reopen this project — or restart your computer if it persists.`;
+    case 'other': {
+      const cliCommand = okCliCommandName();
+      return t`Couldn't restart the server automatically. Try running \`${cliCommand} stop all\` in a terminal, then reopen this project — or restart your computer if it persists.`;
+    }
+    case 'unverified':
+      return unverifiedHolderRestartMessage(failure.sigtermSent);
   }
 }
 
@@ -67,10 +76,10 @@ export function installServerDriftListener(opts: {
       (id) =>
         createElement(ServerDriftToast, {
           body: driftToastBody(info),
-          warning: restartDisruptionWarning(),
-          restartLabel: t`Restart with this app's version`,
-          cancelLabel: t`Not now`,
-          onRestart: () => {
+          detail: restartDisruptionWarning(),
+          actionLabel: t`Restart with this app's version`,
+          dismissLabel: t`Not now`,
+          onAction: () => {
             toast.dismiss(id);
             void runRestart(bridge);
           },

@@ -18,6 +18,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Switch } from '@/components/ui/switch';
+import { okCliCommandName } from '@/lib/channel-cli-copy';
 import { useConfigContext } from '@/lib/config-provider';
 import { restartCollabServer } from '@/lib/restart-collab-server';
 import { SettingsSectionHeader } from './SettingsSectionHeader';
@@ -228,7 +229,10 @@ export function NetworkAccessSection() {
           '[remote-access] restart IPC failed (config committed, server not restarted):',
           err,
         );
-        toast.error(t`Couldn't restart the server. Run ok start in this folder to retry.`);
+        const cliCommand = okCliCommandName();
+        toast.error(
+          t`Couldn't restart the server. Run ${cliCommand} start in this folder to retry.`,
+        );
       }
     }
   }
@@ -388,7 +392,6 @@ export function NetworkAccessSection() {
             {portError}
           </p>
         ) : null}
-        {}
         {portUnavailable && !probeUnavailableRedundant ? (
           <p
             id="settings-network-port-unavailable"
@@ -411,7 +414,6 @@ export function NetworkAccessSection() {
             {t`Port ${portDraft.trim()} is available.`}
           </p>
         ) : null}
-        {}
         {portInUse && !applying ? (
           <p
             id="settings-network-port-inuse"

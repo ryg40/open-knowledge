@@ -1,4 +1,4 @@
-import type { ServerResponse } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Hocuspocus } from '@hocuspocus/server';
 import {
   AGENT_ICON_COLORS,
@@ -8,8 +8,10 @@ import {
   AgentPatchSuccessSchema,
   AgentUndoRequestSchema,
   AgentUndoSuccessSchema,
+  type AgentWriteMdRequest,
   AgentWriteMdRequestSchema,
   AgentWriteMdSuccessSchema,
+  agentWriteOutcomeWireFields,
   applyPatchToFm,
   changedBlockRange,
   colorFromSeed,
@@ -27,8 +29,10 @@ import {
   SaveVersionRequestSchema,
   SaveVersionSuccessSchema,
   stripFrontmatter,
+  validateDocName,
 } from '@inkeep/open-knowledge-core';
 import { formatRollbackSubject } from '@inkeep/open-knowledge-core/shadow-repo-layout';
+import { z } from 'zod';
 import { captureEffect } from '../activity-log.ts';
 import { listAgentActivity, synthesizeVersionDiff } from '../agent-activity.ts';
 import type { AgentFocusBroadcaster } from '../agent-focus.ts';
@@ -48,6 +52,12 @@ import {
   snapshotBlocks,
 } from '../agent-sessions.ts';
 import {
+  type AgentWriteFlushOutcome,
+  answeredWithSuccessOnAppRoutes,
+  outcomeOfSavedWrite,
+  REFUSAL_OUTCOMES,
+} from '../agent-write-outcome.ts';
+import {
   type NormalizedSummary,
   normalizeSummary,
   type SummaryResponse,
@@ -65,10 +75,22 @@ import {
   evaluateContentDivergence,
   toContentDivergenceWarning,
 } from '../content-divergence-gate.ts';
+import type { ContentFilter } from '../content-filter.ts';
 import { recordContributor } from '../contributor-tracker.ts';
-import { canonicalDocName, registerDocExtension, stripDocExtension } from '../doc-extensions.ts';
-import type { DocumentDurabilityState, StoreFailure } from '../document-durability-state.ts';
 import {
+  canonicalDocName,
+  registerDocExtension,
+  SUPPORTED_DOC_EXTENSIONS,
+  stripDocExtension,
+} from '../doc-extensions.ts';
+import {
+  type DocumentDurabilityState,
+  type StoreFailure,
+  type WrittenThrough,
+  writtenThroughOf,
+} from '../document-durability-state.ts';
+import {
+  NOT_RECONCILED,
   type ReconcileBeforeWriteResult,
   reconcileDiskBeforeAgentWrite,
 } from '../external-change.ts';
@@ -80,6 +102,7 @@ import {
 import { recordFrontmatterEditSurface } from '../frontmatter-telemetry.ts';
 import type { LinkAdvisoryPolicy, PrepareWriteLinkAdvisory } from '../link-advisory-policy.ts';
 import { getLogger } from '../logger.ts';
+import type { MergeHistoryRecorder } from '../merge-history.ts';
 import { validateMermaidFences } from '../mermaid-validator.ts';
 import { incrementAgentPatchFindMismatches, incrementAgentWriteCalls } from '../metrics.ts';
 import { precomputeParse } from '../parse-pool.ts';
@@ -98,8 +121,10 @@ import {
 } from '../shadow-repo.ts';
 import { getMeter, withSpanSync } from '../telemetry.ts';
 import { respondAgentSessionCapacity } from './agent-session-capacity.ts';
+import { respondBothKept } from './agent-write-response.ts';
 import { type ApiRouteGroup, createApiRouteGroup } from './api-pipeline.ts';
 import { errorResponse } from './error-response.ts';
+import type { RouteHandler } from './method-router.ts';
 import { getRequestId } from './request-id.ts';
 import { withValidation } from './request-validation.ts';
 import { successResponse } from './success-response.ts';
@@ -154,6 +179,7 @@ export interface AgentWriteRouteDeps {
     label: string | undefined;
   };
   docNameExistsWithAnySupportedExtension: (contentDir: string, docName: string) => boolean;
+  findMissingDocCandidates: (docName: string) => string[];
   contentDir: string;
   summaryResponseFields: (normalized: NormalizedSummary) => {
     response?: SummaryResponse;
@@ -164,11 +190,18 @@ export interface AgentWriteRouteDeps {
   hocuspocus: Hocuspocus;
   options: {
     resolveEmbed?: (basename: string, sourcePath: string) => string | null;
+    contentFilter?: Pick<ContentFilter, 'isExcluded'>;
   };
   getBridgeLossReporter: (() => BridgeDeriveLossReporter | undefined) | undefined;
+  mergeHistory: MergeHistoryRecorder;
   agentPresenceBroadcaster: AgentPresenceBroadcaster | undefined;
   recordContentDivergenceGate: (
-    handler: 'agent-write-md' | 'agent-write-batch' | 'agent-patch' | 'rollback',
+    handler:
+      | 'agent-write-md'
+      | 'acp-document-write'
+      | 'agent-write-batch'
+      | 'agent-patch'
+      | 'rollback',
     divergence: AgentWriteContentDivergence | undefined,
   ) => void;
   buildAgentActor: (args: {
@@ -185,14 +218,9 @@ export interface AgentWriteRouteDeps {
   countNormalizedSummary: (normalized: NormalizedSummary, fromDefault?: boolean) => void;
   flushDiskAndDetectOutcome: (
     docName: string,
-  ) => Promise<
-    | { kind: 'failure'; failure: StoreFailure }
-    | { kind: 'divergence' }
-    | { kind: 'stale-external-write' }
-    | null
-  >;
+    writtenThrough?: WrittenThrough,
+  ) => Promise<AgentWriteFlushOutcome>;
   respondPersistenceFailure: (res: ServerResponse, failure: StoreFailure, handler: string) => void;
-  respondDiskDivergence: (res: ServerResponse, handler: string) => void;
   flushDocToDisk: (docName: string, label: string) => void;
   agentFocusBroadcaster: AgentFocusBroadcaster | undefined;
   onAgentWrite: (() => void) | undefined;
@@ -211,6 +239,7 @@ export interface AgentWriteRouteDeps {
   ) => Promise<LintViolationWarning[]>;
   log: import('../logger.ts').PinoLogger;
   flushDocToGit: (docName: string, label: string) => void;
+  flushGitCommit: (() => Promise<void>) | undefined;
   commitOkArtifactWrite: (context: string) => Promise<unknown>;
   isSafeDocName: (docName: string) => boolean;
   shadowRef: ShadowRef | undefined;
@@ -223,7 +252,43 @@ export interface AgentWriteRouteDeps {
   renameAttributionCounter: () => ReturnType<ReturnType<typeof getMeter>['createCounter']>;
 }
 
-export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup {
+interface MarkdownWriteMode {
+  readonly handler: 'agent-write-md' | 'acp-document-write';
+  readonly preWriteMerge: boolean;
+  readonly callerReadsWriteReport: boolean;
+}
+
+const ROUTE_MARKDOWN_WRITE: MarkdownWriteMode = {
+  handler: 'agent-write-md',
+  preWriteMerge: true,
+  callerReadsWriteReport: true,
+};
+
+const ACP_MARKDOWN_WRITE: MarkdownWriteMode = {
+  handler: 'acp-document-write',
+  preWriteMerge: false,
+  callerReadsWriteReport: false,
+};
+
+const AcpDocumentWriteRequestSchema = z
+  .object({
+    docName: z.string().min(1),
+    file: z.string().min(1),
+    markdown: z.string(),
+    extension: z.enum(SUPPORTED_DOC_EXTENSIONS).optional(),
+    agentId: z.string().optional(),
+    agentName: z.string().optional(),
+    clientName: z.string().optional(),
+  })
+  .strict();
+
+const AcpDocumentWriteSuccessSchema = z
+  .object({ ...agentWriteOutcomeWireFields, timestamp: z.string().min(1) })
+  .strict();
+
+export function createAgentWriteRoutes(
+  deps: AgentWriteRouteDeps,
+): ApiRouteGroup & { readonly acpDocumentWrite: RouteHandler } {
   const {
     conflicts,
     getLinkAdvisoryPolicy,
@@ -232,6 +297,7 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
     resolveAlias,
     extractAgentIdentity,
     docNameExistsWithAnySupportedExtension,
+    findMissingDocCandidates,
     contentDir,
     summaryResponseFields,
     sessionManager,
@@ -239,13 +305,13 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
     hocuspocus,
     options,
     getBridgeLossReporter,
+    mergeHistory,
     agentPresenceBroadcaster,
     recordContentDivergenceGate,
     buildAgentActor,
     countNormalizedSummary,
     flushDiskAndDetectOutcome,
     respondPersistenceFailure,
-    respondDiskDivergence,
     flushDocToDisk,
     agentFocusBroadcaster,
     onAgentWrite,
@@ -256,6 +322,7 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
     computeLintViolations,
     log,
     flushDocToGit,
+    flushGitCommit,
     commitOkArtifactWrite,
     isSafeDocName,
     shadowRef,
@@ -270,6 +337,18 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
 
   const versionOpsService = createVersionOpsService({ getCurrentBranch, contentRoot });
 
+  async function storePendingEdits(): Promise<void> {
+    await Promise.all(
+      [...hocuspocus.documents.values()]
+        .filter((document) => !isSystemDoc(document.name) && !isConfigDoc(document.name))
+        .map(async (document) => {
+          await hocuspocus.debouncer.executeNow(`onStoreDocument-${document.name}`);
+          await document.saveMutex.waitForUnlock();
+        }),
+    );
+    await flushGitCommit?.();
+  }
+
   function getSubscriberCount(docName: string): number {
     try {
       const doc = hocuspocus.documents.get(docName);
@@ -277,6 +356,35 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
     } catch {
       return 0;
     }
+  }
+
+  function respondIfDocumentMissing(
+    res: ServerResponse,
+    docName: string,
+    handler: 'agent-patch' | 'frontmatter-patch',
+  ): boolean {
+    if (docNameExistsWithAnySupportedExtension(contentDir, docName)) return false;
+    if ((hocuspocus.documents.get(docName)?.getText('source').length ?? 0) > 0) return false;
+    const candidates = findMissingDocCandidates(docName);
+    const nextStep =
+      candidates.length === 0
+        ? 'edit only changes an existing document; use write({ document: { path, content } }) to create one.'
+        : `Did you mean ${candidates.map((c) => `"${c}"`).join(' or ')}? Retry the edit at that path.`;
+    errorResponse(
+      res,
+      404,
+      'urn:ok:error:doc-not-found',
+      `No document at "${docName}" (paths are relative to the content root). ${nextStep}`,
+      {
+        handler,
+        extensions: {
+          candidates,
+          committed: false,
+          ...REFUSAL_OUTCOMES['urn:ok:error:doc-not-found'],
+        },
+      },
+    );
+    return true;
   }
 
   function getSystemSubscriberCount(): number {
@@ -290,237 +398,303 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
 
   const handleAgentWriteMd = withValidation(
     AgentWriteMdRequestSchema,
-    async (_req, res, body) => {
-      try {
-        const linkPolicy = getLinkAdvisoryPolicy();
-        const position = body.position ?? 'append';
-        const effectiveDocName = requireNonEmptyDocName(body.docName, res, 'agent-write-md');
-        if (effectiveDocName === null) return;
-        const resolvedDocName = canonicalDocName(resolveAlias(effectiveDocName));
-        const {
-          agentId,
-          suppliedWriterId,
-          agentName,
+    (req, res, body) => writeAgentMarkdownDocument(req, res, body, ROUTE_MARKDOWN_WRITE),
+    { handler: 'agent-write-md', method: 'POST' },
+  );
+
+  function isAcpWritableDocument(docName: string, file: string): boolean {
+    if (docName !== file && docName !== stripDocExtension(file)) return false;
+    if (validateDocName(docName).ok) return true;
+    return options.contentFilter !== undefined && !options.contentFilter.isExcluded(file);
+  }
+
+  async function writeAgentMarkdownDocument(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    body: AgentWriteMdRequest,
+    mode: MarkdownWriteMode,
+  ): Promise<void> {
+    try {
+      const linkPolicy = getLinkAdvisoryPolicy();
+      const position = body.position ?? 'append';
+      const effectiveDocName = requireNonEmptyDocName(body.docName, res, mode.handler);
+      if (effectiveDocName === null) return;
+      const resolvedDocName = canonicalDocName(resolveAlias(effectiveDocName));
+      const { agentId, suppliedWriterId, agentName, colorSeed, clientName, clientVersion, label } =
+        extractAgentIdentity(body);
+      if (isSystemDoc(resolvedDocName) || isConfigDoc(resolvedDocName)) {
+        errorResponse(
+          res,
+          400,
+          'urn:ok:error:reserved-doc-name',
+          `'${resolvedDocName}' is a reserved document name.`,
+          {
+            handler: mode.handler,
+            extensions: { ...REFUSAL_OUTCOMES['urn:ok:error:reserved-doc-name'] },
+          },
+        );
+        return;
+      }
+      if (
+        body.extension !== undefined &&
+        !docNameExistsWithAnySupportedExtension(contentDir, resolvedDocName)
+      ) {
+        registerDocExtension(resolvedDocName, body.extension);
+      }
+      const normalizedSummary = normalizeSummary(body.summary);
+      const { response: summaryResponse, stored: storedSummary } =
+        summaryResponseFields(normalizedSummary);
+      await sessionManager.withSessions(async (getSession) => {
+        const session = await getSession(resolvedDocName, agentId, {
+          displayName: agentName,
           colorSeed,
           clientName,
-          clientVersion,
-          label,
-        } = extractAgentIdentity(body);
-        if (isSystemDoc(resolvedDocName) || isConfigDoc(resolvedDocName)) {
-          errorResponse(
-            res,
-            400,
-            'urn:ok:error:reserved-doc-name',
-            `'${resolvedDocName}' is a reserved document name.`,
-            { handler: 'agent-write-md' },
-          );
-          return;
-        }
-        if (
-          body.extension !== undefined &&
-          !docNameExistsWithAnySupportedExtension(contentDir, resolvedDocName)
-        ) {
-          registerDocExtension(resolvedDocName, body.extension);
-        }
-        const normalizedSummary = normalizeSummary(body.summary);
-        const { response: summaryResponse, stored: storedSummary } =
-          summaryResponseFields(normalizedSummary);
-        await sessionManager.withSessions(async (getSession) => {
-          const session = await getSession(resolvedDocName, agentId, {
-            displayName: agentName,
-            colorSeed,
-            clientName,
-          });
-          const writeMdReconcile = reconcileDiskBeforeAgentWrite(
-            durabilityState,
-            hocuspocus,
-            resolvedDocName,
-            contentDir,
-            options.resolveEmbed,
-            getBridgeLossReporter?.(),
-            conflicts,
-          );
-          const writeMdEmbedResolver = options.resolveEmbed
-            ? { resolveEmbed: options.resolveEmbed, sourcePath: resolvedDocName }
-            : undefined;
-          const writeMdPrecomputed = await prepareAgentMarkdownParse(
-            session.dc.document,
-            body.markdown,
-            position,
-            writeMdEmbedResolver,
-          );
-          const timestamp = new Date().toISOString();
-          let writeDivergence: AgentWriteContentDivergence | undefined;
-          let disposeEffectCapture: (() => void) | undefined;
-          try {
-            const icon = iconFromClientName(clientName);
-            const color = AGENT_ICON_COLORS[icon] ?? colorFromSeed(colorSeed ?? agentId);
-            agentPresenceBroadcaster?.setPresence(agentId, {
-              displayName: agentName,
-              icon,
-              color,
-              currentDoc: resolvedDocName,
-              mode: 'writing',
-              ts: Date.now(),
-            });
-            disposeEffectCapture = captureEffect(
-              session.dc.document.getText('source'),
-              agentId,
-              session.origin,
-              colorSeed,
-              clientName,
-            );
-            agentWritePreDrain(session.dc.document, body.markdown, position);
-            session.dc.document.transact(() => {
-              const beforeBlocks = snapshotBlocks(session.dc.document);
-              writeDivergence = applyAgentMarkdownWrite(
-                session.dc.document,
-                body.markdown,
-                position,
-                writeMdEmbedResolver,
-                writeMdPrecomputed,
-                agentWriteLossDetect(session),
-                suppliedWriterId,
-              );
-              const changedBlocks =
-                changedBlockRange(beforeBlocks, snapshotBlocks(session.dc.document)) ?? undefined;
-              const activityMap = session.dc.document.getMap('agent-flash');
-              activityMap.set(agentId, {
-                agentId,
-                timestamp: Date.now(),
-                type: 'insert',
-                description: `Added (${agentName}): ${body.markdown.trim().slice(0, 50)}`,
-                ...(changedBlocks !== undefined ? { changedBlocks } : {}),
-              });
-            }, session.origin);
-            if (writeDivergence !== undefined) {
-              console.warn(
-                JSON.stringify({
-                  event: 'agent-write-content-divergence',
-                  'doc.name': resolvedDocName,
-                  position,
-                  intendedBytes: writeDivergence.intendedBytes,
-                  actualBytes: writeDivergence.actualBytes,
-                  byteDelta: writeDivergence.byteDelta,
-                  'agent.id': agentId,
-                  'agent.client_name': clientName,
-                }),
-              );
-            }
-            recordContentDivergenceGate('agent-write-md', writeDivergence);
-            recordContributor(
+        });
+        const writeMdReconcile = mode.preWriteMerge
+          ? await reconcileDiskBeforeAgentWrite(
+              durabilityState,
+              hocuspocus,
               resolvedDocName,
-              agentId,
-              agentName,
-              colorSeed,
-              undefined,
-              buildAgentActor({ clientName, clientVersion, label }),
-              storedSummary,
-            );
-            incrementAgentWriteCalls();
-            countNormalizedSummary(normalizedSummary);
-          } finally {
-            disposeEffectCapture?.();
-            agentPresenceBroadcaster?.touchMode(agentId, 'idle');
-          }
-          const flushOutcome = await flushDiskAndDetectOutcome(resolvedDocName);
-          if (flushOutcome?.kind === 'failure') {
-            respondPersistenceFailure(res, flushOutcome.failure, 'agent-write-md');
-            return;
-          }
-          if (flushOutcome?.kind === 'divergence') {
-            respondDiskDivergence(res, 'agent-write-md');
-            return;
-          }
-          if (flushOutcome?.kind === 'stale-external-write') {
-            respondStaleExternalWrite(res, 'agent-write-md', resolvedDocName);
-            return;
-          }
-          flushDocToDisk(resolvedDocName, 'agent-write-md');
-          agentFocusBroadcaster?.setFocus(agentId, {
-            agentName,
+              contentDir,
+              options.resolveEmbed,
+              getBridgeLossReporter?.(),
+              conflicts,
+              mergeHistory,
+            )
+          : NOT_RECONCILED;
+        const writeMdEmbedResolver = options.resolveEmbed
+          ? { resolveEmbed: options.resolveEmbed, sourcePath: resolvedDocName }
+          : undefined;
+        const writeMdPrecomputed = await prepareAgentMarkdownParse(
+          session.dc.document,
+          body.markdown,
+          position,
+          writeMdEmbedResolver,
+        );
+        const timestamp = new Date().toISOString();
+        let writeDivergence: AgentWriteContentDivergence | undefined;
+        let disposeEffectCapture: (() => void) | undefined;
+        let writtenThrough: WrittenThrough | undefined;
+        let writtenSource = '';
+        try {
+          const icon = iconFromClientName(clientName);
+          const color = AGENT_ICON_COLORS[icon] ?? colorFromSeed(colorSeed ?? agentId);
+          agentPresenceBroadcaster?.setPresence(agentId, {
+            displayName: agentName,
+            icon,
+            color,
             currentDoc: resolvedDocName,
-            writeKind: 'write',
+            mode: 'writing',
             ts: Date.now(),
           });
-          onAgentWrite?.();
-          const hints = await computeOrphanHints(resolvedDocName);
-          const writtenSource = session.dc.document.getText('source').toString();
-          registerWrittenDocInFileIndex(resolvedDocName, writtenSource);
-          const renderWarnings = await validateMermaidFences(writtenSource, resolvedDocName);
-          const linkAdvisory = (await prepareWriteLinkAdvisory([resolvedDocName]))(
-            writtenSource,
-            resolvedDocName,
-            linkPolicy.suppressLogLinkAdvisories,
+          disposeEffectCapture = captureEffect(
+            session.dc.document.getText('source'),
+            agentId,
+            session.origin,
+            colorSeed,
+            clientName,
           );
-          const subscriberCount = getSubscriberCount(resolvedDocName);
-          const systemSubscriberCount = getSystemSubscriberCount();
-          if (systemSubscriberCount === 0) {
-            hintEmittedCounter().add(1, {
-              'shadow.writer': 'agent',
-              'agent.type': resolveAgentType(clientName),
+          agentWritePreDrain(session.dc.document, body.markdown, position);
+          session.dc.document.transact(() => {
+            const beforeBlocks = snapshotBlocks(session.dc.document);
+            writeDivergence = applyAgentMarkdownWrite(
+              session.dc.document,
+              body.markdown,
+              position,
+              writeMdEmbedResolver,
+              writeMdPrecomputed,
+              agentWriteLossDetect(session),
+              suppliedWriterId,
+            );
+            const changedBlocks =
+              changedBlockRange(beforeBlocks, snapshotBlocks(session.dc.document)) ?? undefined;
+            const activityMap = session.dc.document.getMap('agent-flash');
+            activityMap.set(agentId, {
+              agentId,
+              timestamp: Date.now(),
+              type: 'insert',
+              description: `Added (${agentName}): ${body.markdown.trim().slice(0, 50)}`,
+              ...(changedBlocks !== undefined ? { changedBlocks } : {}),
             });
+          }, session.origin);
+          writtenThrough = writtenThroughOf(session.dc.document);
+          durabilityState.markAgentWriteStore(resolvedDocName);
+          writtenSource = session.dc.document.getText('source').toString();
+          if (writeDivergence !== undefined) {
+            console.warn(
+              JSON.stringify({
+                event: 'agent-write-content-divergence',
+                'doc.name': resolvedDocName,
+                position,
+                intendedBytes: writeDivergence.intendedBytes,
+                actualBytes: writeDivergence.actualBytes,
+                byteDelta: writeDivergence.byteDelta,
+                'agent.id': agentId,
+                'agent.client_name': clientName,
+              }),
+            );
           }
-          const writeMdWarning = buildReconcileWarning(writeMdReconcile);
-          const writeMdDivergenceEntry =
-            writeDivergence !== undefined ? toContentDivergenceWarning(writeDivergence) : undefined;
-          const writeMdAdvisories = [
-            ...(writeMdDivergenceEntry ? [writeMdDivergenceEntry] : []),
-            ...(writeMdWarning ? [writeMdWarning] : []),
-            ...(renderWarnings ?? []),
-            ...(await computeLintViolations(
-              session.dc.document.getText('source').toString(),
-              resolvedDocName,
-              linkPolicy,
-            )),
-            ...linkAdvisory.warnings,
-          ];
+          recordContentDivergenceGate(mode.handler, writeDivergence);
+          recordContributor(
+            resolvedDocName,
+            agentId,
+            agentName,
+            colorSeed,
+            undefined,
+            buildAgentActor({ clientName, clientVersion, label }),
+            storedSummary,
+          );
+          if (mode.callerReadsWriteReport) {
+            incrementAgentWriteCalls();
+            countNormalizedSummary(normalizedSummary);
+          }
+        } finally {
+          disposeEffectCapture?.();
+          agentPresenceBroadcaster?.touchMode(agentId, 'idle');
+        }
+        const flushOutcome = await flushDiskAndDetectOutcome(resolvedDocName, writtenThrough);
+        if (flushOutcome?.kind === 'failure') {
+          respondPersistenceFailure(res, flushOutcome.failure, mode.handler);
+          return;
+        }
+        if (flushOutcome?.kind === 'stale-external-write') {
+          respondStaleExternalWrite(res, mode.handler, resolvedDocName);
+          return;
+        }
+        flushDocToDisk(resolvedDocName, mode.handler);
+        agentFocusBroadcaster?.setFocus(agentId, {
+          agentName,
+          currentDoc: resolvedDocName,
+          writeKind: 'write',
+          ts: Date.now(),
+        });
+        onAgentWrite?.();
+        writtenSource =
+          hocuspocus.documents.get(resolvedDocName)?.getText('source').toString() ?? writtenSource;
+        const writeMdOutcome = outcomeOfSavedWrite(
+          writeMdReconcile,
+          flushOutcome,
+          writeDivergence !== undefined,
+        );
+        if (!mode.callerReadsWriteReport) {
+          registerWrittenDocInFileIndex(resolvedDocName, writtenSource);
+          if (writeMdOutcome.outcome === 'both-kept') {
+            respondBothKept(res, mode.handler, { timestamp }, writeMdOutcome);
+            return;
+          }
           successResponse(
             res,
             200,
-            AgentWriteMdSuccessSchema,
-            {
-              timestamp,
-              subscriberCount,
-              systemSubscriberCount,
-              ...(hints ? { hints } : {}),
-              ...(summaryResponse ? { summary: summaryResponse } : {}),
-              ...(writeMdAdvisories.length > 0 ? { warnings: writeMdAdvisories } : {}),
-              ...linkAdvisory.links,
-            },
-            { handler: 'agent-write-md' },
-          );
-        });
-      } catch (e) {
-        if (e instanceof DocInConflictError) {
-          respondDocInConflict(
-            res,
-            e,
-            'agent-write-md',
-            conflicts.findByDocName(stripDocExtension(e.file)),
+            AcpDocumentWriteSuccessSchema,
+            { timestamp, ...writeMdOutcome },
+            { handler: mode.handler },
           );
           return;
         }
-        if (e instanceof ConcurrentOverwriteRefusedError) {
-          respondConcurrentOverwriteRefused(res, e, 'agent-write-md');
+        const hints = await computeOrphanHints(resolvedDocName);
+        registerWrittenDocInFileIndex(resolvedDocName, writtenSource);
+        const renderWarnings = await validateMermaidFences(writtenSource, resolvedDocName);
+        const linkAdvisory = (await prepareWriteLinkAdvisory([resolvedDocName]))(
+          writtenSource,
+          resolvedDocName,
+          linkPolicy.suppressLogLinkAdvisories,
+        );
+        const subscriberCount = getSubscriberCount(resolvedDocName);
+        const systemSubscriberCount = getSystemSubscriberCount();
+        if (systemSubscriberCount === 0) {
+          hintEmittedCounter().add(1, {
+            'shadow.writer': 'agent',
+            'agent.type': resolveAgentType(clientName),
+          });
+        }
+        const writeMdWarning = buildReconcileWarning(writeMdReconcile);
+        const writeMdDivergenceEntry =
+          writeDivergence !== undefined ? toContentDivergenceWarning(writeDivergence) : undefined;
+        const writeMdAdvisories = [
+          ...(writeMdDivergenceEntry ? [writeMdDivergenceEntry] : []),
+          ...(writeMdWarning ? [writeMdWarning] : []),
+          ...(renderWarnings ?? []),
+          ...(await computeLintViolations(writtenSource, resolvedDocName, linkPolicy)),
+          ...linkAdvisory.warnings,
+        ];
+        const writeMdBody = {
+          timestamp,
+          subscriberCount,
+          systemSubscriberCount,
+          ...(hints ? { hints } : {}),
+          ...(summaryResponse ? { summary: summaryResponse } : {}),
+          ...(writeMdAdvisories.length > 0 ? { warnings: writeMdAdvisories } : {}),
+          ...linkAdvisory.links,
+        };
+        if (writeMdOutcome.outcome === 'both-kept') {
+          respondBothKept(res, mode.handler, writeMdBody, writeMdOutcome);
           return;
         }
-        if (e instanceof FrontmatterMalformedError) {
-          respondFrontmatterMalformed(res, e, 'agent-write-md');
-          return;
-        }
-        if (e instanceof AgentSessionCapacityError) {
-          respondAgentSessionCapacity(res, e, 'agent-write-md');
-          return;
-        }
-        log.error({ err: e, requestId: getRequestId(_req) }, '[agent-write-md] handler failed');
-        errorResponse(res, 500, 'urn:ok:error:internal-server-error', 'Internal server error.', {
-          handler: 'agent-write-md',
-          cause: e,
-        });
+        successResponse(
+          res,
+          200,
+          AgentWriteMdSuccessSchema,
+          { ...writeMdBody, ...writeMdOutcome },
+          { handler: mode.handler },
+        );
+      });
+    } catch (e) {
+      if (e instanceof DocInConflictError) {
+        respondDocInConflict(
+          res,
+          e,
+          mode.handler,
+          conflicts.findByDocName(stripDocExtension(e.file)),
+        );
+        return;
       }
+      if (e instanceof ConcurrentOverwriteRefusedError) {
+        respondConcurrentOverwriteRefused(res, e, mode.handler);
+        return;
+      }
+      if (e instanceof FrontmatterMalformedError) {
+        respondFrontmatterMalformed(res, e, mode.handler);
+        return;
+      }
+      if (e instanceof AgentSessionCapacityError) {
+        respondAgentSessionCapacity(res, e, mode.handler);
+        return;
+      }
+      log.error({ err: e, requestId: getRequestId(_req) }, `[${mode.handler}] handler failed`);
+      errorResponse(res, 500, 'urn:ok:error:internal-server-error', 'Internal server error.', {
+        handler: mode.handler,
+        cause: e,
+      });
+    }
+  }
+
+  const acpDocumentWrite = withValidation(
+    AcpDocumentWriteRequestSchema,
+    async (req, res, body) => {
+      if (!isAcpWritableDocument(body.docName, body.file)) {
+        errorResponse(
+          res,
+          400,
+          'urn:ok:error:invalid-request',
+          `'${body.file}' is not a document OpenKnowledge keeps for the in-app agent.`,
+          {
+            handler: ACP_MARKDOWN_WRITE.handler,
+            detail:
+              'The path is excluded from the project content, so there is no document to write it through. Nothing was written.',
+            extensions: { outcome: 'refused', saved: false, nextStep: 'none' },
+          },
+        );
+        return;
+      }
+      const { file: _file, ...write } = body;
+      await writeAgentMarkdownDocument(
+        req,
+        res,
+        { ...write, position: 'replace' },
+        ACP_MARKDOWN_WRITE,
+      );
     },
-    { handler: 'agent-write-md', method: 'POST' },
+    { handler: ACP_MARKDOWN_WRITE.handler, method: 'POST', maxBodyBytes: Number.POSITIVE_INFINITY },
   );
 
   const handleFrontmatterPatch = withValidation(
@@ -539,10 +713,14 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
             400,
             'urn:ok:error:reserved-doc-name',
             `'${resolvedDocName}' is a reserved document name.`,
-            { handler: 'frontmatter-patch' },
+            {
+              handler: 'frontmatter-patch',
+              extensions: { ...REFUSAL_OUTCOMES['urn:ok:error:reserved-doc-name'] },
+            },
           );
           return;
         }
+        if (respondIfDocumentMissing(res, resolvedDocName, 'frontmatter-patch')) return;
         const patch = body.patch ?? {};
         const patchKeys = Object.keys(patch);
         const normalizedSummary = normalizeSummary(body.summary);
@@ -554,7 +732,7 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
             colorSeed,
             clientName,
           });
-          const fmReconcile = reconcileDiskBeforeAgentWrite(
+          const fmReconcile = await reconcileDiskBeforeAgentWrite(
             durabilityState,
             hocuspocus,
             resolvedDocName,
@@ -562,12 +740,14 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
             options.resolveEmbed,
             getBridgeLossReporter?.(),
             conflicts,
+            mergeHistory,
           );
           const fmPatchPrecomputed = await prepareFrontmatterPatchParse(session.dc.document, patch);
           const timestamp = new Date().toISOString();
           let editError: import('@inkeep/open-knowledge-core').FmEditError | undefined;
           let applied = false;
           let bodyMutated = false;
+          let fmFlushOutcome: AgentWriteFlushOutcome = null;
           const appliedKeys: string[] = [];
           try {
             const icon = iconFromClientName(clientName);
@@ -624,11 +804,13 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
                   }
                   applied = true;
                 }, session.origin);
+                if (bodyMutated) durabilityState.markAgentWriteStore(resolvedDocName);
               },
             );
           } finally {
             agentPresenceBroadcaster?.touchMode(agentId, 'idle');
           }
+          let fmWrittenSource = session.dc.document.getText('source').toString();
           if (editError) {
             let fieldErrors: Record<string, string>;
             switch (editError.kind) {
@@ -674,7 +856,13 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
               400,
               'urn:ok:error:invalid-frontmatter-patch',
               'Frontmatter patch rejected: schema validation failed.',
-              { handler: 'frontmatter-patch', extensions: { fieldErrors } },
+              {
+                handler: 'frontmatter-patch',
+                extensions: {
+                  fieldErrors,
+                  ...REFUSAL_OUTCOMES['urn:ok:error:invalid-frontmatter-patch'],
+                },
+              },
             );
             return;
           }
@@ -691,13 +879,10 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
             incrementAgentWriteCalls();
             countNormalizedSummary(normalizedSummary);
             if (bodyMutated) {
-              const flushOutcome = await flushDiskAndDetectOutcome(resolvedDocName);
+              fmFlushOutcome = await flushDiskAndDetectOutcome(resolvedDocName);
+              const flushOutcome = fmFlushOutcome;
               if (flushOutcome?.kind === 'failure') {
                 respondPersistenceFailure(res, flushOutcome.failure, 'frontmatter-patch');
-                return;
-              }
-              if (flushOutcome?.kind === 'divergence') {
-                respondDiskDivergence(res, 'frontmatter-patch');
                 return;
               }
               if (flushOutcome?.kind === 'stale-external-write') {
@@ -723,29 +908,35 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
             });
           }
           const fmWarning = buildReconcileWarning(fmReconcile);
-          registerWrittenDocInFileIndex(
-            resolvedDocName,
-            session.dc.document.getText('source').toString(),
-          );
+          fmWrittenSource =
+            hocuspocus.documents.get(resolvedDocName)?.getText('source').toString() ??
+            fmWrittenSource;
+          registerWrittenDocInFileIndex(resolvedDocName, fmWrittenSource);
           const linkAdvisory = (await prepareWriteLinkAdvisory([resolvedDocName]))(
-            session.dc.document.getText('source').toString(),
+            fmWrittenSource,
             resolvedDocName,
             linkPolicy.suppressLogLinkAdvisories,
           );
           const fmAdvisories = [...(fmWarning ? [fmWarning] : []), ...linkAdvisory.warnings];
+          const fmBody = {
+            timestamp,
+            subscriberCount,
+            systemSubscriberCount,
+            appliedKeys,
+            ...(summaryResponse ? { summary: summaryResponse } : {}),
+            ...(fmAdvisories.length > 0 ? { warnings: fmAdvisories } : {}),
+            ...linkAdvisory.links,
+          };
+          const fmOutcome = outcomeOfSavedWrite(fmReconcile, fmFlushOutcome);
+          if (fmOutcome.outcome === 'both-kept') {
+            respondBothKept(res, 'frontmatter-patch', fmBody, fmOutcome);
+            return;
+          }
           successResponse(
             res,
             200,
             FrontmatterPatchSuccessSchema,
-            {
-              timestamp,
-              subscriberCount,
-              systemSubscriberCount,
-              appliedKeys,
-              ...(summaryResponse ? { summary: summaryResponse } : {}),
-              ...(fmAdvisories.length > 0 ? { warnings: fmAdvisories } : {}),
-              ...linkAdvisory.links,
-            },
+            { ...fmBody, ...fmOutcome },
             { handler: 'frontmatter-patch' },
           );
         });
@@ -788,10 +979,14 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
             400,
             'urn:ok:error:reserved-doc-name',
             `'${docName}' is a reserved document name.`,
-            { handler: 'agent-patch' },
+            {
+              handler: 'agent-patch',
+              extensions: { ...REFUSAL_OUTCOMES['urn:ok:error:reserved-doc-name'] },
+            },
           );
           return;
         }
+        if (respondIfDocumentMissing(res, docName, 'agent-patch')) return;
         const normalizedSummary = normalizeSummary(body.summary);
         await sessionManager.withSessions(async (getSession) => {
           const session = await getSession(docName, agentId, {
@@ -799,7 +994,7 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
             colorSeed,
             clientName,
           });
-          const patchReconcile = reconcileDiskBeforeAgentWrite(
+          const patchReconcile = await reconcileDiskBeforeAgentWrite(
             durabilityState,
             hocuspocus,
             docName,
@@ -807,6 +1002,7 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
             options.resolveEmbed,
             getBridgeLossReporter?.(),
             conflicts,
+            mergeHistory,
           );
           const patchEmbedResolver = options.resolveEmbed
             ? { resolveEmbed: options.resolveEmbed, sourcePath: docName }
@@ -923,6 +1119,7 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
                 ...(changedBlocks !== undefined ? { changedBlocks } : {}),
               });
             }, session.origin);
+            durabilityState.markAgentWriteStore(docName);
             if (patchDivergence !== undefined) {
               console.warn(
                 JSON.stringify({
@@ -962,7 +1159,10 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
               409,
               'urn:ok:error:stale-target',
               'Target text no longer matches at the requested offset.',
-              { handler: 'agent-patch' },
+              {
+                handler: 'agent-patch',
+                extensions: { ...REFUSAL_OUTCOMES['urn:ok:error:stale-target'] },
+              },
             );
             return;
           }
@@ -974,6 +1174,7 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
               'Text not found in document.',
               {
                 handler: 'agent-patch',
+                extensions: { ...REFUSAL_OUTCOMES['urn:ok:error:target-not-found'] },
               },
             );
             return;
@@ -985,7 +1186,10 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
               400,
               'urn:ok:error:frontmatter-edit-not-supported',
               'Frontmatter edits are not supported via a body find/replace. Use edit({ document: { path, frontmatter } }) to change frontmatter, or write({ document: { path, content, position: "replace" } }) to rewrite the whole document including its YAML block.',
-              { handler: 'agent-patch' },
+              {
+                handler: 'agent-patch',
+                extensions: { ...REFUSAL_OUTCOMES['urn:ok:error:frontmatter-edit-not-supported'] },
+              },
             );
             return;
           }
@@ -996,17 +1200,17 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
               400,
               'urn:ok:error:frontmatter-edit-not-supported',
               "This edit would turn the replacement text into the document's frontmatter: the document has no frontmatter, the match starts at byte 0, and `replace` opens a `---` fence pair — so the composed document would re-read that block as its YAML region. Use edit({ document: { path, frontmatter } }) to set frontmatter, or keep the `---` out of the first line (a leading blank line, or `***` / `___` for a thematic break).",
-              { handler: 'agent-patch' },
+              {
+                handler: 'agent-patch',
+                extensions: { ...REFUSAL_OUTCOMES['urn:ok:error:frontmatter-edit-not-supported'] },
+              },
             );
             return;
           }
+          let patchedSource = session.dc.document.getText('source').toString();
           const flushOutcome = await flushDiskAndDetectOutcome(docName);
           if (flushOutcome?.kind === 'failure') {
             respondPersistenceFailure(res, flushOutcome.failure, 'agent-patch');
-            return;
-          }
-          if (flushOutcome?.kind === 'divergence') {
-            respondDiskDivergence(res, 'agent-patch');
             return;
           }
           if (flushOutcome?.kind === 'stale-external-write') {
@@ -1030,7 +1234,8 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
             });
           }
           const { response: summaryResponse } = summaryResponseFields(normalizedSummary);
-          const patchedSource = session.dc.document.getText('source').toString();
+          patchedSource =
+            hocuspocus.documents.get(docName)?.getText('source').toString() ?? patchedSource;
           registerWrittenDocInFileIndex(docName, patchedSource);
           const renderWarnings = await validateMermaidFences(patchedSource, docName);
           const linkAdvisory = (await prepareWriteLinkAdvisory([docName]))(
@@ -1045,25 +1250,31 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
             ...(patchDivergenceEntry ? [patchDivergenceEntry] : []),
             ...(patchWarning ? [patchWarning] : []),
             ...(renderWarnings ?? []),
-            ...(await computeLintViolations(
-              session.dc.document.getText('source').toString(),
-              docName,
-              linkPolicy,
-            )),
+            ...(await computeLintViolations(patchedSource, docName, linkPolicy)),
             ...linkAdvisory.warnings,
           ];
+          const patchBody = {
+            timestamp,
+            subscriberCount,
+            systemSubscriberCount,
+            ...(summaryResponse ? { summary: summaryResponse } : {}),
+            ...(patchAdvisories.length > 0 ? { warnings: patchAdvisories } : {}),
+            ...linkAdvisory.links,
+          };
+          const patchOutcome = outcomeOfSavedWrite(
+            patchReconcile,
+            flushOutcome,
+            patchDivergence !== undefined,
+          );
+          if (patchOutcome.outcome === 'both-kept') {
+            respondBothKept(res, 'agent-patch', patchBody, patchOutcome);
+            return;
+          }
           successResponse(
             res,
             200,
             AgentPatchSuccessSchema,
-            {
-              timestamp,
-              subscriberCount,
-              systemSubscriberCount,
-              ...(summaryResponse ? { summary: summaryResponse } : {}),
-              ...(patchAdvisories.length > 0 ? { warnings: patchAdvisories } : {}),
-              ...linkAdvisory.links,
-            },
+            { ...patchBody, ...patchOutcome },
             { handler: 'agent-patch' },
           );
         });
@@ -1110,7 +1321,10 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
             400,
             'urn:ok:error:reserved-doc-name',
             `'${docName}' is a reserved document name.`,
-            { handler: 'agent-undo' },
+            {
+              handler: 'agent-undo',
+              extensions: { ...REFUSAL_OUTCOMES['urn:ok:error:reserved-doc-name'] },
+            },
           );
           return;
         }
@@ -1157,6 +1371,7 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
             count,
           );
           if (undone) {
+            durabilityState.markAgentWriteStore(docName);
             recordContributor(
               docName,
               connectionId,
@@ -1169,14 +1384,15 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
         } finally {
           agentPresenceBroadcaster?.touchMode(agentId, 'idle');
         }
+        let undoFlushOutcome: AgentWriteFlushOutcome = null;
         if (undone) {
-          const flushOutcome = await flushDiskAndDetectOutcome(docName);
-          if (flushOutcome?.kind === 'failure') {
+          undoFlushOutcome = await flushDiskAndDetectOutcome(docName);
+          const flushOutcome = undoFlushOutcome;
+          if (
+            flushOutcome?.kind === 'failure' &&
+            !answeredWithSuccessOnAppRoutes(flushOutcome.failure)
+          ) {
             respondPersistenceFailure(res, flushOutcome.failure, 'agent-undo');
-            return;
-          }
-          if (flushOutcome?.kind === 'divergence') {
-            respondDiskDivergence(res, 'agent-undo');
             return;
           }
           if (flushOutcome?.kind === 'stale-external-write') {
@@ -1195,7 +1411,7 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
           res,
           200,
           AgentUndoSuccessSchema,
-          { docName, scope, undone },
+          { docName, scope, undone, ...outcomeOfSavedWrite(undefined, undoFlushOutcome) },
           { handler: 'agent-undo' },
         );
       } catch (e) {
@@ -1414,6 +1630,7 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
         const checkpointSummary = normalizeSummary(
           typeof body.summary === 'string' ? body.summary : undefined,
         );
+        await storePendingEdits();
         const result = await versionOpsService.saveCheckpoint(shadow, {
           explicitWriters: writers,
           agentWriter,
@@ -1503,7 +1720,10 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
             404,
             'urn:ok:error:doc-not-found',
             `Commit ${commitSha.slice(0, 7)} does not contain document ${docName} at any known historical path.`,
-            { handler: 'rollback' },
+            {
+              handler: 'rollback',
+              extensions: { ...REFUSAL_OUTCOMES['urn:ok:error:doc-not-found'] },
+            },
           );
           return;
         }
@@ -1541,6 +1761,7 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
             'rollback',
           );
         }, ROLLBACK_ORIGIN);
+        durabilityState.markAgentWriteStore(docName);
         if (rollbackDivergence !== undefined) {
           console.warn(
             JSON.stringify({
@@ -1620,12 +1841,11 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
         }
         renameAttributionCounter().add(1, { kind: 'rollback', attribution_kind: actor.kind });
         const flushOutcome = await flushDiskAndDetectOutcome(docName);
-        if (flushOutcome?.kind === 'failure') {
+        if (
+          flushOutcome?.kind === 'failure' &&
+          !answeredWithSuccessOnAppRoutes(flushOutcome.failure)
+        ) {
           respondPersistenceFailure(res, flushOutcome.failure, 'rollback');
-          return;
-        }
-        if (flushOutcome?.kind === 'divergence') {
-          respondDiskDivergence(res, 'rollback');
           return;
         }
         if (flushOutcome?.kind === 'stale-external-write') {
@@ -1655,6 +1875,7 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
           200,
           RollbackSuccessSchema,
           {
+            ...outcomeOfSavedWrite(undefined, flushOutcome, rollbackDivergence !== undefined),
             restoredFrom: commitSha,
             timestamp,
             ...(summaryResponse ? { summary: summaryResponse } : {}),
@@ -1671,7 +1892,7 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
     },
     { handler: 'rollback', method: 'POST' },
   );
-  return createApiRouteGroup(
+  const group = createApiRouteGroup(
     {
       '/api/agent-write-md': handleAgentWriteMd,
       '/api/frontmatter-patch': handleFrontmatterPatch,
@@ -1693,4 +1914,5 @@ export function createAgentWriteRoutes(deps: AgentWriteRouteDeps): ApiRouteGroup
       ],
     },
   );
+  return { ...group, acpDocumentWrite };
 }

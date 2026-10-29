@@ -5,6 +5,7 @@ import {
   MAX_LCS_CELLS,
   reconcile,
   splitMarkdownBlocks,
+  splitMarkdownDocument,
 } from './reconciliation';
 
 describe('splitMarkdownBlocks', () => {
@@ -31,6 +32,37 @@ describe('splitMarkdownBlocks', () => {
     expect(splitMarkdownBlocks('a\n\n\n\nb')).toEqual(['a', 'b']);
     expect(splitMarkdownBlocks('A\n\n \n\nB')).toEqual(['A', 'B']);
     expect(splitMarkdownBlocks('\n\n\na')).toEqual(['a']);
+  });
+
+  test('keeps first-line indentation, trailing spaces and interior CRLF endings', () => {
+    expect(
+      splitMarkdownBlocks('Intro.\r\n\r\n    code 1\r\n    code 2  \r\n\r\nAfter.\r\n'),
+    ).toEqual(['Intro.', '    code 1\r\n    code 2  ', 'After.']);
+  });
+
+  test('carries the separator before each block and the bytes after the last one', () => {
+    expect(splitMarkdownDocument('\n\nA\r\n\r\n\r\nB\n \nC  \n\n')).toEqual({
+      blocks: [
+        { separator: '\n\n', text: 'A' },
+        { separator: '\r\n\r\n\r\n', text: 'B' },
+        { separator: '\n \n', text: 'C  ' },
+      ],
+      trailing: '\n\n',
+    });
+  });
+
+  test.each([
+    ['canonical LF', '# T\n\nA.\n\nB.\n'],
+    ['CRLF with no final newline', '# T\r\n\r\nA.\r\nA2.\r\n\r\nB.'],
+    ['mixed endings and leading blank lines', '\n\r\n# T\r\n\nA.\n\r\n\r\nB.\r\n'],
+    ['whitespace-only lines between blocks', 'A.\n  \n\t\nB.\n   '],
+    ['a fence with interior blank lines', '```js\nx\n\n\ny\n```\n\nAfter.\n'],
+    ['an unclosed fence running to the end', 'A.\n\n~~~\ncode\n\n\n'],
+    ['whitespace only', ' \n\n\t\n'],
+    ['empty', ''],
+  ])('joining the split back together reproduces the document byte for byte: %s', (_, md) => {
+    const { blocks, trailing } = splitMarkdownDocument(md);
+    expect(blocks.map((block) => block.separator + block.text).join('') + trailing).toBe(md);
   });
 });
 
@@ -77,14 +109,14 @@ describe('reconcile', () => {
     expect(result.kind).toBe('noop');
   });
 
-  test('merged: an extra blank line on the disk side does not manufacture a conflict', () => {
+  test('merged: an extra blank line on the disk side does not manufacture a conflict and keeps its bytes', () => {
     const result = reconcile({
       docName,
       base: 'A\n\nB\n',
       ours: 'A\n\nC\n',
       theirs: 'A\n\n\n\nC\n',
     });
-    expect(result).toEqual({ kind: 'merged', newContent: 'A\n\nC\n', mergedBlocks: 2 });
+    expect(result).toEqual({ kind: 'merged', newContent: 'A\n\n\n\nC\n', mergedBlocks: 2 });
   });
 
   test('clean: ours equals base (Y.Doc unchanged)', () => {
@@ -143,37 +175,44 @@ describe('reconcile', () => {
     }
   });
 
-  test('conflicts: both sides change the same block', () => {
+  test('both-kept: both sides change the same block, ours first then theirs', () => {
     const base = '# Title\n\nShared paragraph.\n\nAnother paragraph.\n';
     const ours = '# Title\n\nOur version of shared.\n\nAnother paragraph.\n';
     const theirs = '# Title\n\nTheir version of shared.\n\nAnother paragraph.\n';
 
     const result = reconcile({ docName, base, ours, theirs });
-    expect(result.kind).toBe('conflicts');
-    if (result.kind === 'conflicts') {
-      expect(result.conflicts).toHaveLength(1);
-      expect(result.conflicts[0].base).toBe('Shared paragraph.');
-      expect(result.conflicts[0].ours).toBe('Our version of shared.');
-      expect(result.conflicts[0].theirs).toBe('Their version of shared.');
-      const blocks = splitMarkdownBlocks(result.newContent);
-      expect(blocks).toContain('Our version of shared.');
+    expect(result.kind).toBe('both-kept');
+    if (result.kind === 'both-kept') {
+      expect(result.kept).toHaveLength(1);
+      expect(result.kept[0].base).toBe('Shared paragraph.');
+      expect(result.kept[0].ours).toBe('Our version of shared.');
+      expect(result.kept[0].theirs).toBe('Their version of shared.');
+      expect(splitMarkdownBlocks(result.newContent)).toEqual([
+        '# Title',
+        'Our version of shared.',
+        'Their version of shared.',
+        'Another paragraph.',
+      ]);
     }
   });
 
-  test('conflicts: mixed — some blocks conflict, others merge cleanly', () => {
+  test('both-kept: mixed — one block kept twice, the others merge cleanly', () => {
     const base = '# Title\n\nBlock A.\n\nBlock B.\n\nBlock C.\n';
     const ours = '# Title\n\nBlock A edited by us.\n\nBlock B.\n\nBlock C edited by us.\n';
     const theirs = '# Title\n\nBlock A.\n\nBlock B edited by them.\n\nBlock C edited by them.\n';
 
     const result = reconcile({ docName, base, ours, theirs });
-    expect(result.kind).toBe('conflicts');
-    if (result.kind === 'conflicts') {
-      expect(result.conflicts).toHaveLength(1);
-      expect(result.conflicts[0].base).toBe('Block C.');
-
-      const blocks = splitMarkdownBlocks(result.newContent);
-      expect(blocks).toContain('Block A edited by us.');
-      expect(blocks).toContain('Block B edited by them.');
+    expect(result.kind).toBe('both-kept');
+    if (result.kind === 'both-kept') {
+      expect(result.kept).toHaveLength(1);
+      expect(result.kept[0].base).toBe('Block C.');
+      expect(splitMarkdownBlocks(result.newContent)).toEqual([
+        '# Title',
+        'Block A edited by us.',
+        'Block B edited by them.',
+        'Block C edited by us.',
+        'Block C edited by them.',
+      ]);
     }
   });
 
@@ -385,7 +424,7 @@ describe('reconcile', () => {
       }
     });
 
-    test('conflicts: an outcome that also skipped dedup past the LCS cap reports dedupSkipped', () => {
+    test('both-kept: an outcome that also skipped dedup past the LCS cap reports dedupSkipped', () => {
       const perSide = Math.ceil(Math.sqrt(MAX_LCS_CELLS)) + 10;
       const shared = Array.from({ length: 10 }, (_, i) => `shared ${i}.`);
       const base = 'Anchor.\n';
@@ -403,11 +442,15 @@ describe('reconcile', () => {
       const theirs = `${theirBlocks.join('\n\n')}\n`;
 
       const result = reconcile({ docName, base, ours, theirs });
-      expect(result.kind).toBe('conflicts');
-      if (result.kind === 'conflicts') {
-        expect(result.conflicts).toHaveLength(1);
-        expect(result.conflicts[0].ours).toBe('Anchor edited by us.');
-        expect(result.conflicts[0].theirs).toBe('Anchor edited by them.');
+      expect(result.kind).toBe('both-kept');
+      if (result.kind === 'both-kept') {
+        expect(result.kept).toHaveLength(1);
+        expect(result.kept[0].ours).toBe('Anchor edited by us.');
+        expect(result.kept[0].theirs).toBe('Anchor edited by them.');
+        expect(splitMarkdownBlocks(result.newContent).slice(0, 2)).toEqual([
+          'Anchor edited by us.',
+          'Anchor edited by them.',
+        ]);
         expect(result.dedupSkipped).toBe(true);
       }
     });

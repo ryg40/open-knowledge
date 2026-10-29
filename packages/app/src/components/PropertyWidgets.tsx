@@ -11,6 +11,7 @@ import {
   FRONTMATTER_TAG_VALUE_RE,
   isValidFrontmatterTagValue,
 } from '@inkeep/open-knowledge-core/frontmatter/tags';
+import { localIsoDate } from '@inkeep/open-knowledge-core/utils/local-iso-date';
 import type { MessageDescriptor } from '@lingui/core';
 import { msg } from '@lingui/core/macro';
 import { Trans, useLingui } from '@lingui/react/macro';
@@ -344,7 +345,6 @@ export function DateWidget({ keyName, value, onCommit, onSubmit }: CommonWidgetP
           </Button>
         </PopoverTrigger>
         <PopoverContent className="w-auto overflow-hidden p-0" align="end">
-          {}
           <Suspense fallback={<div className="h-[19rem] w-[17rem]" />}>
             <Calendar
               mode="single"
@@ -558,6 +558,10 @@ export const DEFAULT_VALUE_FOR_TYPE: Record<FrontmatterType, FrontmatterValue> =
   object: {},
 };
 
+export function defaultValueForType(type: FrontmatterType): FrontmatterValue {
+  return type === 'date' ? localIsoDate() : DEFAULT_VALUE_FOR_TYPE[type];
+}
+
 interface TypeIconButtonProps {
   keyName: string;
   type: FrontmatterType;
@@ -580,8 +584,11 @@ export function TypeIconButton({
     return (
       <Tooltip>
         <TooltipTrigger asChild>
-          {/* biome-ignore lint/a11y/noNoninteractiveTabindex: shadcn's tooltip-on-disabled-button pattern requires a focusable <span> wrapper so keyboard users can reach the tooltip — the inner <button disabled> is removed from tab order. https://ui.shadcn.com/docs/components/radix/tooltip#disabled-button */}
-          <span tabIndex={0} className="inline-flex">
+          <span
+            // oxlint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- shadcn's tooltip-on-disabled-button pattern requires a focusable <span> wrapper so keyboard users can reach the tooltip — the inner <button disabled> is removed from tab order. https://ui.shadcn.com/docs/components/radix/tooltip#disabled-button
+            tabIndex={0}
+            className="inline-flex"
+          >
             <button
               type="button"
               disabled
@@ -668,8 +675,7 @@ export function coerceValue(value: FrontmatterValue, target: FrontmatterType): F
     }
     case 'date': {
       if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
-      const today = new Date().toISOString().slice(0, 10);
-      return today;
+      return localIsoDate();
     }
     case 'list': {
       if (Array.isArray(value)) return value;

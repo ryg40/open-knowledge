@@ -21,7 +21,7 @@ import {
   parseBrokenLinks,
 } from './advisory-warnings.ts';
 import { resolveWithinRoot } from './path-safety.ts';
-import { buildPreviewAttachWarning, resolvePreviewUrl, START_UI_TEXT_HINT } from './preview-url.ts';
+import { buildPreviewAttachWarning, resolvePreviewUrl, startUiTextHint } from './preview-url.ts';
 import type { ConfigOrResolver, ServerInstance, ServerUrlOrResolver } from './shared.ts';
 import {
   AUTHORING_WARNING_CODE_GLOSS,
@@ -29,7 +29,7 @@ import {
   CANONICAL_COMPONENT_GUIDANCE,
   documentResultBaseShape,
   errorTextWithDetail,
-  HOCUSPOCUS_NOT_RUNNING_ERROR,
+  hocuspocusNotRunningError,
   httpPost,
   httpPut,
   nestDocResult,
@@ -64,8 +64,24 @@ import {
   SKILL_FILE_DESCRIBE,
   SKILL_NAME_DESCRIBE,
   SkillScopeArg,
+  TEMPLATE_EDIT_CONTROL_ADVICE,
+  TEMPLATE_METADATA_CONTROL_ADVICE,
   TEMPLATE_PATH_DESCRIBE,
 } from './verb-schemas.ts';
+import {
+  failedWriteResult,
+  landedLead,
+  landedWithoutSuccess,
+  leadFor,
+  needsAttention,
+  refusedDespiteSuccess,
+  refusedWriteResult,
+  type WriteOutcome,
+  writeOutcomeFields,
+  writeOutcomeLine,
+  writeOutcomeOf,
+  writeOutcomeOutputShape,
+} from './write-outcome.ts';
 
 const DESCRIPTION = [
   'Edit exactly one `document`, `folder`, `template`, or `skill`: body find/replace OR metadata, never both in one call. Requires the Hocuspocus server.',
@@ -73,7 +89,7 @@ const DESCRIPTION = [
   "`folder: {path, frontmatter}` patches metadata (no body). `template: {path: '<folder>/<name>', ...}` takes body find/replace/occurrence or frontmatter.",
   '`skill: {name, ...}` takes body find/replace/occurrence OR description (its only metadata leaf). Recorded, unedited copies refresh from the source on watcher/startup sync; links reflect edits immediately. Hand-edited copies are preserved.',
   'Optional summary: one-line outcome ≤80 chars for any edit, persisted to git history; avoid secrets or PII.',
-  'Read structuredContent.document.warnings: content-divergence/disk-edit-reconciled means re-read with exec; mermaid-parse-error means the edit landed but fix the fence and re-edit.',
+  'Follow nextStep (retry|re-read|none). merged-first, both-kept and projection-held landed: re-read, never retry. mermaid-parse-error: the edit landed; fix the fence.',
   CANONICAL_COMPONENT_GUIDANCE,
 ].join('\n');
 
@@ -164,7 +180,7 @@ async function handleDocBody(
     }
     if (full === null) {
       return textResult(
-        `Error: cannot resolve occurrence ${occurrence} — "${normalized.docName}" is not on disk yet. Retry with the first match (omit \`occurrence\`).`,
+        `Error: No document at "${normalized.docName}" on disk (paths are relative to the content root), so occurrence ${occurrence} cannot be resolved. If the path is wrong, fix it; edit only changes an existing document. If the document was just created and is not saved yet, retry with the first match (omit \`occurrence\`).`,
         true,
       );
     }
@@ -186,7 +202,13 @@ async function handleDocBody(
     ...(args.summary !== undefined ? { summary: args.summary } : {}),
     ...agentIdentityFields(identity),
   });
-  if (!result.ok) return textResult(errorTextWithDetail(result), true);
+  const outcome = writeOutcomeOf(result);
+  if (!result.ok && !landedWithoutSuccess(outcome)) {
+    return failedWriteResult(errorTextWithDetail(result), outcome);
+  }
+  if (refusedDespiteSuccess(outcome)) {
+    return refusedWriteResult(`The edit of "${normalized.docName}"`, outcome);
+  }
   return composeWritePreviewResult(
     result,
     normalized.docName,
@@ -194,6 +216,7 @@ async function handleDocBody(
     contentDir,
     autoOpen,
     'Edit applied successfully.',
+    outcome,
   );
 }
 
@@ -215,7 +238,8 @@ async function handleDocFrontmatter(
     ...(args.summary !== undefined ? { summary: args.summary } : {}),
     ...agentIdentityFields(identity),
   });
-  if (!result.ok) {
+  const outcome = writeOutcomeOf(result);
+  if (!result.ok && !landedWithoutSuccess(outcome)) {
     const errorText = errorTextWithDetail(result);
     const fieldErrors =
       result.fieldErrors && typeof result.fieldErrors === 'object'
@@ -223,9 +247,12 @@ async function handleDocFrontmatter(
         : undefined;
     if (fieldErrors) {
       const lines = Object.entries(fieldErrors).map(([k, m]) => `  ${k}: ${m}`);
-      return textResult(`${errorText}\n${lines.join('\n')}`, true);
+      return failedWriteResult(`${errorText}\n${lines.join('\n')}`, outcome);
     }
-    return textResult(errorText, true);
+    return failedWriteResult(errorText, outcome);
+  }
+  if (refusedDespiteSuccess(outcome)) {
+    return refusedWriteResult(`The frontmatter patch of "${normalized.docName}"`, outcome);
   }
   const setKeys: string[] = [];
   const deleteKeys: string[] = [];
@@ -246,6 +273,7 @@ async function handleDocFrontmatter(
     contentDir,
     autoOpen,
     `Frontmatter patched (${opSummary || `${Object.keys(doc.frontmatter).length} key(s)`}).`,
+    outcome,
   );
 }
 
@@ -256,6 +284,7 @@ function composeWritePreviewResult(
   _contentDir: string,
   autoOpen: boolean,
   leadLine: string,
+  outcome: WriteOutcome | undefined,
 ) {
   const lockDir = resolveLockDir(cwd);
   const preview = resolvePreviewUrl(docName, { lockDir });
@@ -271,14 +300,21 @@ function composeWritePreviewResult(
   const brokenLinks = parseBrokenLinks(result.brokenLinks);
   const brokenLinkSuppression = parseBrokenLinkSuppression(result.brokenLinkSuppression);
 
-  const lines: string[] = [leadLine];
-  if (noPreviewAnywhere && !preview) lines.push(START_UI_TEXT_HINT);
+  const lines: string[] = [
+    outcome && landedWithoutSuccess(outcome) ? landedLead(outcome, 'Edit applied') : leadLine,
+  ];
+  if (outcome?.outcome === 'projection-held' && typeof result.detail === 'string') {
+    lines.push(result.detail);
+  }
+  if (noPreviewAnywhere && !preview) lines.push(startUiTextHint());
   if (summaryHint) lines.push(summaryHint);
   if (advisoryWarnings) {
     lines.push(...formatAdvisoryLines(advisoryWarnings));
   }
   lines.push(...formatBrokenLinkLines(brokenLinks));
   if (brokenLinkSuppression) lines.push(formatBrokenLinkSuppressionLine(brokenLinkSuppression));
+  const outcomeLine = outcome?.outcome === 'applied' ? null : writeOutcomeLine(outcome);
+  if (outcomeLine) lines.push(outcomeLine);
   const text = lines.join('\n');
   const document: Record<string, unknown> = {
     brokenLinks,
@@ -287,7 +323,14 @@ function composeWritePreviewResult(
   if (summaryResult) document.summary = summaryResult;
   if (advisoryWarnings) document.warnings = advisoryWarnings;
   const warning = noPreviewAnywhere ? buildPreviewAttachWarning(preview, autoOpen) : undefined;
-  return textPlusStructured(text, nestDocResult(preview, warning, document));
+  return textPlusStructured(
+    text,
+    {
+      ...nestDocResult(preview, warning, outcome?.outcome === 'projection-held' ? {} : document),
+      ...writeOutcomeFields(outcome),
+    },
+    needsAttention(outcome),
+  );
 }
 
 function templateFilePath(
@@ -335,7 +378,7 @@ async function handleTemplate(
   if (!resolved.ok) return textResult(`Error: ${resolved.error}`, true);
   const { folder, name } = resolved;
 
-  if (!url) return textResult(HOCUSPOCUS_NOT_RUNNING_ERROR, true);
+  if (!url) return textResult(hocuspocusNotRunningError(), true);
   const filePath = templateFilePath(cwd, folder, name);
   if (!filePath.ok || !existsSync(filePath.abs)) {
     return textResult(
@@ -365,13 +408,20 @@ async function handleTemplate(
       ...(summary !== undefined ? { summary } : {}),
       ...agentIdentityFields(deps.identityRef?.current),
     });
-    if (!result.ok) return textResult(`Error: ${result.error}`, true);
+    const outcome = writeOutcomeOf(result);
+    if (!result.ok)
+      return failedWriteResult(
+        errorTextWithDetail(result, TEMPLATE_METADATA_CONTROL_ADVICE),
+        outcome,
+      );
+    if (refusedDespiteSuccess(outcome)) {
+      return refusedWriteResult(`The frontmatter patch of template "${name}"`, outcome);
+    }
     const path = typeof result.path === 'string' ? result.path : undefined;
-    return textPlusStructured(
+    return templateEditResult(
       `Patched template "${name}" frontmatter${path ? ` (${path})` : ''}.`,
-      {
-        template: { ok: true, path },
-      },
+      path,
+      outcome,
     );
   }
 
@@ -395,11 +445,29 @@ async function handleTemplate(
     ...(summary !== undefined ? { summary } : {}),
     ...agentIdentityFields(deps.identityRef?.current),
   });
-  if (!result.ok) return textResult(`Error: ${result.error}`, true);
+  const outcome = writeOutcomeOf(result);
+  if (!result.ok)
+    return failedWriteResult(errorTextWithDetail(result, TEMPLATE_EDIT_CONTROL_ADVICE), outcome);
+  if (refusedDespiteSuccess(outcome)) {
+    return refusedWriteResult(`The edit of template "${name}"`, outcome);
+  }
   const path = typeof result.path === 'string' ? result.path : undefined;
-  return textPlusStructured(`Edited template "${name}"${path ? ` (${path})` : ''}.`, {
-    template: { ok: true, path },
-  });
+  return templateEditResult(`Edited template "${name}"${path ? ` (${path})` : ''}.`, path, outcome);
+}
+
+function templateEditResult(
+  lead: string,
+  path: string | undefined,
+  outcome: WriteOutcome | undefined,
+) {
+  const outcomeLine = outcome?.outcome === 'applied' ? null : writeOutcomeLine(outcome);
+  return textPlusStructured(
+    [leadFor(outcome, lead.replace(/\.$/, ''), lead), ...(outcomeLine ? [outcomeLine] : [])].join(
+      '\n',
+    ),
+    { template: { ok: true, path }, ...writeOutcomeFields(outcome) },
+    needsAttention(outcome),
+  );
 }
 
 async function handleSkillFileEdit(
@@ -432,7 +500,7 @@ async function handleSkillFileEdit(
       true,
     );
   }
-  if (!url) return textResult(HOCUSPOCUS_NOT_RUNNING_ERROR, true);
+  if (!url) return textResult(hocuspocusNotRunningError(), true);
 
   const scope = skill.scope ?? 'project';
   const existing = await readSkillFile(url, scope, skill.name, pathCheck.path);
@@ -457,6 +525,7 @@ async function handleSkillFileEdit(
     scope,
     path: pathCheck.path,
     content: newText,
+    resubmitted: true,
     summary,
     identity,
   });
@@ -510,7 +579,7 @@ async function handleSkill(
       true,
     );
   }
-  if (!url) return textResult(HOCUSPOCUS_NOT_RUNNING_ERROR, true);
+  if (!url) return textResult(hocuspocusNotRunningError(), true);
 
   const scope = skill.scope ?? 'project';
   const existing = await fetchSkill(url, scope, skill.name);
@@ -544,6 +613,7 @@ async function handleSkill(
     name: skill.name,
     description: newDescription,
     body: newBody,
+    resubmitted: hasDesc ? 'metadata-edit' : 'body-edit',
     summary,
     identity: deps.identityRef?.current,
     lockDir,
@@ -556,7 +626,7 @@ async function handleFolder(
   url: string | undefined,
   deps: EditDeps,
 ) {
-  if (!url) return textResult(HOCUSPOCUS_NOT_RUNNING_ERROR, true);
+  if (!url) return textResult(hocuspocusNotRunningError(), true);
   const result = await httpPut(url, '/api/folder-config', {
     path: folder.path,
     frontmatter: folder.frontmatter,
@@ -581,7 +651,12 @@ export function register(server: ServerInstance, deps: EditDeps): void {
       .describe(
         'Exact BODY text to find. Use WITH `replace`. For metadata, use `frontmatter` instead — not this.',
       ),
-    replace: z.string().optional().describe('Replacement for the `find` match.'),
+    replace: z
+      .string()
+      .optional()
+      .describe(
+        'Replacement for the `find` match. Markdown C0 controls allow only TAB, LF and CR; remove others or use printable escapes.',
+      ),
     occurrence: z
       .number()
       .int()
@@ -626,31 +701,41 @@ export function register(server: ServerInstance, deps: EditDeps): void {
           .object({
             path: z.string().describe(TEMPLATE_PATH_DESCRIBE),
             ...bodyFields,
-            frontmatter: FrontmatterArg.optional().describe('Template metadata merge-patch.'),
+            frontmatter: FrontmatterArg.optional().describe(
+              'Template metadata merge-patch. Resubmits the full existing body; unsupported C0 controls anywhere in that body refuse the edit.',
+            ),
           })
           .optional()
-          .describe('Edit a TEMPLATE: body (find+replace) or frontmatter (patch).'),
+          .describe(
+            'Edit a TEMPLATE: body (find+replace) or frontmatter (patch). Edits resubmit the full stored template body, including any supplied replace; unsupported C0 controls anywhere in that body refuse the edit. Remove controls from replace or clean the full body through write({ template: ... }).',
+          ),
         skill: z
           .object({
             name: z.string().describe(SKILL_NAME_DESCRIBE),
             file: z.string().optional().describe(SKILL_FILE_DESCRIBE),
             ...bodyFields,
-            description: z.string().optional().describe(SKILL_DESCRIPTION_DESCRIBE),
+            description: z
+              .string()
+              .optional()
+              .describe(
+                `${SKILL_DESCRIPTION_DESCRIBE} Resubmits the full existing body; unsupported C0 controls anywhere in that body refuse the edit.`,
+              ),
             scope: SkillScopeArg.optional(),
           })
           .optional()
           .describe(
-            'Edit a SKILL: SKILL.md body (find+replace) OR its `description`; or pass `file` to find/replace inside ONE bundle file.',
+            'Edit a SKILL: SKILL.md body (find+replace) OR its `description`; or pass `file` to find/replace inside ONE bundle file. Without file, edits resubmit the full stored skill body, including any supplied replace; unsupported C0 controls anywhere in that body refuse the edit. With file, edits resubmit the full file content, including frontmatter and replace; Markdown files must be wholly clean. Remove controls from replace or clean the full body/file through write({ skill: ... }).',
           ),
         summary: summaryArgSchema,
         cwd: z.string().optional().describe(ROUTED_CWD_DESCRIPTION),
       },
       outputSchema: outputSchemaWithText({
+        ...writeOutcomeOutputShape,
         document: z
           .object(documentResultBaseShape)
           .optional()
           .describe(
-            'Document edit result. Always present on a successful document edit (body or frontmatter) — it carries `brokenLinks` (possibly `[]`) plus any `brokenLinkSuppression`/`summary`/`warnings`. Read `brokenLinkSuppression` and `warnings` before concluding anything from an empty `brokenLinks`: a suppression means a project policy withheld findings that are not yours to repair; a `link-check-deferred` warning means links were not checked yet. Absent only for folder/template edits.',
+            'Document edit result. Present on every saved document edit, body or frontmatter (absent when the outcome is projection-held, whose links were not checked) — it carries `brokenLinks` (possibly `[]`) plus any `brokenLinkSuppression`/`summary`/`warnings`. Read `brokenLinkSuppression` and `warnings` before concluding anything from an empty `brokenLinks`: a suppression means a project policy withheld findings that are not yours to repair; a `link-check-deferred` warning means links were not checked yet. Absent only for folder/template edits.',
           ),
         folder: z
           .object({
@@ -732,7 +817,7 @@ export function register(server: ServerInstance, deps: EditDeps): void {
       if (args.document !== undefined) {
         const docTeaching = bodyOrFrontmatterError(args.document, 'document');
         if (docTeaching) return textResult(`Error: ${docTeaching}`, true);
-        if (!url) return textResult(HOCUSPOCUS_NOT_RUNNING_ERROR, true);
+        if (!url) return textResult(hocuspocusNotRunningError(), true);
         if (args.document.frontmatter !== undefined) {
           return handleDocFrontmatter(
             { path: args.document.path, frontmatter: args.document.frontmatter },

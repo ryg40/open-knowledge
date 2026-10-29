@@ -2,6 +2,7 @@ import type { ServerResponse } from 'node:http';
 import { resolve } from 'node:path';
 import {
   AGENT_ICON_COLORS,
+  type AgentWriteOutcomeFields,
   colorFromSeed,
   DEFAULT_LINTER_CONFIG,
   FrontmatterSchemaWriteRequestSchema,
@@ -25,6 +26,11 @@ import {
   applyAgentMarkdownWrite,
   iconFromClientName,
 } from '../agent-sessions.ts';
+import {
+  type AgentWriteFlushOutcome,
+  answeredWithSuccessOnAppRoutes,
+  outcomeOfSavedWrite,
+} from '../agent-write-outcome.ts';
 import type { NormalizedSummary, SummaryResponse } from '../agent-write-summary.ts';
 import { isConfigDoc, isSystemDoc } from '../cc1-broadcast.ts';
 import type { ConflictAuthority } from '../conflict-authority.ts';
@@ -96,16 +102,9 @@ export interface LintWriteRouteDeps {
     clientVersion?: string;
     label?: string;
   };
-  flushDiskAndDetectOutcome: (
-    docName: string,
-  ) => Promise<
-    | { kind: 'failure'; failure: StoreFailure }
-    | { kind: 'divergence' }
-    | { kind: 'stale-external-write' }
-    | null
-  >;
+  flushDiskAndDetectOutcome: (docName: string) => Promise<AgentWriteFlushOutcome>;
+  markAgentWriteStore: (docName: string) => void;
   respondPersistenceFailure: (res: ServerResponse, failure: StoreFailure, handler: string) => void;
-  respondDiskDivergence: (res: ServerResponse, handler: string) => void;
   respondStaleExternalWrite: (res: ServerResponse, handler: string, docName: string) => void;
   flushDocToDisk: (docName: string, label: string) => void;
   log: PinoLogger;
@@ -130,8 +129,8 @@ export function createLintWriteRoutes(deps: LintWriteRouteDeps): ApiRouteGroup {
     agentPresenceBroadcaster,
     buildAgentActor,
     flushDiskAndDetectOutcome,
+    markAgentWriteStore,
     respondPersistenceFailure,
-    respondDiskDivergence,
     respondStaleExternalWrite,
     flushDocToDisk,
     log,
@@ -339,6 +338,7 @@ export function createLintWriteRoutes(deps: LintWriteRouteDeps): ApiRouteGroup {
 
           let after = before;
           let reLintFailure: ReLintFailure | undefined;
+          let fixOutcome: AgentWriteOutcomeFields | undefined;
           const reLintFailures: LintPluginFailure[] = [];
           if (fixed !== source) {
             try {
@@ -366,6 +366,7 @@ export function createLintWriteRoutes(deps: LintWriteRouteDeps): ApiRouteGroup {
                   suppliedWriterId,
                 );
               }, session.origin);
+              markAgentWriteStore(resolvedDocName);
 
               if (actor.kind !== 'anonymous') {
                 recordContributor(
@@ -389,12 +390,12 @@ export function createLintWriteRoutes(deps: LintWriteRouteDeps): ApiRouteGroup {
             }
 
             const flushOutcome = await flushDiskAndDetectOutcome(resolvedDocName);
-            if (flushOutcome?.kind === 'failure') {
+            fixOutcome = outcomeOfSavedWrite(undefined, flushOutcome);
+            if (
+              flushOutcome?.kind === 'failure' &&
+              !answeredWithSuccessOnAppRoutes(flushOutcome.failure)
+            ) {
               respondPersistenceFailure(res, flushOutcome.failure, 'lint-fix');
-              return;
-            }
-            if (flushOutcome?.kind === 'divergence') {
-              respondDiskDivergence(res, 'lint-fix');
               return;
             }
             if (flushOutcome?.kind === 'stale-external-write') {
@@ -467,6 +468,7 @@ export function createLintWriteRoutes(deps: LintWriteRouteDeps): ApiRouteGroup {
             200,
             LintFixResultSchema,
             {
+              ...fixOutcome,
               file: docRelPath,
               fixedCount,
               diagnostics: after,

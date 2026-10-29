@@ -1,22 +1,23 @@
 import {
+  currentCliCommandName,
   currentDesktopProduct,
-  DESKTOP_PRODUCTS,
   piToolNamespace,
 } from '@inkeep/open-knowledge-core';
 import {
   buildManagedServerEntry,
   type McpInstallOptions,
   PI_MANAGED_FILE_ENTRY_COMMAND,
+  piExtensionDevHeader,
   piExtensionOwnershipMarker,
   piExtensionVersionSentinel,
 } from '../commands/editors.ts';
 
 export function isOwnPiExtensionSource(text: string): boolean {
-  const marker = piExtensionOwnershipMarker(currentDesktopProduct());
-  if (!text.startsWith(marker)) return false;
-  return Object.values(DESKTOP_PRODUCTS)
-    .map(piExtensionOwnershipMarker)
-    .every((other) => other.length <= marker.length || !text.startsWith(other));
+  const product = currentDesktopProduct();
+  const firstLine = text.split(/\r?\n/, 1)[0] ?? '';
+  if (firstLine === piExtensionDevHeader(product)) return true;
+  const marker = piExtensionOwnershipMarker(product);
+  return firstLine.startsWith(marker) && /^-v\d+$/.test(firstLine.slice(marker.length));
 }
 
 export function isPiExtensionSourceUpToDate(text: string): boolean {
@@ -38,9 +39,7 @@ export function makePiManagedFileEntry(text: string): Record<string, unknown> {
 export function buildPiExtensionSource(options: McpInstallOptions = {}): string {
   const dev = options.mode === 'dev';
   const product = currentDesktopProduct();
-  const header = dev
-    ? `${piExtensionOwnershipMarker(product)}-dev`
-    : piExtensionVersionSentinel(product);
+  const header = dev ? piExtensionDevHeader(product) : piExtensionVersionSentinel(product);
   const toolPrefix = `${piToolNamespace(product)}_`;
   const launchers = {
     unix: buildManagedServerEntry({ ...options, platformName: 'darwin' }),
@@ -48,9 +47,9 @@ export function buildPiExtensionSource(options: McpInstallOptions = {}): string 
   };
   return `${header}
 /**
- * Open Knowledge bridge for Pi — MANAGED FILE, written by \`ok init\`.
+ * Open Knowledge bridge for Pi — MANAGED FILE, written by \`${currentCliCommandName()} init\`.
  * Hand edits are overwritten whenever OK re-syncs this project; remove it
- * with \`ok deinit\` (or delete the file) to disconnect Pi from OK.
+ * with \`${currentCliCommandName()} deinit\` (or delete the file) to disconnect Pi from OK.
  *
  * On session start it spawns Open Knowledge's MCP stdio server via OK's
  * resilient launcher (bundle, then npx, then version-manager probes), performs

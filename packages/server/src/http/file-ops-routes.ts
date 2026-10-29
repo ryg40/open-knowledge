@@ -7,9 +7,10 @@ import {
   unlinkSync,
 } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { dirname, extname, resolve, sep } from 'node:path';
+import { dirname, extname, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import {
+  type AttachmentFolderUploadIssue,
   CreateFolderRequestSchema,
   CreateFolderSuccessSchema,
   CreatePageRequestSchema,
@@ -18,13 +19,18 @@ import {
   DeletePathSuccessSchema,
   DuplicatePathRequestSchema,
   DuplicatePathSuccessSchema,
+  describeAttachmentFolderPathVariableIssue,
+  findTemplateByName,
   instantiateDoc,
   isManagedArtifactDocName,
   LINKABLE_ASSET_EXTENSIONS,
+  localIsoDate,
   type Principal,
   type ProblemType,
   RenamePathRequestSchema,
   RenamePathSuccessSchema,
+  TEMPLATE_NAME_REGEX,
+  TEMPLATE_NAME_RULE,
   TrashCleanupRequestSchema,
   TrashCleanupSuccessSchema,
   UploadAssetSuccessSchema,
@@ -36,8 +42,9 @@ import { ManagedRenameCollisionError } from '../apply-managed-rename.ts';
 import { isConfigDoc, isSystemDoc } from '../cc1-broadcast.ts';
 import type { ConflictAuthority } from '../conflict-authority.ts';
 import { DocInConflictError, respondDocInConflict } from '../conflict-errors.ts';
+import { registerSourceFileExtension } from '../content/file-operation-paths.ts';
 import { isReservedProjectStatePath } from '../content/managed-doc-enum.ts';
-import { applySubstitution, todayIsoUtc } from '../content/substitution.ts';
+import { applySubstitution } from '../content/substitution.ts';
 import { resolveTemplatesAvailable } from '../content/templates-resolver.ts';
 import type { ContentFilter } from '../content-filter.ts';
 import { recordContributor } from '../contributor-tracker.ts';
@@ -45,8 +52,6 @@ import {
   getDocExtension,
   isSupportedAssetFile,
   isSupportedDocFile,
-  registerDocExtension,
-  SUPPORTED_DOC_EXTENSIONS,
   stripDocExtension,
 } from '../doc-extensions.ts';
 import { extractActorIdentity } from '../extract-actor-identity.ts';
@@ -58,7 +63,7 @@ import {
 import { classifyFsPath, normalizeFsPath } from '../fs-traced.ts';
 import type { PinoLogger } from '../logger.ts';
 import { createMultipartParser, type MultipartParser } from '../multipart.ts';
-import type { AssetService } from '../services/assets.ts';
+import { type AssetService, AttachmentFolderPathConfigError } from '../services/assets.ts';
 import { DuplicateNameExhaustedError, type FileOpsService } from '../services/file-ops.ts';
 import { type getMeter, withSpan } from '../telemetry.ts';
 import {
@@ -386,44 +391,7 @@ export function createFileOpsRoutes(deps: FileOpsRouteDeps): ApiRouteGroup {
 
   function probeAndRegisterSourceFileExtension(probeContentDir: string, fromPath: string): void {
     if (!isValidRelativeContentPath(fromPath)) return;
-    const resolvedContentDir = resolve(probeContentDir);
-    if (isSupportedDocFile(fromPath)) {
-      const extensionless = stripDocExtension(fromPath);
-      for (const ext of SUPPORTED_DOC_EXTENSIONS) {
-        const candidate = resolve(resolvedContentDir, `${extensionless}${ext}`);
-        if (
-          candidate !== resolvedContentDir &&
-          !candidate.startsWith(`${resolvedContentDir}${sep}`)
-        ) {
-          continue;
-        }
-        if (existsSync(candidate)) {
-          registerDocExtension(extensionless, ext);
-        }
-      }
-      const explicitCandidate = resolve(resolvedContentDir, fromPath);
-      if (
-        explicitCandidate !== resolvedContentDir &&
-        explicitCandidate.startsWith(`${resolvedContentDir}${sep}`) &&
-        existsSync(explicitCandidate)
-      ) {
-        registerDocExtension(extensionless, extname(fromPath));
-      }
-      return;
-    }
-    for (const ext of SUPPORTED_DOC_EXTENSIONS) {
-      const candidate = resolve(resolvedContentDir, `${fromPath}${ext}`);
-      if (
-        candidate !== resolvedContentDir &&
-        !candidate.startsWith(`${resolvedContentDir}${sep}`)
-      ) {
-        continue;
-      }
-      if (existsSync(candidate)) {
-        registerDocExtension(fromPath, ext);
-        return;
-      }
-    }
+    registerSourceFileExtension(probeContentDir, fromPath);
   }
 
   function resolveExtensionlessAssetPath(assetPath: string): {
@@ -547,12 +515,12 @@ export function createFileOpsRoutes(deps: FileOpsRouteDeps): ApiRouteGroup {
         let initialContent = '';
         let templateScopeForLog: 'local' | 'inherited' | undefined;
         if (templateName.length > 0) {
-          if (!/^[A-Za-z0-9_-]+$/.test(templateName)) {
+          if (!TEMPLATE_NAME_REGEX.test(templateName)) {
             errorResponse(
               res,
               400,
               'urn:ok:error:invalid-request',
-              'Template name must match [A-Za-z0-9_-]+.',
+              `Template name must use ${TEMPLATE_NAME_RULE}.`,
               { handler: 'create-page' },
             );
             return;
@@ -561,7 +529,7 @@ export function createFileOpsRoutes(deps: FileOpsRouteDeps): ApiRouteGroup {
             ? filePath.slice(0, filePath.lastIndexOf('/'))
             : '';
           const available = resolveTemplatesAvailable(resolvedContentDir, parentFolder);
-          const matched = available.find((t) => t.name === templateName);
+          const matched = findTemplateByName(available, templateName);
           if (!matched) {
             const availableLabel =
               available.length === 0
@@ -594,7 +562,7 @@ export function createFileOpsRoutes(deps: FileOpsRouteDeps): ApiRouteGroup {
           const userDisplayName =
             actor.kind === 'agent' || actor.kind === 'principal' ? (actor.displayName ?? '') : '';
           initialContent = applySubstitution(templateStarter, {
-            date: todayIsoUtc(),
+            date: localIsoDate(),
             user: userDisplayName,
           });
           templateScopeForLog = matched.scope;
@@ -1537,12 +1505,32 @@ export function createFileOpsRoutes(deps: FileOpsRouteDeps): ApiRouteGroup {
           500,
           'urn:ok:error:internal-server-error',
           'Server configuration error: invalid attachment folder path.',
-          { handler: 'upload-asset', cause: outcome.cause },
+          {
+            handler: 'upload-asset',
+            cause: outcome.cause,
+            detail:
+              outcome.cause instanceof AttachmentFolderPathConfigError
+                ? `content.attachmentFolderPath in .ok/config.yml: ${outcome.cause.reasons.join('; ')}`
+                : 'content.attachmentFolderPath in .ok/config.yml could not be read.',
+            extensions: {
+              attachmentFolderIssue: {
+                kind: 'invalid-config',
+              } satisfies AttachmentFolderUploadIssue,
+            },
+          },
         );
         return;
       case 'invalid-attachment-folder':
         errorResponse(res, 400, 'urn:ok:error:invalid-request', 'Invalid attachment folder path.', {
           handler: 'upload-asset',
+          ...(outcome.issue
+            ? {
+                detail: describeAttachmentFolderPathVariableIssue(outcome.issue),
+                extensions: {
+                  attachmentFolderIssue: outcome.issue satisfies AttachmentFolderUploadIssue,
+                },
+              }
+            : {}),
         });
         return;
       case 'path-escape':

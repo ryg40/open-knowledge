@@ -16,6 +16,7 @@ import {
 import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import {
   BridgeMergeContentLossError,
   DEFAULT_LINTER_CONFIG,
@@ -36,6 +37,7 @@ import { stringify as stringifyYaml } from 'yaml';
 import * as Y from 'yjs';
 import { runningAsRoot } from '../../../test-support/capabilities.test-helper.ts';
 import { configureTestGitRepository } from '../../../test-support/configure-git-fixture.test-helper.ts';
+import { processStartTokenFromOs } from '../../../test-support/os-process-start.test-helper.ts';
 import { MAX_AGENT_SESSIONS } from './agent-sessions.ts';
 import { BacklinkIndex } from './backlink-index.ts';
 import { getBootTimings, resetBootTimingsForTest, startBootTimings } from './boot-timings.ts';
@@ -59,10 +61,11 @@ import {
   writeManagedRenameJournal,
 } from './managed-rename-journal.ts';
 import { getMetrics, resetMetrics } from './metrics.ts';
+import type { NativeWatcherBackend } from './parcel-subscription.ts';
 import { ensureProjectGit } from './project-git.ts';
 import { MAX_LCS_CELLS } from './reconciliation.ts';
 import { saveRemovedDocsJournal } from './removed-docs-journal.ts';
-import { createServer, type ServerInstance } from './server-factory.ts';
+import { createServer, type ServerInstance, type ServerOptions } from './server-factory.ts';
 import { releaseServerLock } from './server-lock.ts';
 import {
   initShadowRepo,
@@ -70,8 +73,10 @@ import {
   type ShadowHandle,
   shadowGit,
 } from './shadow-repo.ts';
+import { SyncEngine } from './sync-engine.ts';
 import { TagIndex } from './tag-index.ts';
 import { contentHash } from './version-hash.ts';
+import { createWatcherDouble } from './watcher-double.test-helper.ts';
 
 const watcherStartupFailures = vi.hoisted(() => ({ file: false, head: false }));
 
@@ -467,12 +472,11 @@ describe('createServer() — derived-index branch lifecycle', () => {
     let rejectBegin!: (error: Error) => void;
     const beginBranch = vi
       .spyOn(DerivedDocumentIndex.prototype, 'beginBranchSwitch')
-      .mockImplementationOnce(
-        () =>
-          new Promise<never>((_resolve, reject) => {
-            rejectBegin = reject;
-          }),
-      );
+      .mockImplementationOnce(() => {
+        const { promise, reject } = Promise.withResolvers<never>();
+        rejectBegin = reject;
+        return promise;
+      });
     const abort = vi.spyOn(DerivedDocumentIndex.prototype, 'abortBranchSwitch');
 
     await git.checkout('feature');
@@ -507,15 +511,81 @@ async function executePendingStore(server: ServerInstance, docName: string): Pro
 describe('createServer().destroy() — graceful shutdown flush', () => {
   let tmpDir: string;
   let logCapture: ReturnType<typeof captureAllLoggers>;
+  let finishControlledInit: (() => Promise<void>) | undefined;
 
   beforeEach(async () => {
+    finishControlledInit = undefined;
     tmpDir = await mkdtemp(join(tmpdir(), 'ok-destroy-test-'));
     logCapture = captureAllLoggers();
   });
 
   afterEach(async () => {
+    await finishControlledInit?.();
     loggerFactory.reset();
     await rm(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  test('late watcher release failure is a shutdown phase error and retains authority', async () => {
+    const contentDir = join(tmpDir, 'content');
+    mkdirSync(contentDir, { recursive: true });
+    const authorityRegistryPath = join(tmpDir, 'authority.sqlite');
+    const releaseFailure = new Error('late watcher release failed');
+    let server: ServerInstance | undefined;
+    let destroyPromise: Promise<void> | undefined;
+    const backend: NativeWatcherBackend = {
+      async subscribe() {
+        if (destroyPromise === undefined) {
+          if (server === undefined) throw new Error('server was not returned before subscription');
+          destroyPromise = server.destroy();
+        }
+        return {
+          async unsubscribe() {
+            throw releaseFailure;
+          },
+        };
+      },
+    };
+
+    server = createServer({
+      contentDir,
+      projectDir: tmpDir,
+      authorityRegistryPath,
+      watcherBackend: backend,
+      gitEnabled: false,
+      quiet: true,
+    });
+
+    try {
+      await server.ready;
+      await destroyPromise;
+
+      expect(server.degraded).not.toContain('file-watcher');
+      expect(server.degraded).not.toContain('head-watcher');
+      const shutdownLogs = logCapture.getCalls('warn', 'shutdown flushed');
+      expect(shutdownLogs).toHaveLength(1);
+      expect(shutdownLogs[0]?.payload.phaseErrors).toContainEqual({
+        phase: 'watcher-unsubscribe',
+        error: releaseFailure.message,
+      });
+      expect(logCapture.getCalls('error', 'shutdown phase-1 watcher unsubscribe failed')).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ payload: expect.objectContaining({ watched: 'content' }) }),
+        ]),
+      );
+      expect(logCapture.getCalls('error', 'disk bridge watcher failed to start')).toHaveLength(0);
+      expect(logCapture.getCalls('error', 'HEAD watcher failed to start')).toHaveLength(0);
+
+      const registry = new DatabaseSync(authorityRegistryPath, { readOnly: true });
+      try {
+        expect(registry.prepare('SELECT count(*) AS count FROM server_authority').get()).toEqual({
+          count: 1,
+        });
+      } finally {
+        registry.close();
+      }
+    } finally {
+      await server.destroy();
+    }
   });
 
   test('flushes L1 markdown writes before destroy() resolves + emits shutdown log', async () => {
@@ -1452,16 +1522,70 @@ describe('createServer().destroy() — graceful shutdown flush', () => {
     await server.destroy();
   });
 
-  test('destroy() during async init — before ready resolves', async () => {
+  test('destroy() during async init — before ready resolves', async (ctx) => {
+    const startCompleted = Promise.withResolvers<SyncEngine>();
+    const releaseStart = Promise.withResolvers<void>();
+    const realStart = SyncEngine.prototype.start;
+    let startReturned = false;
+    const start = vi.spyOn(SyncEngine.prototype, 'start').mockImplementation(async function () {
+      await realStart.call(this);
+      startCompleted.resolve(this);
+      await releaseStart.promise;
+      startReturned = true;
+    });
+    let restored = false;
+    const releaseAndRestore = () => {
+      releaseStart.resolve();
+      if (!restored) {
+        restored = true;
+        start.mockRestore();
+      }
+    };
+    finishControlledInit = async () => releaseAndRestore();
+    ctx.signal.addEventListener('abort', releaseAndRestore, { once: true });
+    ctx.onTestFinished(() => {
+      ctx.signal.removeEventListener('abort', releaseAndRestore);
+      releaseAndRestore();
+    });
     const server = createServer({
       contentDir: tmpDir,
       projectDir: tmpDir,
       quiet: true,
     });
-    await server.destroy();
+    finishControlledInit = async () => {
+      releaseAndRestore();
+      await server.destroy();
+    };
+    let readySettled = false;
+    const readiness = server.ready.then(
+      () => {
+        readySettled = true;
+      },
+      (error: unknown) => {
+        readySettled = true;
+        throw error;
+      },
+    );
+    try {
+      const engine = await Promise.race([
+        startCompleted.promise,
+        readiness.then(() => {
+          throw new Error('Initialization finished without reaching the held startup');
+        }),
+      ]);
+      ctx.signal.throwIfAborted();
+      expect(engine === server.syncEngine).toBe(true);
+      expect(startReturned).toBe(false);
+      expect(readySettled).toBe(false);
+      const destroying = server.destroy();
+      releaseStart.resolve();
+      await Promise.all([readiness, destroying]);
 
-    const shutdownLogs = logCapture.getCalls('info', 'shutdown flushed');
-    expect(shutdownLogs).toHaveLength(1);
+      const shutdownLogs = logCapture.getCalls('info', 'shutdown flushed');
+      expect(shutdownLogs).toHaveLength(1);
+    } finally {
+      releaseAndRestore();
+    }
   });
 
   test('destroy() with zero documents loaded (short-circuit path)', async () => {
@@ -1483,35 +1607,43 @@ describe('createServer().destroy() — graceful shutdown flush', () => {
     expect(shutdownLogs[0].payload.documentCount).toBe(5);
   });
 
-  test('destroy does not await the derived-index cache drain', async () => {
+  test('destroy bounds a derived-index close that never settles and records the phase error', async () => {
     const beginStartup = vi.spyOn(DerivedDocumentIndex.prototype, 'beginStartup');
     const server = createServer({
       contentDir: tmpDir,
       projectDir: tmpDir,
       quiet: true,
-      destroyTimeoutMs: 500,
+      destroyTimeoutMs: 200,
     });
     await server.ready;
     const coordinator = beginStartup.mock.instances[0] as DerivedDocumentIndex;
     beginStartup.mockRestore();
-    const close = vi
-      .spyOn(DerivedDocumentIndex.prototype, 'close')
-      .mockImplementation(() => new Promise<void>(() => {}));
-    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const { promise: tagCloseReleased, resolve: releaseTagClose } = Promise.withResolvers<void>();
+    let tagCloseEntered = false;
+    const tagCloseImplementation = TagIndex.prototype.close;
+    const tagClose = vi.spyOn(TagIndex.prototype, 'close').mockImplementation(async function (
+      this: TagIndex,
+    ) {
+      tagCloseEntered = true;
+      await tagCloseImplementation.call(this);
+      await tagCloseReleased;
+    });
 
     try {
-      const result = await Promise.race([
-        server.destroy().then(() => 'destroyed' as const),
-        new Promise<'timed-out'>((resolveTimeout) => {
-          timeout = setTimeout(() => resolveTimeout('timed-out'), 2_000);
-        }),
-      ]);
+      await server.destroy();
 
-      expect(result).toBe('destroyed');
-      expect(close).toHaveBeenCalledTimes(1);
+      expect(tagCloseEntered).toBe(true);
+      const closePhaseErrors = logCapture
+        .getCalls('warn', 'shutdown flushed')
+        .flatMap(
+          (entry) => (entry.payload.phaseErrors as Array<{ phase: string; error: string }>) ?? [],
+        )
+        .filter((e) => e.phase === 'derived-index-close');
+      expect(closePhaseErrors).toHaveLength(1);
+      expect(logCapture.getCalls('info', 'shutdown flushed')).toHaveLength(0);
     } finally {
-      if (timeout) clearTimeout(timeout);
-      close.mockRestore();
+      releaseTagClose();
+      tagClose.mockRestore();
       await coordinator.close();
     }
   });
@@ -2472,6 +2604,7 @@ describe('createServer() server-lock integration (V0-1)', () => {
     expect(md.pid).toBe(process.pid);
     expect(md.worktreeRoot).toBe(tmpDir);
     expect(md.draining).toBeUndefined();
+    expect(md.processStart).toEqual(processStartTokenFromOs(process.pid));
 
     await server.destroy();
 
@@ -2479,6 +2612,7 @@ describe('createServer() server-lock integration (V0-1)', () => {
     const drained = JSON.parse(readFileSync(lockPath, 'utf-8'));
     expect(drained.pid).toBe(process.pid);
     expect(drained.draining).toBe(true);
+    expect(drained.processStart).toEqual(md.processStart);
   });
 
   test('exposes lockDir on ServerInstance', async () => {
@@ -4343,17 +4477,22 @@ describe('createServer() — generated index wiring', () => {
     server = null;
   });
 
-  afterEach(async () => {
+  async function cleanupFixture(): Promise<void> {
     if (localHttp) {
       await new Promise<void>((resolve, reject) =>
         localHttp?.close((err) => (err ? reject(err) : resolve())),
       );
       localHttp = null;
     }
-    await server?.destroy();
-    loggerFactory.reset();
-    await rm(projectDir, { recursive: true, force: true });
-  });
+    try {
+      await server?.destroy();
+    } finally {
+      loggerFactory.reset();
+      await rm(projectDir, { recursive: true, force: true });
+    }
+  }
+
+  afterEach(cleanupFixture);
 
   test('the setting reaches the server through the real config file', async () => {
     await bootServer();
@@ -4381,14 +4520,8 @@ describe('createServer() — generated index wiring', () => {
   test('server readiness settles before the boot index sweep starts planning', async () => {
     writeDoc('existing.md', 'Existing at boot', 'note');
 
-    let enterPlanning!: () => void;
-    const planningEntered = new Promise<void>((resolve) => {
-      enterPlanning = resolve;
-    });
-    let releasePlanning!: () => void;
-    const planningBarrier = new Promise<void>((resolve) => {
-      releasePlanning = resolve;
-    });
+    const { promise: planningEntered, resolve: enterPlanning } = Promise.withResolvers<void>();
+    const { promise: planningBarrier, resolve: releasePlanning } = Promise.withResolvers<void>();
     let readySettled = false;
 
     const activeServer = await startServerWithIndexHooks({
@@ -4445,14 +4578,9 @@ describe('createServer() — generated index wiring', () => {
     const rootMtime = statSync(indexPath()).mtimeMs;
     const betaMtime = statSync(indexPathAt('beta')).mtimeMs;
 
-    let firstWriteFinished!: () => void;
-    const firstWrite = new Promise<void>((resolve) => {
-      firstWriteFinished = resolve;
-    });
-    let releaseFirstWrite!: () => void;
-    const firstWriteBarrier = new Promise<void>((resolve) => {
-      releaseFirstWrite = resolve;
-    });
+    const { promise: firstWrite, resolve: firstWriteFinished } = Promise.withResolvers<void>();
+    const { promise: firstWriteBarrier, resolve: releaseFirstWrite } =
+      Promise.withResolvers<void>();
     let paused = false;
 
     const activeServer = await startServerWithIndexHooks({
@@ -4497,22 +4625,11 @@ describe('createServer() — generated index wiring', () => {
   test('boot sweep readiness waits for live requests coalesced behind it', async () => {
     writeDoc('anchor.md', 'Anchor', 'note');
 
-    let firstPassEntered!: () => void;
-    const firstPassStarted = new Promise<void>((resolve) => {
-      firstPassEntered = resolve;
-    });
-    let releaseFirstPass!: () => void;
-    const firstPassBarrier = new Promise<void>((resolve) => {
-      releaseFirstPass = resolve;
-    });
-    let coordinatorIdle!: () => void;
-    const coordinatorSettled = new Promise<void>((resolve) => {
-      coordinatorIdle = resolve;
-    });
-    let blockedKickObserved!: () => void;
-    const followupDeferredBySingleFlight = new Promise<void>((resolve) => {
-      blockedKickObserved = resolve;
-    });
+    const { promise: firstPassStarted, resolve: firstPassEntered } = Promise.withResolvers<void>();
+    const { promise: firstPassBarrier, resolve: releaseFirstPass } = Promise.withResolvers<void>();
+    const { promise: coordinatorSettled, resolve: coordinatorIdle } = Promise.withResolvers<void>();
+    const { promise: followupDeferredBySingleFlight, resolve: blockedKickObserved } =
+      Promise.withResolvers<void>();
     let passCount = 0;
 
     const activeServer = await startServerWithIndexHooks({
@@ -4558,18 +4675,9 @@ describe('createServer() — generated index wiring', () => {
   test('destroy cancels and drains an in-flight generated-index write', async () => {
     writeDoc('deep/note.md', 'Deep note', 'note');
 
-    let writePaused!: () => void;
-    const firstWritePaused = new Promise<void>((resolve) => {
-      writePaused = resolve;
-    });
-    let releaseWrite!: () => void;
-    const writeBarrier = new Promise<void>((resolve) => {
-      releaseWrite = resolve;
-    });
-    let abortObserved!: () => void;
-    const regenerationAborted = new Promise<void>((resolve) => {
-      abortObserved = resolve;
-    });
+    const { promise: firstWritePaused, resolve: writePaused } = Promise.withResolvers<void>();
+    const { promise: writeBarrier, resolve: releaseWrite } = Promise.withResolvers<void>();
+    const { promise: regenerationAborted, resolve: abortObserved } = Promise.withResolvers<void>();
     let blocked = false;
 
     const activeServer = await startServerWithIndexHooks({
@@ -5595,7 +5703,10 @@ async function setupReconcileRig(prefix: string): Promise<ReconcileRig> {
   };
 }
 
-function createReconcileServer(rig: ReconcileRig): ServerInstance {
+function createReconcileServer(
+  rig: ReconcileRig,
+  watcher: Pick<ServerOptions, 'watcherBackend' | 'freshnessIntervalMs'> = {},
+): ServerInstance {
   return createServer({
     contentDir: rig.tmpDir,
     projectDir: rig.tmpDir,
@@ -5604,6 +5715,7 @@ function createReconcileServer(rig: ReconcileRig): ServerInstance {
     maxDebounce: 500,
     gitEnabled: false,
     shadowRepo: rig.shadow,
+    ...watcher,
   });
 }
 
@@ -6325,7 +6437,88 @@ describe('createServer() — disk-event reconcile with an absent reconciled base
     }
   }, 60_000);
 
-  test('a branch-switch reset rescues unflushed WIP on an absent-base doc before overwriting with disk content', async () => {
+  test('unsaved WIP survives a branch round trip and is saved by the next store instead of being merged away', async () => {
+    const projectDir = await realpath(mkdtempSync(join(tmpdir(), 'ok-reconcile-park-store-')));
+    const git = simpleGit(projectDir);
+    await git.init(['--initial-branch=main']);
+    configureTestGitRepository(projectDir);
+    await git.raw('config', 'user.name', 'Test');
+    await git.raw('config', 'user.email', 'test@example.com');
+    const docName = 'park-store-target';
+    const docPath = join(projectDir, `${docName}.md`);
+    const mainContent = '# Park store target\n\nMain branch body.\n\nTail.\n';
+    const featureContent = '# Park store target\n\nFeature branch body.\n\nTail.\n';
+    writeFileSync(docPath, mainContent, 'utf-8');
+    await git.add('.');
+    await git.commit('main content');
+    await git.checkoutLocalBranch('feature');
+    writeFileSync(docPath, featureContent, 'utf-8');
+    await git.add(['-A']);
+    await git.commit('feature content');
+    await git.checkout('main');
+
+    const shadow = await initShadowRepo(projectDir);
+    rig = {
+      tmpDir: projectDir,
+      shadow,
+      cleanup: () => rmSync(projectDir, { recursive: true, force: true }),
+    };
+    const server = createServer({
+      contentDir: projectDir,
+      projectDir,
+      quiet: true,
+      debounce: 60_000,
+      maxDebounce: 120_000,
+      gitEnabled: false,
+      shadowRepo: shadow,
+    });
+    try {
+      await server.ready;
+      const conn = await server.hocuspocus.openDirectConnection(docName);
+      const serverDoc = server.hocuspocus.documents.get(docName);
+      expect(serverDoc).toBeDefined();
+      if (!serverDoc) return;
+      await vi.waitFor(
+        () => expect(server.durabilityState.getReconciledBase(docName)).toBe(mainContent),
+        { timeout: 5_000, interval: 25 },
+      );
+      const source = serverDoc.getText('source');
+      serverDoc.transact(() =>
+        source.insert(source.toString().indexOf('Tail.'), 'Unsaved WIP.\n\n'),
+      );
+      const withWip = '# Park store target\n\nMain branch body.\n\nUnsaved WIP.\n\nTail.\n';
+      expect(source.toString()).toBe(withWip);
+
+      await git.checkout('feature');
+      const featureWithWip =
+        '# Park store target\n\nFeature branch body.\n\nUnsaved WIP.\n\nTail.\n';
+      expect(featureWithWip).not.toBe(featureContent);
+      await vi.waitFor(() => expect(source.toString()).toBe(featureWithWip), {
+        timeout: 15_000,
+        interval: 25,
+      });
+      await git.checkout('main');
+      await vi.waitFor(() => expect(source.toString()).toBe(withWip), {
+        timeout: 15_000,
+        interval: 25,
+      });
+
+      serverDoc.transact(() => source.insert(source.length, '\nTyped after the switch.\n'));
+      await server.hocuspocus.flushPendingStores();
+      const saved = `${withWip}\nTyped after the switch.\n`;
+      await vi.waitFor(() => expect(readFileSync(docPath, 'utf-8')).toBe(saved), {
+        timeout: 10_000,
+        interval: 25,
+      });
+      expect(source.toString()).toBe(saved);
+
+      conn.disconnect();
+    } finally {
+      await server.destroy();
+    }
+  }, 60_000);
+
+  test("a branch switch that leaves an absent-base doc's file unchanged keeps its unsaved typing live", async () => {
     const projectDir = await realpath(mkdtempSync(join(tmpdir(), 'ok-reconcile-bs-rescue-')));
     const git = simpleGit(projectDir);
     await git.init(['--initial-branch=main']);
@@ -6388,40 +6581,23 @@ describe('createServer() — disk-event reconcile with an absent reconciled base
       expect(wipText).not.toBe(diskContent);
 
       const warnSpy = vi.spyOn(getLogger('server'), 'warn');
+      const switched = vi.spyOn(server.cc1Broadcaster, 'emitBranchSwitched');
       try {
         await git.checkout('feature');
+        await vi.waitFor(() => expect(switched).toHaveBeenCalledWith('feature'), {
+          timeout: 15_000,
+          interval: 25,
+        });
 
-        await vi.waitFor(
-          () =>
-            expect(serverDoc.getText('source').toString()).not.toContain('Unflushed WIP paragraph'),
-          { timeout: 15_000, interval: 25 },
-        );
-        expect(serverDoc.getText('source').toString()).toBe(diskContent);
-        expect(server.durabilityState.getReconciledBase(docName)).toBe(diskContent);
+        expect(serverDoc.getText('source').toString()).toBe(wipText);
         expect(serverDoc.getMap('lifecycle').get('status')).toBeUndefined();
-
-        await vi.waitFor(
-          async () => {
-            const rescues = await listRescueCheckpoints(rig.shadow, 'feature');
-            const rescue = rescues.find((r) => r.docName === docName);
-            expect(rescue).toBeDefined();
-            expect(rescue?.incomingDiskSha).toBe('');
-            expect(rescue?.size).toBe(wipText.length);
-          },
-          { timeout: 10_000, interval: 50 },
-        );
-
-        const branchSwitchRescue = (await listRescueCheckpoints(rig.shadow, 'feature')).find(
-          (r) => r.docName === docName,
-        );
-        const branchSwitchBody = (
-          await shadowGit(rig.shadow).raw('log', '-1', '--format=%B', branchSwitchRescue?.sha ?? '')
-        ).trim();
-        expect(parseCheckpoint(branchSwitchBody)?.kind).toBe('external-change-rescue');
+        const rescues = await listRescueCheckpoints(rig.shadow, 'feature');
+        expect(rescues.filter((r) => r.docName === docName)).toEqual([]);
 
         const warnTexts = warnSpy.mock.calls.map((call) => String(call[1] ?? ''));
         expect(warnTexts.some((s) => s.includes('skipped parking'))).toBe(true);
       } finally {
+        switched.mockRestore();
         warnSpy.mockRestore();
       }
 
@@ -6547,7 +6723,7 @@ describe('createServer() — disk-event reconcile with an absent reconciled base
     }
   }, 30_000);
 
-  test('a failed disk-authoritative ingest keeps the live content, adopts the disk bytes as the base, and does not re-ingest on the next update', async () => {
+  test('a failed disk-authoritative ingest keeps the live content, leaves no agreed version for the disk bytes it lacks, and takes the next update in again', async () => {
     rig = await setupReconcileRig('ok-reconcile-ingest-failure-');
     const docName = 'ingest-failure-target';
     const initial = '# Ingest failure target\n\nLive paragraph that exists only in the editor.\n';
@@ -6590,9 +6766,12 @@ describe('createServer() — disk-event reconcile with an absent reconciled base
         writeFileSync(docPath, theirs, 'utf-8');
 
         await vi.waitFor(
-          () => expect(server.durabilityState.getReconciledBase(docName)).toBe(theirs),
+          () =>
+            expect(getMetrics().diskAuthoritativeIngestApplyFailures).toBe(applyFailuresBefore + 1),
           { timeout: 10_000, interval: 25 },
         );
+        expect(server.durabilityState.getReconciledBase(docName)).toBeUndefined();
+        expect(server.durabilityState.getReceipt(docName)).toBeUndefined();
         expect(serverDoc.getText('source').toString()).toBe(initial);
         expect(serverDoc.getMap('lifecycle').get('status')).toBeUndefined();
         expect(getMetrics().diskAuthoritativeIngestApplyFailures).toBe(applyFailuresBefore + 1);
@@ -6603,26 +6782,25 @@ describe('createServer() — disk-event reconcile with an absent reconciled base
 
       writeFileSync(docPath, followUp, 'utf-8');
 
-      await vi.waitFor(
-        () =>
-          expect(serverDoc.getText('source').toString()).toContain('Disk addition after recovery.'),
-        { timeout: 15_000, interval: 25 },
-      );
-      expect(serverDoc.getText('source').toString()).toContain(
-        'Live paragraph that exists only in the editor.',
-      );
+      await vi.waitFor(() => expect(serverDoc.getText('source').toString()).toBe(followUp), {
+        timeout: 15_000,
+        interval: 25,
+      });
+      expect(server.durabilityState.getReconciledBase(docName)).toBe(followUp);
+      expect(getMetrics().diskAuthoritativeIngestCount).toBe(ingestsBefore + 2);
       await vi.waitFor(
         async () => {
           const rescues = await listRescueCheckpoints(rig.shadow, 'main');
-          expect(rescues.filter((r) => r.docName === docName)).toHaveLength(2);
+          expect(rescues.filter((r) => r.docName === docName).map((r) => r.size)).toEqual(
+            expect.arrayContaining([initial.length, theirs.length]),
+          );
         },
         { timeout: 10_000, interval: 50 },
       );
       const rescues = await listRescueCheckpoints(rig.shadow, 'main');
       const docRescues = rescues.filter((r) => r.docName === docName);
-      expect(docRescues).toHaveLength(2);
-      expect(docRescues.map((r) => r.size).sort((a, b) => a - b)).toEqual(
-        [initial.length, theirs.length].sort((a, b) => a - b),
+      expect(new Set(docRescues.map((r) => r.size))).toEqual(
+        new Set([initial.length, theirs.length]),
       );
       const sg = shadowGit(rig.shadow);
       const mintKinds = new Set(
@@ -6779,8 +6957,7 @@ describe('createServer() — disk-event reconcile with an absent reconciled base
     }
   }, 45_000);
 
-  test('an ingest that loses its rescue and then fails to apply is not counted as an unrescued clean ingest', async (ctx) => {
-    ctx.skip(runningAsRoot, 'root bypasses the chmod refusal this test induces');
+  async function expectFailedIngestsNotCountedUnrescued(deliveries: number): Promise<void> {
     rig = await setupReconcileRig('ok-reconcile-compound-ingest-failure-');
     const docName = 'compound-ingest-failure-target';
     const initial =
@@ -6790,7 +6967,11 @@ describe('createServer() — disk-event reconcile with an absent reconciled base
     const docPath = join(rig.tmpDir, `${docName}.md`);
     writeFileSync(docPath, initial, 'utf-8');
 
-    const server = createReconcileServer(rig);
+    const watcher = createWatcherDouble();
+    const server = createReconcileServer(rig, {
+      watcherBackend: watcher.backend,
+      freshnessIntervalMs: null,
+    });
     const chmodEntries: Array<{ path: string; mode: number }> = [];
     const warnSpy = vi.spyOn(getLogger('server'), 'warn');
     const infoSpy = vi.spyOn(getLogger('server'), 'info');
@@ -6837,10 +7018,15 @@ describe('createServer() — disk-event reconcile with an absent reconciled base
 
       try {
         writeFileSync(docPath, theirs, 'utf-8');
+        for (let delivery = 0; delivery < deliveries; delivery++) {
+          watcher.subscriptionFor(rig.tmpDir).deliver([{ type: 'update', path: docPath }]);
+        }
 
         await vi.waitFor(
           () =>
-            expect(getMetrics().diskAuthoritativeIngestApplyFailures).toBe(applyFailuresBefore + 1),
+            expect(getMetrics().diskAuthoritativeIngestApplyFailures).toBe(
+              applyFailuresBefore + deliveries,
+            ),
           { timeout: 10_000, interval: 25 },
         );
       } finally {
@@ -6871,7 +7057,18 @@ describe('createServer() — disk-event reconcile with an absent reconciled base
       errorSpy.mockRestore();
       await server.destroy();
     }
+  }
+
+  test('an ingest that loses its rescue and then fails to apply is not counted as an unrescued clean ingest', async (ctx) => {
+    ctx.skip(runningAsRoot, 'root bypasses the chmod refusal this test induces');
+    await expectFailedIngestsNotCountedUnrescued(1);
   }, 45_000);
+
+  test('a disk update delivered twice whose ingest loses its rescue and fails to apply both times is not counted as an unrescued clean ingest', async (ctx) => {
+    ctx.skip(runningAsRoot, 'root bypasses the chmod refusal this test induces');
+    await expectFailedIngestsNotCountedUnrescued(2);
+  }, 45_000);
+
   test('an ingest that loses its rescue and then fails to apply after the live Y.Text is overwritten is reported as an unrescued loss', async (ctx) => {
     ctx.skip(runningAsRoot, 'root bypasses the chmod refusal this test induces');
     rig = await setupReconcileRig('ok-reconcile-post-write-ingest-failure-');
@@ -7061,7 +7258,7 @@ describe('createServer() — disk-event reconcile insert-group dedup reporting',
     rig?.cleanup();
   });
 
-  test('a conflicting reconcile that also skipped insert dedup past the LCS cap still counts the skip', async () => {
+  test('a both-kept reconcile that also skipped insert dedup past the LCS cap still counts the skip', async () => {
     rig = await setupReconcileRig('ok-reconcile-conflict-dedup-');
     const docName = 'conflict-dedup-target';
     const perSide = Math.ceil(Math.sqrt(MAX_LCS_CELLS)) + 10;
@@ -7096,18 +7293,22 @@ describe('createServer() — disk-event reconcile insert-group dedup reporting',
 
       server.durabilityState.setReconciledBase(docName, base);
       const conflictsBefore = getMetrics().conflictCount;
+      const bothKeptBefore = getMetrics().reconcileBothKept;
       const dedupSkippedBefore = getMetrics().reconcileInsertDedupSkipped;
 
       writeFileSync(docPath, theirs, 'utf-8');
 
-      await vi.waitFor(() => expect(getMetrics().conflictCount).toBe(conflictsBefore + 1), {
+      await vi.waitFor(() => expect(getMetrics().reconcileBothKept).toBe(bothKeptBefore + 1), {
         timeout: 20_000,
         interval: 50,
       });
       const merged = serverDoc.getText('source').toString();
+      expect(merged.startsWith('Anchor edited by us.\n\nAnchor edited by them.\n\n')).toBe(true);
       expect(merged).toContain('Ours 0.');
       expect(merged).toContain(`Theirs ${perSide - 1}.`);
       expect(getMetrics().reconcileInsertDedupSkipped).toBe(dedupSkippedBefore + 1);
+      expect(getMetrics().conflictCount).toBe(conflictsBefore);
+      expect(server.conflicts.findByDocName(docName)).toBeUndefined();
 
       conn.disconnect();
     } finally {

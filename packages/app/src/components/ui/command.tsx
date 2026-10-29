@@ -1,6 +1,6 @@
 import { Command as CommandPrimitive } from 'cmdk';
 import { SearchIcon } from 'lucide-react';
-import type { ComponentProps } from 'react';
+import { type ComponentProps, type RefObject, useLayoutEffect, useRef } from 'react';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 
@@ -24,6 +24,7 @@ interface CommandDialogProps extends ComponentProps<typeof Dialog> {
   showCloseButton?: boolean;
   commandProps?: ComponentProps<typeof CommandPrimitive>;
   onEscapeKeyDown?: ComponentProps<typeof DialogContent>['onEscapeKeyDown'];
+  contentAttributes?: Record<`data-${string}`, string>;
 }
 
 function CommandDialog({
@@ -34,6 +35,7 @@ function CommandDialog({
   showCloseButton = true,
   commandProps,
   onEscapeKeyDown,
+  contentAttributes,
   ...props
 }: CommandDialogProps) {
   const { className: commandClassName, ...restCommandProps } = commandProps ?? {};
@@ -43,8 +45,8 @@ function CommandDialog({
         className={cn('top-[12vh] translate-y-0 overflow-hidden p-0', className)}
         showCloseButton={showCloseButton}
         onEscapeKeyDown={onEscapeKeyDown}
+        {...contentAttributes}
       >
-        {}
         <DialogTitle className="sr-only">{title}</DialogTitle>
         <DialogDescription className="sr-only">{description}</DialogDescription>
         <Command
@@ -146,6 +148,17 @@ function CommandShortcut({ className, ...props }: ComponentProps<'span'>) {
   );
 }
 
+function useSelectFirstItemOn(listRef: RefObject<HTMLElement | null>, key: unknown) {
+  const handledKeyRef = useRef<{ key: unknown } | null>(null);
+  useLayoutEffect(() => {
+    const previous = handledKeyRef.current;
+    if (previous && Object.is(previous.key, key)) return;
+    handledKeyRef.current = { key };
+    if (previous === null) return;
+    listRef.current?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+  });
+}
+
 export {
   Command,
   CommandDialog,
@@ -156,4 +169,5 @@ export {
   CommandList,
   CommandSeparator,
   CommandShortcut,
+  useSelectFirstItemOn,
 };

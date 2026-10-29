@@ -11,8 +11,7 @@ import { defineConfig } from 'tsdown';
 const jsoncParserEsmEntry = createRequire(import.meta.url).resolve('jsonc-parser/lib/esm/main.js');
 
 // Native addons stay external in EVERY build — they ship .node binaries
-// resolved at runtime and the desktop bundle places them under
-// app.asar.unpacked/node_modules/.
+// resolved at runtime.
 const nativeAddonNeverBundle = [
   '@parcel/watcher',
   '@napi-rs/keyring',
@@ -138,7 +137,7 @@ export default defineConfig([
     // `parse-worker` ships as its own entry so the server's parse pool can
     // spawn `./parse-worker.mjs` next to dist/cli.mjs at runtime (the
     // published install has no node_modules to resolve through).
-    entry: { cli: 'src/cli.ts', 'parse-worker': 'src/parse-worker.ts' },
+    entry: { cli: 'src/bin.ts', 'parse-worker': 'src/parse-worker.ts' },
     unbundle: false,
     format: 'esm',
     dts: false,

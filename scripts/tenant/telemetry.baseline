@@ -23,6 +23,7 @@ built	packages/cli/src/commands/start.ts	2
 built	packages/cli/src/commands/sync.ts	1
 built	packages/cli/src/github/folder-validator.ts	1
 built	packages/cli/src/mcp/shim.ts	1
+built	packages/core/src/markdown/to-markdown-handlers.ts	1
 built	packages/core/src/sharing/receive-flow.ts	1
 built	packages/core/src/sharing/share-url.ts	1
 built	packages/core/src/skills-catalog/acquire/skills-sh.ts	2
@@ -95,6 +96,7 @@ default	validation.fileTreeIndicators	true
 default	validation.links	DEFAULT_LINKS_VALIDATION
 default	validation.suppressLogLinkAdvisories	DEFAULT_SUPPRESS_LOG_LINK_ADVISORIES
 env	APPDATA
+env	BASE_URL
 env	CI
 env	CODEX_HOME
 env	COPILOT_HOME
@@ -157,11 +159,18 @@ env	OK_SHADOW_MAINTENANCE_CONSOLIDATION_SPACING_MS
 env	OK_SHADOW_MAINTENANCE_DEAD_CHAIN_THRESHOLD
 env	OK_SHADOW_MAINTENANCE_DISABLED
 env	OK_SHADOW_MAINTENANCE_GC_TIMEOUT_MS
+env	OK_SHADOW_MAX_LIFETIME_MS
+env	OK_SHADOW_OWNER_RUN_ID
+env	OK_SHADOW_OWNER_TRANSPORT
+env	OK_SHADOW_READINESS_GATE
+env	OK_SHADOW_SCRATCH_ROOT
 env	OK_SHADOW_STAGE_TIMEOUT_MS
+env	OK_SHADOW_SUBJECT_RESULT
 env	OK_SHOWALL_MAX_ENTRIES
 env	OK_SINGLE_FILE_NO_OPEN
 env	OK_STARTUP_TRACEPARENT
 env	OK_TELEMETRY_VERBOSE
+env	OK_TEST_COMPARE_READ_FAULT
 env	OK_TEST_CONTENT_DIR
 env	OK_TEST_GIT_ENABLED
 env	OK_TEST_PROJECT_DIR
@@ -169,6 +178,7 @@ env	OK_TEST_RENAME_FAULT
 env	OK_TEST_SINGLE_DOC_REL_PATH
 env	OK_TEST_STORE_DIVERGENCE
 env	OK_TEST_STORE_FAULT
+env	OK_TEST_STORE_RESTAT_RACE
 env	OPEN_KNOWLEDGE_GITHUB_CLIENT_ID
 env	OTEL_EXPORTER_OTLP_ENDPOINT
 env	OTEL_SDK_DISABLED
@@ -193,11 +203,11 @@ env	XDG_CONFIG_HOME
 host	add-skill.vercel.sh	1
 host	antigravity.google	2
 host	api.github.com	9
-host	api.openai.com	45
+host	api.openai.com	31
 host	bun.sh	1
 host	cdn.agentclientprotocol.com	1
 host	claude.com	2
-host	contoh.com	2
+host	contoh.com	1
 host	cursor.com	2
 host	developers.openai.com	2
 host	discord.gg	1
@@ -205,22 +215,22 @@ host	docs.astral.sh	3
 host	docs.claude.com	1
 host	docs.github.com	2
 host	docs.openclaw.ai	1
-host	ejemplo.com	2
-host	example.com	36
-host	exemplo.com	2
+host	ejemplo.com	1
+host	example.com	25
+host	exemplo.com	1
 host	git-scm.com	3
 host	gitforwindows.org	2
-host	github.com	227
+host	github.com	250
 host	gnu.org	1
 host	hermes-agent.nousresearch.com	2
 host	json-schema.org	11
 host	kb.example.com	1
 host	linear.app	1
 host	nodejs.org	4
-host	notes.example.com	83
+host	notes.example.com	55
 host	openclaw.ai	1
 host	opencode.ai	2
-host	openknowledge.ai	17
+host	openknowledge.ai	18
 host	pi.dev	2
 host	placeholder.invalid	2
 host	placeholder.local	1
@@ -232,7 +242,7 @@ host	unpkg.com	2
 host	www.loom.com	3
 host	www.monokai.nl	1
 host	www.skills.sh	10
-host	www.w3.org	33
+host	www.w3.org	35
 host	x.com	1
 module	@opentelemetry/api
 module	@opentelemetry/context-async-hooks

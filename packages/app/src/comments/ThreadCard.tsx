@@ -1,9 +1,9 @@
-// oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — physical margin/padding/inset utilities predate the rule; drain by swapping ml/mr → ms/me, pl/pr → ps/pe, left/right → start/end, then deleting this line. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-physical-direction-utility
-
 import { Trans, useLingui } from '@lingui/react/macro';
 import { CheckCheck, MapPin, Pencil, RotateCcw, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { toast } from 'sonner';
 import type { PanelScope } from '@/components/PanelScopeHeader';
+import { getPropertiesCollapsed } from '@/components/properties-collapsed-store';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -13,6 +13,7 @@ import {
   ComposerMentionInput,
   type ComposerMentionInputHandle,
 } from '@/editor/ComposerMentionInput';
+import { getEditorView } from '@/editor/utils/get-editor-view';
 import { cn } from '@/lib/utils';
 import { captureSelectionContext, findQuoteRange } from './anchor-search';
 import { propertyAddress, revealThread } from './comment-chips';
@@ -60,6 +61,7 @@ export function ThreadCard({
   active,
   sending,
   layout,
+  onDestinationComplete,
 }: {
   thread: CommentThread;
   cardRef: (el: HTMLElement | null) => void;
@@ -67,6 +69,7 @@ export function ThreadCard({
   active: boolean;
   sending: boolean;
   layout: PanelScope;
+  onDestinationComplete?: (target: HTMLElement) => void;
 }) {
   const { t } = useLingui();
   const [renderedAt] = useState(() => Date.now());
@@ -122,29 +125,47 @@ export function ThreadCard({
     };
   }, [editing]);
 
+  function reportPassageMissing() {
+    toast.error(t`Couldn't find that passage — the text it was on may have changed.`);
+  }
+
   function jumpToQuote(quote: string) {
     if (thread.anchor === null) return;
     if (getVisibleEditorForDoc(thread.docName) === null) {
-      revealThread(thread);
+      revealThread(thread, onDestinationComplete);
       return;
     }
     if (thread.target.kind === 'property') {
-      revealPropertyValueRange({
+      const target = revealPropertyValueRange({
         key: thread.target.key,
         path: thread.target.path,
         quote,
         start: thread.anchor.start,
         end: thread.anchor.end,
       });
+      if (!target) {
+        if (getPropertiesCollapsed()) revealThread(thread, onDestinationComplete);
+        else reportPassageMissing();
+        return;
+      }
       emitOpenThread(thread.id);
+      onDestinationComplete?.(target);
       return;
     }
     const editor = getVisibleEditorForDoc(thread.docName);
     if (!editor) return;
     const range = findQuoteRange(editor.state.doc, quote, thread.anchor);
-    if (!range) return;
-    scrollAnchorIntoView(editor, range, thread.docName);
+    if (!range) {
+      reportPassageMissing();
+      return;
+    }
+    if (!scrollAnchorIntoView(editor, range, thread.docName)) {
+      revealThread(thread, onDestinationComplete);
+      return;
+    }
     emitOpenThread(thread.id);
+    const target = getEditorView(editor)?.dom;
+    if (target) onDestinationComplete?.(target);
   }
 
   function rePlaceOnSelection() {
@@ -161,7 +182,7 @@ export function ThreadCard({
   const cardSelects = !editing && !isResolved;
 
   return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: pointer-only affordance — clicking the card's whitespace solos its tick; keyboard/AT users compose the same state from the real controls (the card's checkbox + the footer's master tick). See focus-composer-on-card-pointer.ts for the sibling pattern.
+    // oxlint-disable-next-line jsx-a11y/click-events-have-key-events -- pointer-only affordance — clicking the card's whitespace solos its tick; keyboard/AT users compose the same state from the real controls (the card's checkbox + the footer's master tick). See focus-composer-on-card-pointer.ts for the sibling pattern.
     <article
       ref={cardRef}
       onPointerEnter={() => setActiveThread(thread.id)}
@@ -200,10 +221,8 @@ export function ThreadCard({
             : 'ring-2 ring-primary'),
       )}
     >
-      {}
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
-          {}
           {!isResolved && (
             <Checkbox
               checked={sending}
@@ -214,7 +233,6 @@ export function ThreadCard({
           {isResolved && (
             <CheckCheck aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
           )}
-          {}
           <span
             className="shrink-0 text-xs text-muted-foreground"
             title={new Date(thread.updatedAt).toLocaleString()}
@@ -268,7 +286,6 @@ export function ThreadCard({
                 </TooltipContent>
               </Tooltip>
             )}
-            {}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -289,7 +306,6 @@ export function ThreadCard({
         </div>
       </div>
 
-      {}
       {isOrphaned ? (
         <div className="flex flex-col gap-2">
           {thread.anchor !== null && (
@@ -297,13 +313,12 @@ export function ThreadCard({
               className="truncate text-sm text-muted-foreground line-through border-l-2 border-l-muted-foreground/40 px-2 py-0.5"
               title={thread.anchor.quote}
             >
-              {}“{thread.anchor.quote}”
+              “{thread.anchor.quote}”
             </p>
           )}
         </div>
       ) : (
         <Tooltip>
-          {}
           <TooltipTrigger asChild>
             <span className="w-full">
               <Button
@@ -338,7 +353,6 @@ export function ThreadCard({
         </Tooltip>
       )}
 
-      {}
       {editing ? (
         <div className="flex flex-col gap-1.5">
           <ComposerMentionInput
@@ -355,7 +369,6 @@ export function ThreadCard({
             onEscape={cancelEdit}
             className="max-h-40 overflow-y-auto rounded-md border px-2 py-1 text-sm subtle-scrollbar bg-background"
           />
-          {}
           <div className="flex items-center justify-end gap-1.5">
             <Button size="sm" variant="ghost-mono" onClick={cancelEdit}>
               <Trans>Cancel</Trans>
@@ -379,7 +392,6 @@ export function ThreadCard({
         </p>
       )}
 
-      {}
       {isOrphaned && (
         <div className="flex flex-col items-start gap-0.5">
           <p className="text-xs text-muted-foreground">

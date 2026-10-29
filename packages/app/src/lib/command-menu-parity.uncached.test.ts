@@ -1,6 +1,10 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { COMMAND_IDENTITIES, type MenuPlatform } from '@inkeep/open-knowledge-core';
+import {
+  COMMAND_IDENTITIES,
+  DOCK_MOVE_COMMANDS,
+  type MenuPlatform,
+} from '@inkeep/open-knowledge-core';
 import { describe, expect, test } from 'vitest';
 import { PALETTE_COMMANDS } from '@/components/command-palette-commands';
 import { APP_RESERVED_IDS, PALETTE_COMMAND_IDS } from '@/lib/command-menu-parity.test-helper';
@@ -82,6 +86,8 @@ const PALETTE_COMMAND_LABELS = new Set<string>([
   'Move Terminal to bottom',
   'Show Agents',
   'Hide Agents',
+  'Show Editor',
+  'Hide Editor',
   'Show hidden files',
   'Show .ok folders',
   'Show only markdown files',
@@ -109,6 +115,7 @@ function makeFullDeps(): MenuDeps {
     appName: 'OpenKnowledge',
     showDevToolsMenu: true,
     dialog: {} as MenuDeps['dialog'],
+    errorDialogParent: () => null,
     openNavigator: noop,
     openProject: () => Promise.resolve(),
     openEphemeralFile: () => Promise.resolve(),
@@ -162,6 +169,8 @@ function makeFullDeps(): MenuDeps {
     terminalLive: true,
     agentPanelVisible: true,
     onToggleAgentPanel: noop,
+    editorVisible: true,
+    onToggleEditor: noop,
     canExpandAll: true,
     canCollapseAll: true,
     onExpandAll: noop,
@@ -526,6 +535,10 @@ describe('command identity registry (Phase 2b)', () => {
       'open-github',
       'open-docs',
       'open-discord',
+      'swap-editor-sidebars',
+      'move-chat-history-left',
+      'move-chat-history-right',
+      ...DOCK_MOVE_COMMANDS.map((command) => command.id),
     ]);
     const missing = COMMAND_IDENTITIES.flatMap((cmd) =>
       cmd.palette && !OVERRIDES.has(cmd.id) && cmd.menuActionId === undefined ? [cmd.id] : [],

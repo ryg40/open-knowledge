@@ -8,11 +8,11 @@ import { Spinner } from '@/components/ui/spinner';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useLanguageBridge } from '@/hooks/use-language-bridge';
 import { useThemeBridge } from '@/hooks/use-theme-bridge';
+import { useBugReport } from '@/lib/bug-report-capture';
 import { ConfigContext } from '@/lib/config-context';
 import type {
   OkDesktopBridge,
   OkLocalOpAuthStatusResponse,
-  OkMenuActionOrigin,
   OkPackId,
   OkProjectEntryPoint,
   OkSeedPackInfo,
@@ -102,7 +102,7 @@ export function NavigatorApp({ bridge }: { bridge: OkDesktopBridge }) {
   const [openingLabel, setOpeningLabel] = useState<string | null>(null);
   const [cloneDialogOpen, setCloneDialogOpen] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
-  const [reportBugOrigin, setReportBugOrigin] = useState<OkMenuActionOrigin | null>(null);
+  const bugReport = useBugReport();
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [createPackId, setCreatePackId] = useState<OkPackId | undefined>(undefined);
   const [createPacks, setCreatePacks] = useState<OkSeedPackInfo[] | undefined>(undefined);
@@ -179,11 +179,11 @@ export function NavigatorApp({ bridge }: { bridge: OkDesktopBridge }) {
   useEffect(() => {
     return subscribeLocalMenuAction((action, origin) => {
       if (action === 'new-project') setCreateDialogOpen(true);
-      if (action === 'report-bug') setReportBugOrigin((current) => current ?? origin);
+      if (action === 'report-bug') bugReport.start(origin);
       if (action === 'send-feedback') setFeedbackOpen(true);
       if (action === 'close-active-tab-or-window') window.close();
     });
-  }, []);
+  }, [bugReport.start]);
 
   useEffect(() => {
     return bridge.onRecentRemovedMissing(({ path }) => {
@@ -252,7 +252,6 @@ export function NavigatorApp({ bridge }: { bridge: OkDesktopBridge }) {
 
   return (
     <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-primary-foreground dark:bg-background text-foreground">
-      {}
       <div
         className={`pointer-events-none absolute inset-x-0 top-0 z-10 h-9 ${
           isElectronHost ? '[-webkit-app-region:drag]' : ''
@@ -260,7 +259,6 @@ export function NavigatorApp({ bridge }: { bridge: OkDesktopBridge }) {
         data-electron-drag={isElectronHost ? '' : undefined}
         data-testid="nav-chrome-row"
       >
-        {}
         {shouldShowAppMenubar() && (
           <div className="pointer-events-auto flex h-full items-center px-2">
             <Suspense fallback={null}>
@@ -293,7 +291,6 @@ export function NavigatorApp({ bridge }: { bridge: OkDesktopBridge }) {
             </div>
           </header>
 
-          {}
           <div className="shrink-0 space-y-6">
             <section className="grid sm:grid-cols-2 gap-3">
               <NavigatorCard
@@ -326,7 +323,6 @@ export function NavigatorApp({ bridge }: { bridge: OkDesktopBridge }) {
               />
             </section>
 
-            {}
             {!loading && !recentsLoadFailed && recents.length === 0 ? (
               <StarterPackRow onPackSelect={onPackSelect} />
             ) : null}
@@ -334,17 +330,17 @@ export function NavigatorApp({ bridge }: { bridge: OkDesktopBridge }) {
 
           {error !== null ? (
             <div
-              className="flex shrink-0 items-start justify-between gap-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2"
+              className="flex shrink-0 items-start justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2"
               data-testid="nav-error-banner"
               role="alert"
             >
-              <span className="text-red-700 text-xs dark:text-red-300">{error}</span>
+              <span className="text-destructive text-xs">{error}</span>
               <Button
                 type="button"
                 variant="link"
                 size="sm"
                 onClick={() => setError(null)}
-                className="h-auto p-0 text-red-700 text-xs dark:text-red-300"
+                className="h-auto p-0 text-destructive text-xs"
                 data-testid="nav-error-dismiss"
               >
                 <Trans>Dismiss</Trans>
@@ -384,10 +380,8 @@ export function NavigatorApp({ bridge }: { bridge: OkDesktopBridge }) {
         <NavigatorSettings />
       </ConfigContext>
 
-      {}
       <McpConsentDialog />
 
-      {}
       <ConsentDialog />
 
       <CreateProjectDialog
@@ -398,14 +392,7 @@ export function NavigatorApp({ bridge }: { bridge: OkDesktopBridge }) {
         packs={createPacks}
       />
 
-      <ReportBugDialog
-        open={reportBugOrigin !== null}
-        onOpenChange={(next) => {
-          if (!next) setReportBugOrigin(null);
-        }}
-        launcherBorne={reportBugOrigin?.launcherBorne === true}
-        systemWide
-      />
+      <ReportBugDialog capture={bugReport.capture} onClose={bugReport.close} systemWide />
 
       <FeedbackFormDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} source="help_menu" />
 
@@ -460,7 +447,6 @@ export function NavigatorApp({ bridge }: { bridge: OkDesktopBridge }) {
         }}
       />
 
-      {}
       <Suspense fallback={null}>
         <ShareReceiveDialog
           bridge={bridge}
@@ -619,7 +605,6 @@ function RecentRow({
           className="h-auto min-w-0 flex-1 justify-between gap-3 py-3.5 pl-4 pr-2 text-left hover:bg-transparent"
         >
           <div className="flex min-w-0 items-center gap-3">
-            {}
             <Folder aria-hidden="true" className="size-[18px] shrink-0 text-muted-foreground" />
             <div className="flex min-w-0 flex-col gap-1 truncate">
               <div className="flex min-w-0 items-center gap-2">
@@ -629,7 +614,7 @@ function RecentRow({
                 {isWorktree ? (
                   <Badge
                     variant="secondary"
-                    className="shrink-0 gap-1 rounded-full border-transparent bg-green-600/10 px-2 py-0 font-medium text-2xs text-green-800 dark:bg-green-400/10 dark:text-green-400"
+                    className="shrink-0 gap-1 rounded-full border-transparent bg-success/10 px-2 py-0 font-medium text-2xs text-success"
                   >
                     <GitBranch aria-hidden="true" className="size-2.5" />
                     <Trans>worktree</Trans>

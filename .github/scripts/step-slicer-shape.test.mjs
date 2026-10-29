@@ -2,18 +2,20 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
+import { STEP_SLICER_SCAN_ROOTS } from './step-slicer-shape.reads.mjs';
 
 const SELF_PATH = fileURLToPath(import.meta.url);
 const HERE = dirname(SELF_PATH);
+const OK_ROOT = join(HERE, '..', '..');
 
-const ROOTS = [HERE, join(HERE, '..', '..', 'scripts')];
+const ROOTS = STEP_SLICER_SCAN_ROOTS.map((root) => join(OK_ROOT, root));
 
 const NESTED_SLICE = /\.slice\(\s*[A-Za-z_$][\w$]*(?:\.[\w$]+)*\.(?:indexOf|lastIndexOf)\(/g;
 
 const BASELINE = {
   'build-smoke-alert-payload.test.mjs': 3,
   'point-release-plan.test.mjs': 1,
-  'release-cascade-shape.test.mjs': 18,
+  'release-cascade-shape.test.mjs': 17,
 };
 
 const countIn = (src) => [...src.matchAll(NESTED_SLICE)].length;

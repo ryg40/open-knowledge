@@ -74,11 +74,10 @@ describe('persistence staleness watchdog (integration)', () => {
     expect(getMetrics().persistenceStalenessForcedStores).toBe(forcedBefore);
   });
 
-  test('stands down instead of clobbering an external native edit', async () => {
+  test('forces a store that keeps both versions when an outside edit lands under unflushed edits', async () => {
     server = await createTestServer({ stalenessGraceMs: 250, stalenessSweepIntervalMs: 100 });
     const docName = `staleness-external-${randomUUID()}`;
     const filePath = join(server.contentDir, `${docName}.md`);
-    const forcedBefore = getMetrics().persistenceStalenessForcedStores;
 
     const first = await writeMd(server.port, docName, '# version one\n');
     expect(first.status).toBe(200);
@@ -88,6 +87,7 @@ describe('persistence staleness watchdog (integration)', () => {
     );
     expect(flushed).toBe(true);
 
+    const forcedBefore = getMetrics().persistenceStalenessForcedStores;
     const stoodDownBefore = getMetrics().persistenceStalenessStoodDown;
     process.env.OK_TEST_STORE_FAULT = docName;
     const second = await writeMd(server.port, docName, '# version two\n');
@@ -95,24 +95,11 @@ describe('persistence staleness watchdog (integration)', () => {
     delete process.env.OK_TEST_STORE_FAULT;
     writeFileSync(filePath, '# external native edit\n', 'utf-8');
 
-    const watchdogStoodDown = await pollUntil(
-      () => getMetrics().persistenceStalenessStoodDown > stoodDownBefore,
-      2_000,
-    );
-    if (!watchdogStoodDown) {
-      const state = await fetch(
-        `http://127.0.0.1:${server.port}/api/document?docName=${encodeURIComponent(docName)}`,
-      );
-      expect(state.ok).toBe(true);
-      const watcherReconciled = (await state.text()).includes('external native edit');
-      const entry = server.instance.conflicts.findByDocName(docName);
-      const watcherSurfacedConflict =
-        entry?.kind === 'reconcile' && entry.reason === 'merged-with-markers';
-      expect(watcherReconciled || watcherSurfacedConflict).toBe(true);
-    }
-
-    await wait(500);
-    expect(readFileSync(filePath, 'utf-8')).toBe('# external native edit\n');
-    expect(getMetrics().persistenceStalenessForcedStores).toBe(forcedBefore);
+    const bothKept = '# version two\n\n# external native edit\n';
+    const landed = await pollUntil(() => readFileSync(filePath, 'utf-8') === bothKept, 10_000);
+    expect(landed).toBe(true);
+    expect(getMetrics().persistenceStalenessForcedStores).toBeGreaterThan(forcedBefore);
+    expect(getMetrics().persistenceStalenessStoodDown).toBe(stoodDownBefore);
+    expect(server.instance.conflicts.findByDocName(docName)).toBeUndefined();
   });
 });

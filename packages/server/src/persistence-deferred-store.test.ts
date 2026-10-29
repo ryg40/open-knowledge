@@ -85,6 +85,7 @@ describe('batch-gated L1 persistence', () => {
 
   beforeEach(() => {
     durabilityState = new DocumentDurabilityState();
+    durabilityState.holdWriteAdmission();
     tmpDir = mkdtempSync(join(tmpdir(), 'ok-deferred-store-'));
     mkdirSync(tmpDir, { recursive: true });
     setBatchInProgress(false);
@@ -101,6 +102,8 @@ describe('batch-gated L1 persistence', () => {
     writeFileSync(docPath, 'initial\n', 'utf-8');
     const acks: Array<{ docName: string; sv: Uint8Array }> = [];
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -116,6 +119,7 @@ describe('batch-gated L1 persistence', () => {
 
     expect(readFileSync(docPath, 'utf-8')).toBe('initial\n');
     expect(acks).toHaveLength(0);
+    const outcome = durabilityState.awaitDeferredStoreOutcome(docName);
 
     setBatchInProgress(false);
     await persistence.flushDeferredStores('within-branch');
@@ -123,6 +127,8 @@ describe('batch-gated L1 persistence', () => {
     expect(readFileSync(docPath, 'utf-8')).toContain('queued edit');
     expect(acks).toHaveLength(1);
     expect(acks[0]?.docName).toBe(docName);
+    await expect(outcome).resolves.toEqual({ kind: 'completed' });
+    await expect(durabilityState.awaitDeferredStoreOutcome(docName)).resolves.toBeUndefined();
 
     document.destroy();
   });
@@ -138,6 +144,8 @@ describe('batch-gated L1 persistence', () => {
       previousMarkdown: string | null;
     }> = [];
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -165,6 +173,8 @@ describe('batch-gated L1 persistence', () => {
     const docPath = join(tmpDir, `${docName}.md`);
     writeFileSync(docPath, 'clean\n', 'utf-8');
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -194,6 +204,8 @@ describe('batch-gated L1 persistence', () => {
     const goodPath = join(tmpDir, `${goodDocName}.md`);
     writeFileSync(goodPath, 'good base\n', 'utf-8');
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -208,10 +220,17 @@ describe('batch-gated L1 persistence', () => {
     setBatchInProgress(true);
     await storeDocument(persistence, badDoc, badDocName);
     await storeDocument(persistence, goodDoc, goodDocName);
+    const badOutcome = durabilityState.awaitDeferredStoreOutcome(badDocName);
+    const goodOutcome = durabilityState.awaitDeferredStoreOutcome(goodDocName);
     setBatchInProgress(false);
 
     await expect(persistence.flushDeferredStores('within-branch')).resolves.toBeUndefined();
     expect(readFileSync(goodPath, 'utf-8')).toContain('good queued edit');
+    await expect(badOutcome).resolves.toEqual({
+      kind: 'failed',
+      failure: expect.objectContaining({ message: expect.any(String) }),
+    });
+    await expect(goodOutcome).resolves.toEqual({ kind: 'completed' });
 
     badDoc.destroy();
     goodDoc.destroy();
@@ -223,6 +242,8 @@ describe('batch-gated L1 persistence', () => {
     writeFileSync(docPath, 'base\n', 'utf-8');
     let resetAttempts = 0;
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -257,6 +278,8 @@ describe('batch-gated L1 persistence', () => {
     writeFileSync(docPath, 'branch A base\n', 'utf-8');
     const acks: Array<{ docName: string; sv: Uint8Array }> = [];
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -271,14 +294,53 @@ describe('batch-gated L1 persistence', () => {
     setBatchInProgress(true);
     await storeDocument(persistence, document, docName);
     expect(readFileSync(docPath, 'utf-8')).toBe('branch A base\n');
+    const outcome = durabilityState.awaitDeferredStoreOutcome(docName);
 
     writeFileSync(docPath, 'target branch content\n', 'utf-8');
     switchReconciledBaseScope('branch-b');
     setBatchInProgress(false);
-    await persistence.flushDeferredStores('discard-stale');
+    const discard = persistence.flushDeferredStores('discard-stale');
+    const afterDiscardCall = durabilityState.awaitDeferredStoreOutcome(docName);
+    await discard;
+    await expect(afterDiscardCall).resolves.toBeUndefined();
 
     expect(readFileSync(docPath, 'utf-8')).toBe('target branch content\n');
     expect(acks).toHaveLength(0);
+    await expect(outcome).resolves.toEqual({
+      kind: 'discarded',
+      cause: { kind: 'branch-switch' },
+    });
+  });
+
+  test('a within-branch flush discards a store deferred on another branch', async () => {
+    const docName = 'branch-mismatch';
+    const docPath = join(tmpDir, `${docName}.md`);
+    writeFileSync(docPath, 'branch A base\n', 'utf-8');
+    const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
+      contentDir: tmpDir,
+      projectDir: tmpDir,
+      gitEnabled: false,
+    });
+    const document = new Y.Doc();
+
+    switchReconciledBaseScope('branch-a');
+    await loadDocument(persistence, document, docName);
+    document.transact(() => replaceDocParagraph(document, 'branch A edit'), BROWSER_ORIGIN);
+    setBatchInProgress(true);
+    await storeDocument(persistence, document, docName);
+    const outcome = durabilityState.awaitDeferredStoreOutcome(docName);
+
+    switchReconciledBaseScope('branch-b');
+    setBatchInProgress(false);
+    await persistence.flushDeferredStores('within-branch');
+
+    expect(readFileSync(docPath, 'utf-8')).toBe('branch A base\n');
+    await expect(outcome).resolves.toEqual({
+      kind: 'discarded',
+      cause: { kind: 'branch-switch' },
+    });
 
     document.destroy();
   });
@@ -295,8 +357,12 @@ describe('batch-gated L1 persistence', () => {
     const secondDoc = new Y.Doc();
     let queuedSecondStore = false;
     let discardFlush: Promise<void> | undefined;
+    let secondOutcome: Promise<unknown> | undefined;
+    let secondPendingAfterDiscardCall: Promise<unknown> | undefined;
 
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -306,8 +372,10 @@ describe('batch-gated L1 persistence', () => {
 
         setBatchInProgress(true);
         void storeDocument(persistence, secondDoc, secondDocName);
+        secondOutcome = durabilityState.awaitDeferredStoreOutcome(secondDocName);
         setBatchInProgress(false);
         discardFlush = persistence.flushDeferredStores('discard-stale');
+        secondPendingAfterDiscardCall = durabilityState.awaitDeferredStoreOutcome(secondDocName);
       },
     });
 
@@ -318,6 +386,7 @@ describe('batch-gated L1 persistence', () => {
 
     setBatchInProgress(true);
     await storeDocument(persistence, firstDoc, firstDocName);
+    const firstOutcome = durabilityState.awaitDeferredStoreOutcome(firstDocName);
     setBatchInProgress(false);
 
     await persistence.flushDeferredStores('within-branch');
@@ -326,6 +395,12 @@ describe('batch-gated L1 persistence', () => {
     expect(queuedSecondStore).toBe(true);
     expect(readFileSync(firstPath, 'utf-8')).toContain('first queued edit');
     expect(readFileSync(secondPath, 'utf-8')).toBe('second base\n');
+    await expect(firstOutcome).resolves.toEqual({ kind: 'completed' });
+    await expect(secondPendingAfterDiscardCall).resolves.toBeUndefined();
+    await expect(secondOutcome).resolves.toEqual({
+      kind: 'discarded',
+      cause: { kind: 'branch-switch' },
+    });
 
     firstDoc.destroy();
     secondDoc.destroy();
@@ -353,6 +428,8 @@ describe('quiescence gate — deferCount cleanup on disk-write error', () => {
     writeFileSync(docPath, 'initial\n', 'utf-8');
 
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -381,6 +458,8 @@ describe('quiescence gate — deferCount cleanup on disk-write error', () => {
     writeFileSync(docPath, 'initial\n', 'utf-8');
 
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -462,6 +541,8 @@ describe('Y.Text-is-truth wiring (FR-33 / FR-35)', () => {
     const docPath = join(tmpDir, `${docName}.md`);
     writeFileSync(docPath, '', 'utf-8');
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -487,6 +568,8 @@ describe('Y.Text-is-truth wiring (FR-33 / FR-35)', () => {
     writeFileSync(docPath, '__cold__\n', 'utf-8');
 
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -536,11 +619,13 @@ describe('FR-9 — deferred-store-failed event + counter', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  test('emits deferred-store-failed with errorClass=disk-write under default redaction', async () => {
+  test('emits deferred-store-failed with errorClass=store-held-pending under default redaction when the file cannot be compared', async () => {
     const docName = 'fr9-disk-write-default';
     const docPath = join(tmpDir, `${docName}.md`);
     writeFileSync(docPath, 'initial\n', 'utf-8');
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -567,7 +652,7 @@ describe('FR-9 — deferred-store-failed event + counter', () => {
     const ev = events[0] as Record<string, unknown>;
     expect(ev.event).toBe('deferred-store-failed');
     expect(ev['doc.name']).toBe(docName);
-    expect(ev.errorClass).toMatch(/^(disk-write|traced-rename)$/);
+    expect(ev.errorClass).toBe('store-held-pending');
     expect(typeof ev.errorMessageHash).toBe('string');
     expect((ev.errorMessageHash as string).length).toBe(8);
     expect(typeof ev.timestamp).toBe('string');
@@ -582,6 +667,8 @@ describe('FR-9 — deferred-store-failed event + counter', () => {
     const docPath = join(tmpDir, `${docName}.md`);
     writeFileSync(docPath, 'initial\n', 'utf-8');
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -614,6 +701,8 @@ describe('FR-9 — deferred-store-failed event + counter', () => {
     const docPath = join(tmpDir, `${docName}.md`);
     writeFileSync(docPath, 'initial\n', 'utf-8');
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -672,6 +761,8 @@ describe('FR-9 — deferred-store-failed event + counter', () => {
     const docPath = join(tmpDir, `${docName}.md`);
     writeFileSync(docPath, 'initial\n', 'utf-8');
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -720,6 +811,8 @@ describe('FR-9 — deferred-store-failed event + counter', () => {
     const docPath = join(tmpDir, `${docName}.md`);
     writeFileSync(docPath, 'initial\n', 'utf-8');
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -834,6 +927,8 @@ describe('forceStore dispatch (staleness watchdog entry point)', () => {
     const docPath = join(tmpDir, `${docName}.md`);
     writeFileSync(docPath, 'initial\n', 'utf-8');
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -856,6 +951,8 @@ describe('forceStore dispatch (staleness watchdog entry point)', () => {
     const docPath = join(tmpDir, `${docName}.md`);
     writeFileSync(docPath, 'initial\n', 'utf-8');
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,
@@ -879,6 +976,8 @@ describe('forceStore dispatch (staleness watchdog entry point)', () => {
 
   test('short-circuits synthetic docs without touching queues', async () => {
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,

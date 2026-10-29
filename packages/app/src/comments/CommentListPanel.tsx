@@ -76,12 +76,14 @@ export function CommentListPanel({
   empty,
   testIdPrefix,
   scopeSwitch,
+  onDestinationComplete,
 }: {
   threads: readonly CommentThread[];
   groupByDocument?: boolean;
   empty: ReactNode;
   testIdPrefix: string;
   scopeSwitch?: ReactNode;
+  onDestinationComplete?: (target: HTMLElement) => void;
 }) {
   const { t } = useLingui();
   const [showResolved, setShowResolved] = useState(false);
@@ -158,6 +160,7 @@ export function CommentListPanel({
         active={activeId === thread.id}
         focused={focusedId === thread.id}
         layout={groupByDocument ? 'project' : 'doc'}
+        onDestinationComplete={onDestinationComplete}
         cardRef={(el) => {
           if (el) cardRefs.current.set(thread.id, el);
           else cardRefs.current.delete(thread.id);
@@ -175,7 +178,6 @@ export function CommentListPanel({
           </PanelTitle>
           <PanelCount>{active.length}</PanelCount>
         </div>
-        {}
         <div className="flex items-center gap-1">
           {resolved.length > 0 && (
             <Tooltip>
@@ -193,7 +195,6 @@ export function CommentListPanel({
                   data-testid={`${testIdPrefix}-resolved-toggle`}
                   onClick={() => setShowResolved((v) => !v)}
                 >
-                  {}
                   {showResolved ? (
                     <CircleDot aria-hidden="true" className="size-3.5" />
                   ) : (
@@ -204,13 +205,11 @@ export function CommentListPanel({
                   </span>
                 </Button>
               </TooltipTrigger>
-              {}
               <TooltipContent>
                 {showResolved ? <Trans>Hide resolved</Trans> : <Trans>Show resolved</Trans>}
               </TooltipContent>
             </Tooltip>
           )}
-          {}
           {groups.length > 1 && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -239,7 +238,6 @@ export function CommentListPanel({
         </div>
       </PanelHeader>
       {scopeSwitch}
-      {}
       <PanelBody className={groupByDocument ? 'flex flex-col gap-3' : 'flex flex-col gap-0'}>
         {visible.length === 0 ? (
           <PanelEmpty>{empty}</PanelEmpty>
@@ -258,7 +256,6 @@ export function CommentListPanel({
                   onOpenChange={(open) => toggleFile(group.docName, open)}
                   className="group/file-card flex flex-col"
                 >
-                  {}
                   <div className="group/file flex items-center gap-2 border-b px-3 py-2.5 group-data-[state=closed]/file-card:border-b-0">
                     <span className="relative size-4 shrink-0">
                       {tick === false && (
@@ -309,7 +306,6 @@ export function CommentListPanel({
           visible.map(card)
         )}
       </PanelBody>
-      {}
       {active.length > 0 && (
         <CommentSendFooter
           threadIds={scopedSending}

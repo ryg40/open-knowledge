@@ -133,7 +133,33 @@ describe('drift copy', () => {
   });
 
   test('other failure suggests `ok stop all`', () => {
-    expect(restartFailureMessage({ ok: false, reason: 'other' })).toContain('ok stop all');
+    expect(restartFailureMessage({ ok: false, reason: 'other' })).toBe(
+      "Couldn't restart the server automatically. Try running `ok stop all` in a terminal, then reopen this project — or restart your computer if it persists.",
+    );
+  });
+
+  test.each([
+    [
+      false,
+      "Couldn't restart the server: OpenKnowledge could not confirm that the process holding this project's server lock is still its server, so it was not stopped. Stop the server where it was started, or restart your computer, then reopen this project.",
+    ],
+    [
+      true,
+      "Couldn't restart the server: OpenKnowledge asked the process holding this project's server lock to stop, but could not confirm that it is this project's server, so it did not force it to quit. If the project is still locked, stop the server where it was started, or restart your computer, then reopen this project.",
+    ],
+  ])('an unverified holder (sigtermSent %s) names no CLI command', (sigtermSent, expected) => {
+    expect(restartFailureMessage({ ok: false, reason: 'unverified', sigtermSent })).toBe(expected);
+  });
+
+  test('other failure in a Beta window suggests `ok-beta stop all`', () => {
+    vi.stubGlobal('window', { okDesktop: { cliCommandName: 'ok-beta' } });
+    try {
+      expect(restartFailureMessage({ ok: false, reason: 'other' })).toContain(
+        'Try running `ok-beta stop all` in a terminal',
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   test("another channel's server is left running and never offered `ok stop all`", () => {
@@ -160,7 +186,7 @@ describe('installServerDriftListener', () => {
   });
 
   type DriftNode = {
-    props: { body: string; warning: string; onRestart: () => void; onDismiss: () => void };
+    props: { body: string; detail: string; onAction: () => void; onDismiss: () => void };
   };
   function fireDriftAndRender(h: ReturnType<typeof makeBridge>, id = 'toast-1'): DriftNode {
     h.fireDrift(olderInfo);
@@ -176,8 +202,8 @@ describe('installServerDriftListener', () => {
     expect(toastCustom).toHaveBeenCalledTimes(1);
     expect(toastCustom.mock.calls[0]?.[1]).toMatchObject({ duration: Number.POSITIVE_INFINITY });
     expect(node.props.body).toBe(driftToastBody(olderInfo));
-    expect(node.props.warning).toBe(restartDisruptionWarning());
-    expect(typeof node.props.onRestart).toBe('function');
+    expect(node.props.detail).toBe(restartDisruptionWarning());
+    expect(typeof node.props.onAction).toBe('function');
     expect(typeof node.props.onDismiss).toBe('function');
   });
 
@@ -187,7 +213,7 @@ describe('installServerDriftListener', () => {
     toastDismiss.mockClear();
     const h = makeBridge({ restartOutcome: { ok: false, reason: 'eperm' } });
     installServerDriftListener({ bridge: h.bridge });
-    fireDriftAndRender(h).props.onRestart();
+    fireDriftAndRender(h).props.onAction();
     await flush();
     expect(toastDismiss).toHaveBeenCalledWith('toast-1');
     expect(h.restartServer).toHaveBeenCalledWith('/tmp/proj');
@@ -202,7 +228,7 @@ describe('installServerDriftListener', () => {
     toastError.mockClear();
     const h = makeBridge({ restartReject: true });
     installServerDriftListener({ bridge: h.bridge });
-    fireDriftAndRender(h).props.onRestart();
+    fireDriftAndRender(h).props.onAction();
     await flush();
     expect(toastError).not.toHaveBeenCalled();
   });
@@ -213,7 +239,7 @@ describe('installServerDriftListener', () => {
     toastError.mockClear();
     const h = makeBridge({ restartOutcome: { ok: true } });
     installServerDriftListener({ bridge: h.bridge });
-    fireDriftAndRender(h).props.onRestart();
+    fireDriftAndRender(h).props.onAction();
     await flush();
     expect(toastDismiss).toHaveBeenCalledWith('loading-id');
     expect(toastError).not.toHaveBeenCalled();

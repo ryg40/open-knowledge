@@ -1,14 +1,19 @@
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
+import { ensureSyntaxTree, syntaxTree } from '@codemirror/language';
 import { EditorState } from '@codemirror/state';
 import { GFM } from '@lezer/markdown';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { buildDecorationsForRanges } from './view-plugin';
 
 function createState(doc: string): EditorState {
-  return EditorState.create({
+  const state = EditorState.create({
     doc,
     extensions: [markdown({ base: markdownLanguage, extensions: [GFM] })],
   });
+  if (ensureSyntaxTree(state, state.doc.length, 1000) === null) {
+    throw new Error('Test document parsing did not complete');
+  }
+  return state.update({}).state;
 }
 
 interface DecoInfo {
@@ -109,6 +114,29 @@ describe('source-polish view-plugin — buildDecorationsForRanges', () => {
       const decos = collect(doc);
       expect(classesAtLine(decos, 0).join(' ')).toContain('cm-list-item');
       expect(classesAtLine(decos, 11).join(' ')).toContain('cm-list-item');
+    });
+
+    test('task items retain both decorations after incomplete initial parsing', () => {
+      const doc = '- [ ] todo\n- [x] done';
+      const originalCreate = EditorState.create;
+      const create = vi.spyOn(EditorState, 'create').mockImplementation((config) => {
+        let now = 0;
+        const clock = vi.spyOn(Date, 'now').mockImplementation(() => (now += 1000));
+        try {
+          const state = originalCreate(config);
+          expect(syntaxTree(state).length).toBeLessThan(state.doc.length);
+          return state;
+        } finally {
+          clock.mockRestore();
+        }
+      });
+      try {
+        const decos = collect(doc);
+        expect(classesAtLine(decos, 0).join(' ')).toContain('cm-list-item');
+        expect(classesAtLine(decos, doc.indexOf('- [x]')).join(' ')).toContain('cm-list-item');
+      } finally {
+        create.mockRestore();
+      }
     });
 
     test('plain paragraph does NOT get .cm-list-item', () => {

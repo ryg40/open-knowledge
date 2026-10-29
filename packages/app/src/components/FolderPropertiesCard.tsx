@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 import {
   type FrontmatterType,
   type FrontmatterValue,
@@ -14,11 +15,7 @@ import {
   FrontmatterRow,
   type RenameDraft,
 } from '@/components/FrontmatterRow';
-import {
-  coerceValue,
-  DEFAULT_VALUE_FOR_TYPE,
-  resolveWidgetType,
-} from '@/components/PropertyWidgets';
+import { coerceValue, defaultValueForType, resolveWidgetType } from '@/components/PropertyWidgets';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -100,11 +97,7 @@ export function FolderPropertiesCard({ folderPath, state, onChange }: Props) {
   function changeAddType(nextType: FrontmatterType) {
     setAdding((prev) => {
       if (!prev) return prev;
-      const defaultValue =
-        nextType === 'date'
-          ? new Date().toISOString().slice(0, 10)
-          : DEFAULT_VALUE_FOR_TYPE[nextType];
-      return { ...prev, type: nextType, value: defaultValue, error: null };
+      return { ...prev, type: nextType, value: defaultValueForType(nextType), error: null };
     });
   }
 
@@ -192,9 +185,7 @@ export function FolderPropertiesCard({ folderPath, state, onChange }: Props) {
             />
             <Trans>Folder properties</Trans>
           </span>
-          {}
-          {/* biome-ignore lint/a11y/useKeyWithClickEvents: <code> is non-focusable; keyboard activation lives on the wrapping <button>. */}
-          <code
+          <code // oxlint-disable-line jsx-a11y/click-events-have-key-events -- <code> is non-focusable; keyboard activation lives on the wrapping <button>.
             className="text-xs text-muted-foreground font-mono cursor-text select-text break-all"
             onClick={(e) => e.stopPropagation()}
           >

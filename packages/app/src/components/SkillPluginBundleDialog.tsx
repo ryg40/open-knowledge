@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 import { EDITOR_LABELS } from '@inkeep/open-knowledge-core/constants/editors';
 import type { SkillScope } from '@inkeep/open-knowledge-core/schemas/api';
 import type { SkillTargetEditor } from '@inkeep/open-knowledge-core/skill-targets/schema';
@@ -264,7 +265,6 @@ function OpenSkillPluginBundleDialog({
               {allSelected ? <Trans>Clear</Trans> : <Trans>Select all</Trans>}
             </Button>
           </div>
-          {}
           <div className="max-h-72 overflow-y-auto rounded-md border border-border divide-y divide-border">
             {names.map((name) => {
               const description = described.get(name);
@@ -299,7 +299,6 @@ function OpenSkillPluginBundleDialog({
               );
             })}
           </div>
-          {}
           <div
             className="flex flex-wrap items-center gap-1.5 text-1sm text-muted-foreground"
             data-testid="plugin-bundle-destination"
@@ -377,7 +376,6 @@ function OpenSkillPluginBundleDialog({
                             {EDITOR_LABELS[editor] ?? editor}
                           </Label>
                         ))}
-                        {}
                         {offeredCustomRoots.map((root) => (
                           <Label
                             key={root}

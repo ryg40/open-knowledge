@@ -50,6 +50,15 @@ find_release_commit() {
   return 1
 }
 
+find_tagged_release_commit() {
+  git fetch --no-tags "$upstream_url" "refs/tags/v$version" || return 1
+  release_commit=$(git rev-parse --verify --quiet 'FETCH_HEAD^{commit}') || return 1
+  git log --first-parent --format=%H refs/remotes/upstream/main | grep -qx "$release_commit" || fail "the upstream tag v$version is not on the first-parent history of the upstream branch"
+  found=$(git show "$release_commit:packages/cli/package.json" 2>/dev/null | awk -F '"' '/"version"[[:space:]]*:/ { print $4; exit }')
+  [ "$found" = 0.0.0-unknown ] || [ "$found" = "$version" ] || fail "the upstream tag v$version holds version $found"
+  tagged=1
+}
+
 case $action in
   lint)
     [ "$#" -eq 0 ] || usage
@@ -101,14 +110,19 @@ case $action in
         echo "ci: upstream release commit of $version is present: $ref"
         exit 0
       fi
-      [ "$ref" = refs/heads/main ] || fail "$ref holds version $version, but it is not the upstream release commit"
-      break
+      [ "$ref" != refs/heads/main ] || break
     done
+    tagged=
     if ! find_release_commit; then
       git fetch --no-tags "$upstream_url" '+refs/heads/main:refs/remotes/upstream/main' || fail "cannot fetch the upstream branch"
-      find_release_commit || fail "the upstream branch has no post-stable commit of $version"
+      find_release_commit || find_tagged_release_commit || fail "the upstream branch has no post-stable commit of $version, and the upstream tag v$version is absent"
     fi
-    holds_version "$release_commit" || fail "the post-stable commit does not hold version $version"
+    [ -n "$tagged" ] || holds_version "$release_commit" || fail "the post-stable commit does not hold version $version"
+    if marker=$(git rev-parse --verify --quiet "refs/tags/$version^{commit}"); then
+      [ "$marker" = "$release_commit" ] || fail "the local tag $version is not the upstream release commit $release_commit"
+      echo "ci: local tag $version marks the upstream release commit $release_commit"
+      exit 0
+    fi
     git tag "$version" "$release_commit" || fail "cannot make the local tag $version"
     echo "ci: local tag $version marks the upstream release commit $release_commit"
     ;;

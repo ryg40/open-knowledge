@@ -86,7 +86,7 @@ export default defineConfig({
             'src/main/desktop-uninstall-result-window.ts',
           ),
           'utility/server-entry': resolve(__dirname, 'src/utility/server-entry.ts'),
-          'utility/pty-host': resolve(__dirname, 'src/utility/pty-host.ts'),
+          'utility/pty-host': resolve(__dirname, 'src/utility/pty-host-entry.ts'),
         },
         output: { format: 'es', entryFileNames: '[name].js' },
       },
@@ -129,18 +129,11 @@ export default defineConfig({
   renderer: {
     root: appRoot,
     plugins: [
-      // Substitutes __OK_CHROME_BG_LIGHT__ / __OK_CHROME_BG_DARK__ placeholders
-      // in app/index.html with sRGB hex resolved from globals.css `--sidebar`.
-      // Same plugin used by packages/app/vite.config.ts so dev (`bun run dev`)
-      // and electron renderer build resolve identically.
       chromeTokensVitePlugin({ globalsCssPath: resolve(appRoot, 'src/globals.css') }),
       react(),
       // Lingui macro + React Compiler share one Babel pass, options shared
       // with `packages/app/vite.config.ts` via `RENDERER_BABEL_OPTIONS`.
-      // `await` is required here: electron-vite deep-clones the renderer
-      // config and chokes on the non-plain preset object —
-      // https://github.com/alex8088/electron-vite/issues/902
-      await babel(RENDERER_BABEL_OPTIONS),
+      babel(RENDERER_BABEL_OPTIONS),
     ],
     resolve: {
       alias: {

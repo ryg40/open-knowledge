@@ -55,7 +55,6 @@ export function SkillOriginInline({ scope, name }: { scope: SkillScope; name: st
 
   return (
     <div className="flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
-      {}
       {github ? (
         <a
           href={github}
@@ -111,7 +110,7 @@ export function SkillOriginInline({ scope, name }: { scope: SkillScope; name: st
       {modified ? (
         <Tooltip>
           <TooltipTrigger asChild>
-            <span className="shrink-0 rounded-sm bg-amber-500/15 px-1.5 py-0.5 font-medium text-[11px] text-amber-700 dark:text-amber-400">
+            <span className="shrink-0 rounded-sm bg-warning/10 px-1.5 py-0.5 font-medium text-[11px] text-warning">
               <Trans>Modified</Trans>
             </span>
           </TooltipTrigger>
@@ -164,7 +163,6 @@ export function SkillOriginInline({ scope, name }: { scope: SkillScope; name: st
               ) : (
                 <RefreshCw className="size-3" aria-hidden />
               )}
-              {}
               <span className="hidden @xl/toolbar:inline">
                 {reimporting ? <Trans>Updating</Trans> : <Trans>Update</Trans>}
               </span>

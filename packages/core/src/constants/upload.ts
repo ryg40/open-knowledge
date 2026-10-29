@@ -75,6 +75,12 @@ export const EXECUTABLE_BLOCKLIST_EXTENSIONS: ReadonlySet<string> = new Set([
   'com',
   'msi',
   'vbs',
+  'vbe',
+  'py',
+  'pyw',
+  'pyc',
+  'pyz',
+  'pyzw',
   'js',
   'jse',
   'wsf',
@@ -82,6 +88,7 @@ export const EXECUTABLE_BLOCKLIST_EXTENSIONS: ReadonlySet<string> = new Set([
   'hta',
   'sh',
   'command',
+  'tool',
   'csh',
   'ksh',
   'bash',
@@ -118,6 +125,21 @@ export const EXECUTABLE_BLOCKLIST_EXTENSIONS: ReadonlySet<string> = new Set([
   'scr',
   'lnk',
   'url',
+  'cpl',
+  'msc',
+  'chm',
+  'application',
+  'appref-ms',
+  'settingcontent-ms',
+  'reg',
+  'inf',
+  'scf',
+  'sct',
+  'wsc',
+  'msp',
+  'mst',
+  'shb',
+  'shs',
 ]);
 
 export const ASSET_EXTENSIONS: ReadonlySet<string> = new Set([
@@ -231,7 +253,9 @@ export type EmitFormat = 'wikiembed' | 'markdown-image';
 export type DedupMode = 'off' | 'same-dir';
 export type DedupUIMode = 'silent' | 'toast' | 'confirm';
 
-export const DEFAULT_ATTACHMENT_FOLDER_PATH = './';
+export const DEFAULT_ATTACHMENT_FOLDER_PATH = './{{filename}}.assets';
+
+export const BESIDE_DOCUMENT_ATTACHMENT_FOLDER_PATH = './';
 
 export const DEFAULT_EMIT_FORMAT: EmitFormat = 'wikiembed';
 

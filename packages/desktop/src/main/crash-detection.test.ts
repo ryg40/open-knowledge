@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import type { ProcessTerminationLookup, ProcessTerminationQuery } from '@inkeep/open-knowledge';
 import type { OkBugReportCrashDetectedEvent } from '@inkeep/open-knowledge-core';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { installWasInFlightDuring } from './auto-updater.ts';
@@ -20,10 +21,13 @@ import {
   GPU_CRASH_WINDOW_MS,
   HANDOFF_TEARDOWN_WINDOW_MS,
   INVITE_EXPIRE_AFTER_MS,
+  type InstalledAppChange,
   type InstallInFlight,
   MAX_DECLINED_DEATHS,
   type MainExitRecord,
   parseMainExitRecord,
+  REINSTALL_KILL_WINDOW_MS,
+  readInstalledAppChangeSync,
   SENTINEL_HEARTBEAT_INTERVAL_MS,
   STALE_CRASH_AFTER_MS,
   startLocalCrashReporter,
@@ -65,7 +69,13 @@ interface Rig {
   ownSizedForeignDump: Buffer;
   setRendererAvailable(available: boolean): void;
   setBootSessionUuid(uuid: string | null): void;
+  setBootStartedAtMs(ms: number | null): void;
   setInstallInFlight(inFlight: InstallInFlight | null): void;
+  setProcessTermination(lookup: ProcessTerminationLookup): void;
+  processTerminationQueries: ProcessTerminationQuery[];
+  setInstalledAppChange(change: InstalledAppChange): void;
+  setInstalledAppChangedAtMs(ms: number): void;
+  installedAppQueries(): number;
   setAppVersion(version: string): void;
   setWatchdogRead(read: WatchdogRead): void;
   setStallRead(read: StallRead): void;
@@ -85,7 +95,18 @@ function makeRig(): Rig {
   const infos: Record<string, unknown>[] = [];
   let rendererAvailable = true;
   let bootSessionUuid: string | null = 'boot-epoch-a';
+  let bootStartedAtMs: number | null = null;
   let installInFlight: InstallInFlight | null = null;
+  let processTermination: ProcessTerminationLookup = {
+    outcome: 'not-killed',
+    reportsRead: 0,
+    unreadable: 0,
+    unparseable: 0,
+    skippedNewerOverCap: 0,
+  };
+  const processTerminationQueries: ProcessTerminationQuery[] = [];
+  let installedAppChange: InstalledAppChange = { kind: 'unreadable', error: 'ENOENT' };
+  let installedAppQueries = 0;
   let watchdogRead: WatchdogRead = { kind: 'absent' };
   let stallRead: StallRead = { kind: 'absent' };
   const watchdogStarts: string[] = [];
@@ -137,9 +158,23 @@ function makeRig(): Rig {
     setBootSessionUuid(uuid: string | null) {
       bootSessionUuid = uuid;
     },
+    setBootStartedAtMs(ms: number | null) {
+      bootStartedAtMs = ms;
+    },
     setInstallInFlight(inFlight: InstallInFlight | null) {
       installInFlight = inFlight;
     },
+    setProcessTermination(lookup: ProcessTerminationLookup) {
+      processTermination = lookup;
+    },
+    processTerminationQueries,
+    setInstalledAppChange(change: InstalledAppChange) {
+      installedAppChange = change;
+    },
+    setInstalledAppChangedAtMs(ms: number) {
+      installedAppChange = { kind: 'read', changedAtMs: ms };
+    },
+    installedAppQueries: () => installedAppQueries,
     setAppVersion(version: string) {
       rig.deps.appVersion = version;
     },
@@ -168,6 +203,7 @@ function makeRig(): Rig {
       crashDumpsDir: join(dir, 'crash-dumps'),
       appBundleRoot,
       appVersion: CRASHED_VERSION,
+      processId: 20480,
       platform: 'darwin',
       emit(event) {
         if (!rendererAvailable) return false;
@@ -179,7 +215,16 @@ function makeRig(): Rig {
         return new Date(clockMs);
       },
       currentBootSessionUuid: () => bootSessionUuid,
+      currentBootStartedAtMs: () => bootStartedAtMs,
       installInFlight: () => installInFlight,
+      processTermination: (query) => {
+        processTerminationQueries.push(query);
+        return processTermination;
+      },
+      installedAppChange: () => {
+        installedAppQueries += 1;
+        return installedAppChange;
+      },
       mainThreadWatchdog: {
         readPrevious: () => watchdogRead,
         readPreviousStall: () => stallRead,
@@ -4077,6 +4122,460 @@ describe('the dump a report invitation is bound to', () => {
     expect(sessionB.minidumpForCrashEvent(armed.eventId)).toEqual({
       status: 'bound',
       path: rendererPath,
+    });
+  });
+});
+
+describe('machine stops the kernel boot session cannot name', () => {
+  function machineDeathLine(rig: Rig): Record<string, unknown> | undefined {
+    return rig.infos.find((line) => line.event === 'crash-detection.machine-level-death');
+  }
+
+  function windowsRig(): Rig {
+    const rig = makeRig();
+    rig.deps.platform = 'win32';
+    rig.setBootSessionUuid(null);
+    return rig;
+  }
+
+  test('a machine that booted after the session was last alive never prompts', () => {
+    const rig = windowsRig();
+    createCrashDetection(rig.deps).detectBootCrash();
+    const lastAliveAt = readSentinel(rig).lastAliveAt;
+
+    rig.advance(2 * 60 * 60_000);
+    const bootStartedAtMs = rig.nowMs() - 60_000;
+    rig.setBootStartedAtMs(bootStartedAtMs);
+    const sessionB = createCrashDetection(rig.deps);
+    expect(sessionB.detectBootCrash()).toBeNull();
+    sessionB.notifyRendererReady();
+    expect(rig.emitted).toHaveLength(0);
+
+    const breadcrumb = machineDeathLine(rig);
+    expect(breadcrumb?.reason).toBe('system-reboot');
+    expect(breadcrumb?.machineCause).toBe('system-reboot');
+    expect(breadcrumb?.lastAliveAt).toBe(lastAliveAt);
+    expect(breadcrumb?.currentBootStartedAt).toBe(new Date(bootStartedAtMs).toISOString());
+  });
+
+  test('a session that died while the machine kept running still prompts', () => {
+    const rig = windowsRig();
+    rig.setBootStartedAtMs(rig.nowMs() - 60 * 60_000);
+    createCrashDetection(rig.deps).detectBootCrash();
+
+    rig.advance(2 * 60 * 60_000);
+    const armed = createCrashDetection(rig.deps).detectBootCrash();
+
+    expect(bootInvite(armed).context.dirtyShutdown).toBe(true);
+    expect(machineDeathLine(rig)).toBeUndefined();
+  });
+
+  test('without a boot instant the dirty shutdown still prompts', () => {
+    const rig = windowsRig();
+    createCrashDetection(rig.deps).detectBootCrash();
+
+    rig.advance(2 * 60 * 60_000);
+    expect(bootInvite(createCrashDetection(rig.deps).detectBootCrash()).context.dirtyShutdown).toBe(
+      true,
+    );
+  });
+
+  test('a matching kernel boot session outranks a boot instant that disagrees', () => {
+    const rig = makeRig();
+    createCrashDetection(rig.deps).detectBootCrash();
+
+    rig.advance(2 * 60 * 60_000);
+    rig.setBootStartedAtMs(rig.nowMs() - 60_000);
+    expect(bootInvite(createCrashDetection(rig.deps).detectBootCrash()).context.dirtyShutdown).toBe(
+      true,
+    );
+  });
+
+  test('a zero-filled sentinel the OS never flushed never prompts', () => {
+    const rig = windowsRig();
+    mkdirSync(dirname(rig.deps.sentinelPath), { recursive: true });
+    writeFileSync(rig.deps.sentinelPath, Buffer.alloc(160));
+
+    const sessionB = createCrashDetection(rig.deps);
+    expect(sessionB.detectBootCrash()).toBeNull();
+    sessionB.notifyRendererReady();
+    expect(rig.emitted).toHaveLength(0);
+
+    expect(rig.warnings.map((w) => w.event)).toContain('crash-detection.sentinel-parse-failed');
+    const breadcrumb = machineDeathLine(rig);
+    expect(breadcrumb?.reason).toBe('unflushed-sentinel');
+    expect(breadcrumb?.class).toBe('external');
+    expect(readSentinel(rig).bootId).toBe(rig.watchdogStarts.at(-1));
+  });
+
+  test('a sentinel torn by NUL bytes past its valid prefix never prompts', () => {
+    const rig = makeRig();
+    createCrashDetection(rig.deps).detectBootCrash();
+    const valid = readFileSync(rig.deps.sentinelPath);
+    writeFileSync(rig.deps.sentinelPath, Buffer.concat([valid.subarray(0, 40), Buffer.alloc(64)]));
+
+    expect(createCrashDetection(rig.deps).detectBootCrash()).toBeNull();
+    expect(machineDeathLine(rig)?.reason).toBe('unflushed-sentinel');
+  });
+
+  test('an unparseable sentinel without NUL bytes still prompts, and says what it compared', () => {
+    const rig = windowsRig();
+    const bootStartedAtMs = rig.nowMs() - 60_000;
+    rig.setBootStartedAtMs(bootStartedAtMs);
+    mkdirSync(dirname(rig.deps.sentinelPath), { recursive: true });
+    writeFileSync(rig.deps.sentinelPath, '{"bootId":"17');
+
+    const armed = bootInvite(createCrashDetection(rig.deps).detectBootCrash());
+    expect(armed.eventId.startsWith('boot:unreadable:')).toBe(true);
+    const boot = rig.infos.find((line) => line.event === 'crash-detection.boot');
+    expect(boot?.bootSessionsComparable).toBe(false);
+    expect(boot?.currentBootStartedAt).toBe(new Date(bootStartedAtMs).toISOString());
+    expect(boot?.sentinelUnflushed).toBe(false);
+    expect(boot?.lastAliveAt).toBeNull();
+  });
+
+  test('a fresh crash dump beside a zero-filled sentinel still prompts from the dump', () => {
+    const rig = makeRig();
+    createCrashDetection(rig.deps).detectBootCrash();
+    writeFileSync(rig.deps.sentinelPath, Buffer.alloc(160));
+    seedMinidump(rig, 'pending/native-crash.dmp', rig.tick());
+
+    const armed = bootInvite(createCrashDetection(rig.deps).detectBootCrash());
+    expect(armed.eventId.startsWith('boot:dump:')).toBe(true);
+    expect(armed.context.dirtyShutdown).toBe(false);
+  });
+});
+
+describe('a session the OS ended to relieve memory pressure', () => {
+  const JETSAM_KILL: ProcessTerminationLookup = {
+    outcome: 'killed',
+    source: 'macos-jetsam',
+    at: '2026-07-10T00:00:30.000Z',
+    killReason: 'vm-pageshortage',
+    victimChosenByPriority: true,
+    largestProcessOwned: false,
+    residentBytes: 62_914_560,
+    reportsRead: 1,
+  };
+
+  function bootLine(rig: Rig): Record<string, unknown> | undefined {
+    return rig.infos.find((line) => line.event === 'crash-detection.boot');
+  }
+
+  function machineDeathLine(rig: Rig): Record<string, unknown> | undefined {
+    return rig.infos.find((line) => line.event === 'crash-detection.machine-level-death');
+  }
+
+  test('the sentinel names the main process it watches', () => {
+    const rig = makeRig();
+    createCrashDetection(rig.deps).detectBootCrash();
+
+    expect(JSON.parse(readFileSync(rig.deps.sentinelPath, 'utf8')).pid).toBe(20480);
+  });
+
+  test('a priority-order jetsam kill while another process held the most memory never prompts', () => {
+    const rig = makeRig();
+    createCrashDetection(rig.deps).detectBootCrash();
+    const lastAliveAt = readSentinel(rig).lastAliveAt ?? '';
+
+    rig.setProcessTermination(JETSAM_KILL);
+    rig.deps.processId = 30111;
+    const sessionB = createCrashDetection(rig.deps);
+    expect(sessionB.detectBootCrash()).toBeNull();
+    sessionB.notifyRendererReady();
+    expect(rig.emitted).toHaveLength(0);
+
+    expect(rig.processTerminationQueries).toEqual([
+      { pid: 20480, fromMs: Date.parse(lastAliveAt), toMs: rig.nowMs() },
+    ]);
+    expect(machineDeathLine(rig)).toMatchObject({
+      reason: 'os-memory-pressure',
+      class: 'external',
+      machineCause: 'os-memory-pressure',
+      previousPid: 20480,
+      processTermination: JETSAM_KILL,
+    });
+    expect(JSON.parse(readFileSync(rig.deps.sentinelPath, 'utf8')).pid).toBe(30111);
+  });
+
+  test.each([
+    ['this app held the most memory', { largestProcessOwned: true }],
+    ['the report named no largest process', { largestProcessOwned: null }],
+    [
+      'the kill targeted the largest compressed-memory holder',
+      { killReason: 'vm-compressor-space-shortage', victimChosenByPriority: false },
+    ],
+    [
+      'the kill was for the process’s own memory limit',
+      { killReason: 'per-process-limit', victimChosenByPriority: false },
+    ],
+  ])('a jetsam kill still prompts when %s, and the invitation records it', (_case, overrides) => {
+    const rig = makeRig();
+    createCrashDetection(rig.deps).detectBootCrash();
+
+    const kill: ProcessTerminationLookup = { ...JETSAM_KILL, ...overrides };
+    rig.setProcessTermination(kill);
+    expect(bootInvite(createCrashDetection(rig.deps).detectBootCrash()).context.dirtyShutdown).toBe(
+      true,
+    );
+    expect(bootLine(rig)).toMatchObject({ previousPid: 20480, processTermination: kill });
+    expect(machineDeathLine(rig)).toBeUndefined();
+  });
+
+  test('a death the OS has no record of still prompts, and says the OS was asked', () => {
+    const rig = makeRig();
+    createCrashDetection(rig.deps).detectBootCrash();
+
+    bootInvite(createCrashDetection(rig.deps).detectBootCrash());
+    expect(bootLine(rig)).toMatchObject({
+      previousPid: 20480,
+      processTermination: {
+        outcome: 'not-killed',
+        reportsRead: 0,
+        unreadable: 0,
+        unparseable: 0,
+        skippedNewerOverCap: 0,
+      },
+    });
+  });
+
+  test('the OS is not asked when a reboot, a fresh crash dump or a pid-less sentinel decides first', () => {
+    const rebooted = makeRig();
+    createCrashDetection(rebooted.deps).detectBootCrash();
+    rebooted.setBootSessionUuid('boot-epoch-b');
+    expect(createCrashDetection(rebooted.deps).detectBootCrash()).toBeNull();
+    expect(rebooted.processTerminationQueries).toEqual([]);
+
+    const dumped = makeRig();
+    createCrashDetection(dumped.deps).detectBootCrash();
+    seedMinidump(dumped, 'pending/native-crash.dmp', dumped.tick());
+    dumped.setProcessTermination(JETSAM_KILL);
+    bootInvite(createCrashDetection(dumped.deps).detectBootCrash());
+    expect(dumped.processTerminationQueries).toEqual([]);
+
+    const older = makeRig();
+    createCrashDetection(older.deps).detectBootCrash();
+    const { pid: _pid, ...withoutPid } = JSON.parse(readFileSync(older.deps.sentinelPath, 'utf8'));
+    writeFileSync(older.deps.sentinelPath, `${JSON.stringify(withoutPid)}\n`);
+    older.setProcessTermination(JETSAM_KILL);
+    bootInvite(createCrashDetection(older.deps).detectBootCrash());
+    expect(older.processTerminationQueries).toEqual([]);
+    expect(bootLine(older)).toMatchObject({ previousPid: null, processTermination: null });
+  });
+});
+
+describe('a session an installer closed to replace the app', () => {
+  function bootLine(rig: Rig): Record<string, unknown> | undefined {
+    return rig.infos.find((line) => line.event === 'crash-detection.boot');
+  }
+
+  function machineDeathLine(rig: Rig): Record<string, unknown> | undefined {
+    return rig.infos.find((line) => line.event === 'crash-detection.machine-level-death');
+  }
+
+  function windowsRig(): Rig {
+    const rig = makeRig();
+    rig.deps.platform = 'win32';
+    rig.setBootSessionUuid(null);
+    return rig;
+  }
+
+  test('an app replaced on disk minutes after the session was last alive never prompts', () => {
+    const rig = windowsRig();
+    createCrashDetection(rig.deps).detectBootCrash();
+    const lastAliveAt = readSentinel(rig).lastAliveAt ?? '';
+
+    rig.advance(90_000);
+    const replacedAtMs = rig.nowMs();
+    rig.setInstalledAppChangedAtMs(replacedAtMs);
+    rig.advance(30_000);
+    const sessionB = createCrashDetection(rig.deps);
+    expect(sessionB.detectBootCrash()).toBeNull();
+    sessionB.notifyRendererReady();
+    expect(rig.emitted).toHaveLength(0);
+
+    expect(machineDeathLine(rig)).toMatchObject({
+      reason: 'app-reinstalled',
+      class: 'external',
+      machineCause: 'app-reinstalled',
+      lastAliveAt,
+      attemptedInstall: null,
+      previousPid: 20480,
+      installedAppChangedAt: new Date(replacedAtMs).toISOString(),
+    });
+  });
+
+  test.each([
+    ['before the session was last alive', -30_000],
+    ['longer after the session was last alive than an install takes', REINSTALL_KILL_WINDOW_MS + 1],
+  ])('an app replaced %s still prompts, and the invitation records when', (_case, offsetMs) => {
+    const rig = windowsRig();
+    createCrashDetection(rig.deps).detectBootCrash();
+    const lastAliveMs = Date.parse(readSentinel(rig).lastAliveAt ?? '');
+
+    rig.advance(REINSTALL_KILL_WINDOW_MS + 60_000);
+    rig.setInstalledAppChangedAtMs(lastAliveMs + offsetMs);
+    expect(bootInvite(createCrashDetection(rig.deps).detectBootCrash()).context.dirtyShutdown).toBe(
+      true,
+    );
+    expect(bootLine(rig)).toMatchObject({
+      installedAppChangedAt: new Date(lastAliveMs + offsetMs).toISOString(),
+    });
+    expect(machineDeathLine(rig)).toBeUndefined();
+  });
+
+  test('a session whose main thread had hung still prompts when an installer then replaced the app', () => {
+    const rig = windowsRig();
+    createCrashDetection(rig.deps).detectBootCrash();
+    const bootId = readSentinel(rig).bootId ?? '';
+
+    rig.advance(30_000);
+    rig.setWatchdogRead({
+      kind: 'record',
+      record: {
+        schemaVersion: 1,
+        bootId,
+        writtenAt: new Date(rig.nowMs()).toISOString(),
+        tickMs: 5_000,
+        blockedForMs: 25_000,
+        mainTicksObserved: 4,
+      },
+    });
+    rig.advance(60_000);
+    const replacedAtMs = rig.nowMs();
+    rig.setInstalledAppChangedAtMs(replacedAtMs);
+    rig.advance(30_000);
+
+    expect(bootInvite(createCrashDetection(rig.deps).detectBootCrash()).context.dirtyShutdown).toBe(
+      true,
+    );
+    expect(bootLine(rig)).toMatchObject({
+      livenessVerdict: 'blocked',
+      installedAppChangedAt: new Date(replacedAtMs).toISOString(),
+    });
+    expect(machineDeathLine(rig)).toBeUndefined();
+  });
+
+  test('an install time the disk cannot give still prompts, and says why it is missing', () => {
+    const rig = windowsRig();
+    createCrashDetection(rig.deps).detectBootCrash();
+
+    rig.advance(60_000);
+    rig.setInstalledAppChange({ kind: 'unreadable', error: 'EPERM' });
+    bootInvite(createCrashDetection(rig.deps).detectBootCrash());
+    expect(rig.installedAppQueries()).toBe(1);
+    expect(bootLine(rig)).toMatchObject({
+      installedAppChangedAt: null,
+      installedAppChangeError: 'EPERM',
+    });
+  });
+
+  test('a reinstall over a sentinel from a build that recorded no pid never prompts', () => {
+    const rig = windowsRig();
+    createCrashDetection(rig.deps).detectBootCrash();
+    const { pid: _pid, ...withoutPid } = JSON.parse(readFileSync(rig.deps.sentinelPath, 'utf8'));
+    writeFileSync(rig.deps.sentinelPath, `${JSON.stringify(withoutPid)}\n`);
+
+    rig.advance(90_000);
+    const replacedAtMs = rig.nowMs();
+    rig.setInstalledAppChangedAtMs(replacedAtMs);
+    rig.advance(30_000);
+    expect(createCrashDetection(rig.deps).detectBootCrash()).toBeNull();
+    expect(machineDeathLine(rig)).toMatchObject({
+      reason: 'app-reinstalled',
+      class: 'external',
+      previousPid: null,
+      installedAppChangedAt: new Date(replacedAtMs).toISOString(),
+      installedAppChangeError: null,
+    });
+  });
+
+  test('the install time is not read when a reboot, a fresh crash dump or an update install decides first', () => {
+    const rebooted = windowsRig();
+    createCrashDetection(rebooted.deps).detectBootCrash();
+    rebooted.advance(60_000);
+    rebooted.setBootStartedAtMs(rebooted.nowMs());
+    rebooted.setInstalledAppChangedAtMs(rebooted.nowMs());
+    expect(createCrashDetection(rebooted.deps).detectBootCrash()).toBeNull();
+    expect(machineDeathLine(rebooted)?.reason).toBe('system-reboot');
+    expect(rebooted.installedAppQueries()).toBe(0);
+    expect(machineDeathLine(rebooted)).toMatchObject({
+      installedAppChangedAt: null,
+      installedAppChangeError: null,
+    });
+
+    const dumped = windowsRig();
+    createCrashDetection(dumped.deps).detectBootCrash();
+    seedMinidump(dumped, 'pending/native-crash.dmp', dumped.tick());
+    dumped.setInstalledAppChangedAtMs(dumped.nowMs());
+    bootInvite(createCrashDetection(dumped.deps).detectBootCrash());
+    expect(dumped.installedAppQueries()).toBe(0);
+
+    const updated = windowsRig();
+    createCrashDetection(updated.deps).detectBootCrash();
+    updated.setInstallInFlight({
+      attemptedVersion: DETECTING_VERSION,
+      handoffAt: updated.nowMs(),
+      recordedHandoff: true,
+    });
+    updated.setInstalledAppChangedAtMs(updated.nowMs());
+    expect(createCrashDetection(updated.deps).detectBootCrash()).toBeNull();
+    expect(machineDeathLine(updated)?.reason).toBe('update-install');
+    expect(updated.installedAppQueries()).toBe(0);
+  });
+
+  test('a clean quit is never second-guessed by the install time', () => {
+    const rig = windowsRig();
+    const sessionA = createCrashDetection(rig.deps);
+    sessionA.detectBootCrash();
+    sessionA.markCleanQuit();
+
+    rig.advance(60_000);
+    rig.setInstalledAppChangedAtMs(rig.nowMs());
+    expect(createCrashDetection(rig.deps).detectBootCrash()).toBeNull();
+    expect(rig.installedAppQueries()).toBe(0);
+    expect(machineDeathLine(rig)).toBeUndefined();
+  });
+});
+
+describe('when the installed app last changed on disk', () => {
+  test('a file just written reads as changed now', () => {
+    const dir = mkdtempSync(resolve(tmpdir(), 'ok-installed-app-'));
+    tmpDirs.push(dir);
+    const exePath = join(dir, 'OpenKnowledge.exe');
+    const beforeMs = Date.now() - 1_000;
+    writeFileSync(exePath, 'MZ');
+
+    const change = readInstalledAppChangeSync(exePath);
+    if (change.kind !== 'read') throw new Error(`expected a read, got ${change.error}`);
+    expect(change.changedAtMs).toBeGreaterThanOrEqual(beforeMs);
+    expect(change.changedAtMs).toBeLessThanOrEqual(Date.now() + 1_000);
+  });
+
+  test('the later of creation and metadata change wins, so restored file times do not hide a reinstall', () => {
+    expect(
+      readInstalledAppChangeSync('OpenKnowledge.exe', () => ({
+        birthtimeMs: 1_000,
+        ctimeMs: 5_000,
+      })),
+    ).toEqual({ kind: 'read', changedAtMs: 5_000 });
+    expect(
+      readInstalledAppChangeSync('OpenKnowledge.exe', () => ({
+        birthtimeMs: 7_000,
+        ctimeMs: 5_000,
+      })),
+    ).toEqual({ kind: 'read', changedAtMs: 7_000 });
+    expect(
+      readInstalledAppChangeSync('OpenKnowledge.exe', () => ({ birthtimeMs: 0, ctimeMs: 0 })),
+    ).toEqual({ kind: 'unreadable', error: 'invalid-time' });
+  });
+
+  test('a missing executable reads as unreadable with its error code', () => {
+    const dir = mkdtempSync(resolve(tmpdir(), 'ok-installed-app-'));
+    tmpDirs.push(dir);
+    expect(readInstalledAppChangeSync(join(dir, 'missing.exe'))).toEqual({
+      kind: 'unreadable',
+      error: 'ENOENT',
     });
   });
 });

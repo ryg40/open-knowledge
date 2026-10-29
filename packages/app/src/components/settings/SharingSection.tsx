@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 // oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — physical margin/padding/inset utilities predate the rule; drain by swapping ml/mr → ms/me, pl/pr → ps/pe, left/right → start/end, then deleting this line. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-physical-direction-utility
 
 import { Trans, useLingui } from '@lingui/react/macro';
@@ -7,6 +8,7 @@ import { ConfigSharingInfoTooltip } from '@/components/ConfigSharingInfoTooltip'
 import { Button } from '@/components/ui/button';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Skeleton } from '@/components/ui/skeleton';
+import { okCliCommandName } from '@/lib/channel-cli-copy';
 import type { OkSharingStatusResult } from '@/lib/desktop-bridge-types';
 import { SettingsSectionHeader } from './SettingsSectionHeader';
 
@@ -19,6 +21,7 @@ export function SharingSection() {
 }
 
 function SharingSectionUnsupported() {
+  const cliCommand = okCliCommandName();
   return (
     <section aria-labelledby={TITLE_ID} className="space-y-3" data-field="section:sharing">
       <SettingsSectionHeader
@@ -29,7 +32,8 @@ function SharingSectionUnsupported() {
       >
         <Trans>
           Available in the OpenKnowledge desktop app. From a terminal, use
-          <code> ok config-sharing status</code> / <code>share</code> / <code>unshare</code>.
+          <code> {cliCommand} config-sharing status</code> / <code>share</code> /{' '}
+          <code>unshare</code>.
         </Trans>
       </SettingsSectionHeader>
     </section>
@@ -116,7 +120,6 @@ function SharingSectionBody() {
           scope="project"
           level="block"
         />
-        {}
         <div role="status" aria-live="polite" aria-busy="true">
           <span className="sr-only">
             <Trans>Loading config sharing</Trans>
@@ -152,7 +155,7 @@ function SharingSectionBody() {
 
       {noGit ? (
         <p
-          className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+          className="rounded-md border border-warning/40 px-3 py-2 text-sm text-foreground"
           role="status"
           data-testid="settings-sharing-no-git"
         >
@@ -170,7 +173,6 @@ function SharingSectionBody() {
           aria-labelledby={TITLE_ID}
           data-testid="settings-sharing-radiogroup"
         >
-          {}
           <label htmlFor="settings-sharing-local-only" className="flex items-start gap-2 text-sm">
             <RadioGroupItem
               id="settings-sharing-local-only"
@@ -208,7 +210,7 @@ function SharingSectionBody() {
 
       {refusal !== null ? (
         <div
-          className="space-y-2 rounded-md border border-destructive bg-destructive/10 p-3 text-sm"
+          className="space-y-2 rounded-md border border-destructive p-3 text-sm"
           role="alert"
           data-testid="settings-sharing-refusal"
         >

@@ -124,7 +124,6 @@ function AgentRow({
   return (
     <div className="flex items-center justify-between gap-3 px-3 py-2.5" data-testid={rowTestId}>
       <div className="flex min-w-0 items-start gap-2.5">
-        {}
         <span className="flex h-5 shrink-0 items-center">{icon}</span>
         <div className="flex min-w-0 flex-col">
           <span className="truncate text-sm leading-5">{name}</span>
@@ -274,7 +273,7 @@ function ConnectionStatusLine({
   }
   if (status === 'not-connected' && enabled) {
     return (
-      <span className="mt-0.5 inline-flex items-center gap-1 text-amber-700 text-xs dark:text-amber-400">
+      <span className="mt-0.5 inline-flex items-center gap-1 text-warning text-xs">
         <TriangleAlert aria-hidden className="size-3.5" />
         {t`Not connected`}
       </span>
@@ -302,12 +301,7 @@ function RowActionButton({
       return null;
     case 'install':
       return (
-        <Button
-          variant="link"
-          size="sm"
-          className="shrink-0 text-muted-foreground hover:text-foreground"
-          asChild
-        >
+        <Button variant="link" size="sm" className="shrink-0" asChild>
           <a
             href={action.url}
             target="_blank"
@@ -322,12 +316,7 @@ function RowActionButton({
       );
     case 'setup-doc':
       return (
-        <Button
-          variant="link"
-          size="sm"
-          className="shrink-0 text-muted-foreground hover:text-foreground"
-          asChild
-        >
+        <Button variant="link" size="sm" className="shrink-0" asChild>
           <a
             href={`https://openknowledge.ai/docs/integrations/${action.slug}`}
             target="_blank"
@@ -862,7 +851,7 @@ export function AgentConnectionsSection({
           <WifiOff className="size-5" aria-hidden="true" />
           <span>{t`Couldn't reach the agent registry.`}</span>
           <Button type="button" variant="outline" size="sm" onClick={() => void catalog.refetch()}>
-            {t`Retry`}
+            {t`Try again`}
           </Button>
         </div>
       ) : (catalogAgents?.length ?? 0) === 0 ? (
@@ -1164,7 +1153,7 @@ export function AgentConnectionsSection({
             className="shrink-0"
             onClick={() => setReloadInstallState((value) => value + 1)}
           >
-            {t`Retry`}
+            {t`Try again`}
           </Button>
         </div>
       ) : null}

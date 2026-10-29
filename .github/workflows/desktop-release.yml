@@ -122,7 +122,7 @@ jobs:
   # self-contained build is the proven signed-DMG path and stays byte-for-byte
   # as it was; unifying it onto the bundle is a separate, QA-able change.)
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     cache-mode: none
     timeout-minutes: 30
     permissions:
@@ -145,8 +145,9 @@ jobs:
       platforms: ${{ steps.stage.outputs.platforms }}
     steps:
       - name: Link to triggering run
-        # Back-link: promote-stable forwards its run URL in
-        # client_payload.dispatched_by. Blank on manual / beta paths.
+        # Back-link: client_payload.dispatched_by carries promote-stable.yml's
+        # own run URL, or the dispatched_by that point-release.yml received
+        # (blank when it ran by hand). Blank on manual / beta paths.
         env:
           DISPATCHED_BY: ${{ github.event.client_payload.dispatched_by }}
         run: |
@@ -163,14 +164,14 @@ jobs:
           ref: ${{ github.event.client_payload.release_tag || inputs.release_tag }}
           fetch-depth: 0
 
-      # Detect channel from the release TAG (not package.json#version). Under
-      # the zero-commit-bump cadence (release.yml header lines 7-10), the
-      # tag is the only source of truth for the release's version — the
-      # public repo's commits at the tagged SHA carry the cycle-base version (e.g.
-      # `0.5.0-beta.5`), not the tag's version. Tag also drives manifest
-      # selection (beta-* vs latest-* channel files) for the stable-promotion
-      # case where tag (`v0.4.0`) and on-disk package.json (`0.4.0-beta.N`)
-      # diverge.
+      # Detect channel from the release TAG (not package.json#version). No
+      # release commits a version (release.yml's header describes the
+      # transient override for each path), so the tag is the only source
+      # of truth for the release's version — the public repo's commits at
+      # the tagged SHA carry the placeholder 0.0.0-unknown, never the tag's
+      # and never a `-beta.N`. Tag also drives manifest selection (beta-* vs
+      # latest-* channel files), since tag (`v0.4.0` or `v0.4.0-beta.N`) and
+      # on-disk package.json (`0.0.0-unknown`) always diverge.
       #
       # Fail-fast on anything other than `-beta.*` or plain semver —
       # `-rc.*` / `-canary.*` etc. would ship manifests with a channel
@@ -286,8 +287,39 @@ jobs:
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: "24"
+          node-version-file: .node-version
           package-manager-cache: false
+
+      - name: Refuse a stable that carries the release hold
+        if: steps.channel.outputs.channel == 'latest'
+        env:
+          RELEASE_TAG: ${{ github.event.client_payload.release_tag || inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "$GITHUB_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "$GITHUB_SHA"
+          hold="$RUNNER_TEMP/release-hold"
+          rm -rf "$hold"
+          mkdir -p "$hold"
+          git archive "$GITHUB_SHA" .github/scripts/release-hold.mjs scripts/git-clean-env.mjs | tar -x -C "$hold"
+          node "$hold/.github/scripts/release-hold.mjs" --candidate "refs/tags/${RELEASE_TAG}" --label "$RELEASE_TAG"
+
+      - name: Refuse a stable that lacks a fix a published stable shipped
+        if: steps.channel.outputs.channel == 'latest'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.client_payload.release_tag || inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "$GITHUB_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "$GITHUB_SHA"
+          guard="$RUNNER_TEMP/shipped-fix-containment"
+          rm -rf "$guard"
+          mkdir -p "$guard"
+          git archive "$GITHUB_SHA" .github/scripts/shipped-fix-containment.mjs scripts/git-clean-env.mjs | tar -x -C "$guard"
+          args=(--candidate "refs/tags/${RELEASE_TAG}" --label "$RELEASE_TAG")
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            args+=(--allow-published-repair "$RELEASE_TAG")
+          fi
+          node "$guard/.github/scripts/shipped-fix-containment.mjs" "${args[@]}"
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
@@ -295,6 +327,21 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Compile the i18n catalogs from the .po files this build ships
+        shell: bash
+        working-directory: packages/app
+        run: |
+          if grep -q '"i18n:compile"' package.json; then
+            pnpm_config_script_shell=$(command -v bash)
+            if command -v cygpath >/dev/null; then
+              pnpm_config_script_shell=$(cygpath -w "$pnpm_config_script_shell")
+            fi
+            export pnpm_config_script_shell
+            pnpm run i18n:compile
+          else
+            echo "packages/app/package.json defines no i18n:compile script, so this build compiles no i18n catalogs"
+          fi
 
       - name: Stage native-config prebuilt binaries
         id: stage
@@ -390,26 +437,20 @@ jobs:
           echo "staged $count native-config prebuilt binaries from run $run_id (commit $head_sha)"
           judge_staging "staged $count native-config binaries from run $run_id (commit $head_sha)"
 
-      # The workspace build produces native-config's host `.node` via `napi
-      # build` (turbo dep of the cli build), which needs a Rust toolchain —
-      # mirror release.yml's explicit pin.
-      - name: Setup Rust toolchain for the native-config build
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: stable
+      - name: Install the declared Rust toolchain
+        run: |
+          rustup toolchain install --no-self-update
+          rustc -vV
 
-      # PRD-6650: under the zero-commit-bump cadence (release.yml header
-      # lines 7-10), workspace package.json files on disk at the tagged SHA
-      # always lag the release tag. `tsdown` inlines
-      # `import pkgJson from "../package.json"` into
-      # `packages/cli/dist/constants-*.mjs` at build time, and
-      # `packages/cli/build:skill-asset` composes + copies both
-      # `packages/server/assets/skills/{project,discovery}/SKILL.md` into
-      # `packages/cli/dist/assets/...`. Both bake in during the workspace
-      # build below, so the override has to land here first.
+      # PRD-6650: no release commits a version (release.yml's header
+      # describes the transient override), so workspace package.json
+      # files on disk at the tagged SHA always lag the release tag.
+      # `tsdown` inlines `import pkgJson from "../package.json"` into
+      # `packages/cli/dist/constants-*.mjs` during the workspace build
+      # below, so the override has to land here first.
       #
-      # Mirrors release.yml (same `jq` loop over the five fixed-group packages
-      # + same `sed` regex against SKILL.md) so the workflows stay in lockstep.
+      # Mirrors release.yml (same `jq` loop over the five fixed-group
+      # packages) so the workflows stay in lockstep.
       - name: Override fixed-group versions on disk (zero-commit-bump cadence)
         env:
           VERSION: ${{ steps.channel.outputs.version }}
@@ -420,12 +461,7 @@ jobs:
             jq --arg v "$VERSION" '.version=$v' "$f" > "${f}.tmp"
             mv "${f}.tmp" "$f"
           done
-          for skill in packages/server/assets/skills/project/SKILL.md \
-                       packages/server/assets/skills/discovery/SKILL.md; do
-            sed -i'.bak' -E "s/^([[:space:]]+version:[[:space:]]+\")[^\"]+(\".*)$/\1${VERSION}\2/" "$skill"
-            rm -f "${skill}.bak"
-          done
-          echo "All fixed-group package.json files + both skill bundles' metadata.version now at ${VERSION} (in-memory only)."
+          echo "All fixed-group package.json files now at ${VERSION} (in-memory only)."
 
       - name: Build workspace (produces packages/cli/dist for extraResources)
         run: |
@@ -549,7 +585,7 @@ jobs:
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: "24"
+          node-version-file: .node-version
           package-manager-cache: false
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -562,6 +598,21 @@ jobs:
           # desktop-build.yml.
           ELECTRON_SKIP_REBUILD: "0"
         run: pnpm install --frozen-lockfile
+
+      - name: Compile the i18n catalogs from the .po files this build ships
+        shell: bash
+        working-directory: packages/app
+        run: |
+          if grep -q '"i18n:compile"' package.json; then
+            pnpm_config_script_shell=$(command -v bash)
+            if command -v cygpath >/dev/null; then
+              pnpm_config_script_shell=$(cygpath -w "$pnpm_config_script_shell")
+            fi
+            export pnpm_config_script_shell
+            pnpm run i18n:compile
+          else
+            echo "packages/app/package.json defines no i18n:compile script, so this build compiles no i18n catalogs"
+          fi
 
       # PRD-6650: same override as prepare, for the workspace build THIS job
       # does (the mac job stays self-contained on the proven signed-DMG path
@@ -577,12 +628,12 @@ jobs:
             jq --arg v "$VERSION" '.version=$v' "$f" > "${f}.tmp"
             mv "${f}.tmp" "$f"
           done
-          for skill in packages/server/assets/skills/project/SKILL.md \
-                       packages/server/assets/skills/discovery/SKILL.md; do
-            sed -i'.bak' -E "s/^([[:space:]]+version:[[:space:]]+\")[^\"]+(\".*)$/\1${VERSION}\2/" "$skill"
-            rm -f "${skill}.bak"
-          done
-          echo "All fixed-group package.json files + both skill bundles' metadata.version now at ${VERSION} (in-memory only)."
+          echo "All fixed-group package.json files now at ${VERSION} (in-memory only)."
+
+      - name: Install the declared Rust toolchain
+        run: |
+          rustup toolchain install --no-self-update
+          rustc -vV
 
       - name: Build workspace (produces packages/cli/dist/public for extraResources)
         run: |
@@ -831,10 +882,9 @@ jobs:
           # zero-commit-bump cadence the on-disk versions ALWAYS lag the
           # release tag, so this override is never a no-op for the Desktop's
           # own metadata. But it does NOT reach the CLI bundle's
-          # compile-time-inlined PACKAGE_VERSION or the bundled SKILL.md
-          # asset's metadata.version; those are baked in at Build time, so
-          # the workspace-wide on-disk override step above is what makes
-          # them match the tag. See PRD-6650.
+          # compile-time-inlined PACKAGE_VERSION, which is baked in at Build
+          # time, so the workspace-wide on-disk override step above is what
+          # makes it match the tag. See PRD-6650.
           set -euo pipefail
           WRAPPER="${RUNNER_TEMP}/retry-transient.mjs"
           WRAPPER_TMP="${WRAPPER}.tmp.$$"
@@ -865,7 +915,7 @@ jobs:
             exit 1
           fi
           echo "::notice::Retry wrapper materialized from workflow SHA ${GITHUB_WORKFLOW_SHA}."
-          node "$WRAPPER" --label "electron-builder (macOS)" --max-attempts 3 --deadline-epoch-ms "$PACKAGING_DEADLINE_EPOCH_MS" --attempt-timeout "30m" --retry-warning "A macOS packaging retry can create a duplicate Apple notarization submission; up to 3 attempts bound this to at most 2 duplicates." --shell -- "$PKG_CMD"
+          node "$WRAPPER" --label "electron-builder (macOS)" --max-attempts 3 --deadline-epoch-ms "$PACKAGING_DEADLINE_EPOCH_MS" --retry-warning "A macOS packaging retry can create a duplicate Apple notarization submission; up to 3 attempts bound this to at most 2 duplicates." --shell -- "$PKG_CMD"
 
       - name: Remove App Store Connect API key
         if: always()
@@ -919,6 +969,10 @@ jobs:
             exit 1
           fi
           echo "Attested $FOUND signed, notarized, stapled app bundle(s)."
+
+      - name: Assert the packaged server helper runs as Node
+        working-directory: packages/desktop
+        run: node scripts/assert-packaged-helper-runs-as-node.mjs dist-desktop "desktop-release (signed macOS .app)"
 
       - name: Verify a historical app can update in place
         if: matrix.variant != 'beta'
@@ -1019,6 +1073,16 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+      - name: Upload per-test results
+        if: ${{ !cancelled() && steps.dmg_smoke.outcome != 'skipped' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ok-per-test-results-desktop-release-macos-${{ matrix.variant }}-attempt${{ github.run_attempt }}
+          path: packages/desktop/test-results/desktop-smoke-packaged-results.json
+          retention-days: 14
+          if-no-files-found: warn
+
   build-windows:
     needs: prepare
     if: contains(needs.prepare.outputs.platforms, 'windows')
@@ -1054,7 +1118,7 @@ jobs:
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: "24"
+          node-version-file: .node-version
           package-manager-cache: false
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -1067,6 +1131,21 @@ jobs:
           # mac job.
           ELECTRON_SKIP_REBUILD: "0"
         run: pnpm install --frozen-lockfile
+
+      - name: Compile the i18n catalogs from the .po files this build ships
+        shell: bash
+        working-directory: packages/app
+        run: |
+          if grep -q '"i18n:compile"' package.json; then
+            pnpm_config_script_shell=$(command -v bash)
+            if command -v cygpath >/dev/null; then
+              pnpm_config_script_shell=$(cygpath -w "$pnpm_config_script_shell")
+            fi
+            export pnpm_config_script_shell
+            pnpm run i18n:compile
+          else
+            echo "packages/app/package.json defines no i18n:compile script, so this build compiles no i18n catalogs"
+          fi
 
       - name: Download workspace bundle
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -1191,7 +1270,7 @@ jobs:
             exit 1
           fi
           echo "::notice::Retry wrapper materialized from workflow SHA ${GITHUB_WORKFLOW_SHA}."
-          node "$WRAPPER" --label "electron-builder (Windows)" --max-attempts 3 --deadline-epoch-ms "$PACKAGING_DEADLINE_EPOCH_MS" --attempt-timeout "15m" --shell -- "$PKG_CMD"
+          node "$WRAPPER" --label "electron-builder (Windows)" --max-attempts 3 --deadline-epoch-ms "$PACKAGING_DEADLINE_EPOCH_MS" --shell -- "$PKG_CMD"
 
       # This workflow always executes main's YAML (repository_dispatch), while
       # the checkout above follows `client_payload[ref]` — typically a tag
@@ -1340,6 +1419,16 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+      - name: Upload per-test results
+        if: ${{ !cancelled() && steps.winterm.outputs.ships == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ok-per-test-results-desktop-release-windows-${{ matrix.variant }}-attempt${{ github.run_attempt }}
+          path: packages/desktop/test-results/vitest-*.json
+          retention-days: 14
+          if-no-files-found: warn
+
   # Two cells, each on a NATIVE runner for its arch. Cross-compiling the arm64
   # native deps from an x64 host is impractical (pnpm installs only the
   # host-matching `@parcel/watcher-*` prebuild, and the generated Linux config
@@ -1368,9 +1457,9 @@ jobs:
       fail-fast: false
       matrix:
         variant: ${{ fromJSON(contains(github.event.client_payload.release_tag || inputs.release_tag, '-beta.') && '["legacy-beta","beta"]' || '["stable"]') }}
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        runner: [ubuntu-26.04, ubuntu-24.04-arm]
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-26.04
             arch: x64
             targets: deb:x64 rpm:x64
             unpacked_dir: linux-unpacked
@@ -1392,7 +1481,7 @@ jobs:
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: "24"
+          node-version-file: .node-version
           package-manager-cache: false
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -1403,6 +1492,21 @@ jobs:
         env:
           ELECTRON_SKIP_REBUILD: "1"
         run: pnpm install --frozen-lockfile
+
+      - name: Compile the i18n catalogs from the .po files this build ships
+        shell: bash
+        working-directory: packages/app
+        run: |
+          if grep -q '"i18n:compile"' package.json; then
+            pnpm_config_script_shell=$(command -v bash)
+            if command -v cygpath >/dev/null; then
+              pnpm_config_script_shell=$(cygpath -w "$pnpm_config_script_shell")
+            fi
+            export pnpm_config_script_shell
+            pnpm run i18n:compile
+          else
+            echo "packages/app/package.json defines no i18n:compile script, so this build compiles no i18n catalogs"
+          fi
 
       - name: Download workspace bundle
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -1493,7 +1597,7 @@ jobs:
             exit 1
           fi
           echo "::notice::Retry wrapper materialized from workflow SHA ${GITHUB_WORKFLOW_SHA}."
-          node "$WRAPPER" --label "electron-builder (Linux ${LINUX_TARGETS})" --max-attempts 3 --deadline-epoch-ms "$PACKAGING_DEADLINE_EPOCH_MS" --attempt-timeout "15m" --shell -- "$PKG_CMD"
+          node "$WRAPPER" --label "electron-builder (Linux ${LINUX_TARGETS})" --max-attempts 3 --deadline-epoch-ms "$PACKAGING_DEADLINE_EPOCH_MS" --shell -- "$PKG_CMD"
 
       - name: Install the packaged deb's runtime dependencies
         working-directory: packages/desktop
@@ -1576,6 +1680,16 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+      - name: Upload per-test results
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ok-per-test-results-desktop-release-linux-${{ matrix.arch }}-${{ matrix.variant }}-attempt${{ github.run_attempt }}
+          path: packages/desktop/test-results/vitest-*.json
+          retention-days: 14
+          if-no-files-found: warn
+
   # The single publication point: nothing above this job touches the GitHub
   # Release. Downloads every platform's staged assets, asserts the complete
   # cross-platform inventory, uploads, then re-queries the Release and
@@ -1597,7 +1711,7 @@ jobs:
       needs.build-macos.result == 'success' &&
       (needs.build-windows.result == 'success' || !contains(needs.prepare.outputs.required, 'windows')) &&
       (needs.build-linux.result == 'success' || !contains(needs.prepare.outputs.required, 'linux'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     cache-mode: none
     # Sized to the upload retry envelope: 3 bounded 300s attempts + backoffs
     # (see the upload step) plus download/verify overhead.
@@ -1781,6 +1895,9 @@ jobs:
   # that).
   finalize:
     needs: [prepare, build-macos, publish-assets]
+    concurrency:
+      group: ${{ needs.prepare.outputs.channel == 'latest' && 'ok-stable-publication' || format('desktop-finalize-{0}', github.run_id) }}
+      cancel-in-progress: false
     outputs:
       published: ${{ steps.publish.outputs.published }}
     # `!cancelled()` for the same reason as publish-assets: under a degraded
@@ -1791,7 +1908,7 @@ jobs:
       !cancelled() &&
       needs.publish-assets.result == 'success' &&
       needs.build-macos.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     cache-mode: none
     timeout-minutes: 15
     permissions:
@@ -1812,6 +1929,8 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Refuse to promote a superseded stable on a re-run
         if: success() && needs.prepare.outputs.channel == 'latest' && github.run_attempt != '1' && github.event_name != 'workflow_dispatch'
@@ -1834,14 +1953,6 @@ jobs:
             exit 1
           fi
 
-      # Marker-delimited (`<!-- ok-downloads:start/end -->`) so re-renders are
-      # idempotent and the rest of the body — the changelog and the beta
-      # cadence's hidden consumed-set marker, which compute-next-beta.mjs
-      # reads back from the previous beta's body — passes through
-      # byte-identical. The announcement steps below and
-      # aggregate-stable-changelog.mjs each strip the block on their side.
-      # Best-effort: a release with assets but no Downloads table is a
-      # cosmetic gap, not a reason to strand the release as a draft.
       - name: Render the Downloads table into the release body
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1866,6 +1977,22 @@ jobs:
           else
             echo "::warning::render-release-downloads.mjs failed for ${RELEASE_TAG}; the release keeps its previous body."
           fi
+
+      - name: Refuse a stable that carries the release hold
+        if: success() && needs.prepare.outputs.channel == 'latest'
+        run: node .github/scripts/release-hold.mjs --candidate "refs/tags/${RELEASE_TAG}" --label "$RELEASE_TAG"
+
+      - name: Refuse a stable that lacks a fix a published stable shipped
+        if: success() && needs.prepare.outputs.channel == 'latest'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          args=(--candidate "refs/tags/${RELEASE_TAG}" --label "$RELEASE_TAG")
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            args+=(--allow-published-repair "$RELEASE_TAG")
+          fi
+          node .github/scripts/shipped-fix-containment.mjs "${args[@]}"
 
       # Closes the publish-window race: release.yml / promote-stable.yml
       # create the GitHub Release as --draft so it stays out of the .atom
@@ -1908,6 +2035,69 @@ jobs:
           fi
 
           echo "published=true" >> "$GITHUB_OUTPUT"
+
+      - name: Detect bridge App for the docs changelog refresh
+        id: docs-bridge
+        if: success() && needs.prepare.outputs.channel == 'latest'
+        env:
+          OK_RELEASE_BRIDGE_APP_ID: ${{ secrets.OK_RELEASE_BRIDGE_APP_ID }}
+        run: |
+          if [[ -n "${OK_RELEASE_BRIDGE_APP_ID:-}" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint docs refresh token (bridge App)
+        id: docs-bridge-token
+        if: success() && steps.docs-bridge.outputs.configured == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          client-id: Iv23lii4qS2FAc6tkzfI
+          private-key: ${{ secrets.OK_RELEASE_BRIDGE_APP_PRIVATE_KEY }}
+          owner: inkeep
+          repositories: agents-private
+
+      - name: Refresh the docs changelog on agents-private
+        if: success() && needs.prepare.outputs.channel == 'latest'
+        env:
+          BRIDGE_CONFIGURED: ${{ steps.docs-bridge.outputs.configured }}
+          MINT_OUTCOME: ${{ steps.docs-bridge-token.outcome }}
+          GH_TOKEN: ${{ steps.docs-bridge-token.outputs.token }}
+        run: |
+          set -uo pipefail
+          RECOVERY="gh workflow run public-open-knowledge-docs-changelog-deploy.yml --repo inkeep/agents-private -f reason=\"${RELEASE_TAG} published\""
+          missed() {
+            echo "::warning::$1, so the docs changelog does not list ${RELEASE_TAG} until it is rebuilt by hand: ${RECOVERY}"
+            {
+              echo "### Docs changelog not refreshed for ${RELEASE_TAG}"
+              echo ""
+              echo "$1. The npm publish is not affected. Rebuild the changelog by hand:"
+              echo ""
+              echo "    ${RECOVERY}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+          if [[ "${BRIDGE_CONFIGURED:-}" != "true" ]]; then
+            missed "OK_RELEASE_BRIDGE_APP_ID is not set, so ok-stable-published was not sent"
+            exit 0
+          fi
+          if [[ "${MINT_OUTCOME:-}" != "success" || -z "${GH_TOKEN:-}" ]]; then
+            missed "The bridge App token could not be minted (mint step: ${MINT_OUTCOME:-not run}), so ok-stable-published was not sent"
+            exit 0
+          fi
+          SELF_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if ! payload=$(jq -nc --arg tag "$RELEASE_TAG" --arg by "$SELF_URL" \
+            '{event_type: "ok-stable-published", client_payload: {release_tag: $tag, dispatched_by: $by}}'); then
+            missed "Building the ok-stable-published payload failed, so it was not sent"
+            exit 0
+          fi
+          if gh api -X POST "repos/inkeep/agents-private/dispatches" --input - <<<"$payload" >/dev/null; then
+            echo "Dispatched ok-stable-published to agents-private for ${RELEASE_TAG}; the docs changelog rebuilds there."
+            echo "Dispatched \`ok-stable-published\` to agents-private for ${RELEASE_TAG}; the docs changelog rebuilds there." >> "$GITHUB_STEP_SUMMARY"
+          else
+            missed "Dispatching ok-stable-published to agents-private failed"
+          fi
 
       # FR5b — the npm stable publish sits downstream of the DMG smoke gate
       # (build-macos fails on a bad verdict, which skips this whole job) AND
@@ -1953,13 +2143,6 @@ jobs:
             if [[ -n "$CHILD" ]]; then echo "- Run: ${CHILD}"; else echo "- (run link unresolved; open release.yml)"; fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # The on-site changelog (/docs/changelog) is rebuilt by
-      # public-open-knowledge-docs-changelog-deploy.yml (on agents-private), which
-      # fires the Vercel deploy hook when the `main-reset` commit rewrites
-      # packages/cli/CHANGELOG.md on main. Triggering here would be too early — the
-      # changelog reads that file, and it isn't updated until main-reset lands after
-      # this release completes.
-
       # Announce STABLE releases to Slack. Gated on channel=latest so betas
       # stay silent — every *-beta.N cut also flows through this job (on
       # channel=beta) and must not post. Placed AFTER the promote step and
@@ -1999,7 +2182,7 @@ jobs:
           # through. A failed fetch is not fatal: the builder degrades to the
           # header + link message on empty input. The builder strips the
           # Downloads block + consumed-set marker on its side.
-          NOTES="$(gh release view "$RELEASE_TAG" --json body --jq '.body' 2>/dev/null || true)"
+          NOTES="$(timeout --kill-after=5s 30s gh release view "$RELEASE_TAG" --json body --jq '.body' 2>/dev/null)" || NOTES=""
           # The builder emits the whole Block Kit payload as JSON (so $VERSION /
           # $RELEASE_URL are JSON-escaped — a stray quote in a tag would
           # otherwise corrupt the body), converts the notes from GitHub markdown
@@ -2034,7 +2217,7 @@ jobs:
           # The failing curl sits in an `if` condition, which `set -e` does
           # not treat as fatal — a Slack outage routes to the else/warning
           # and the step still exits 0.
-          if curl -sS --fail -X POST -H 'Content-type: application/json' --data "$payload" "$WEBHOOK_URL"; then
+          if curl -sS --fail --connect-timeout 10 --max-time 30 -X POST -H 'Content-type: application/json' --data "$payload" "$WEBHOOK_URL"; then
             echo "Posted stable-release announcement for ${RELEASE_TAG} to Slack."
           else
             echo "::warning::Slack announcement failed for ${RELEASE_TAG} (release is published; notification is best-effort)."
@@ -2053,11 +2236,11 @@ jobs:
             exit 0
           fi
           RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
-          NOTES="$(gh release view "$RELEASE_TAG" --json body --jq '.body' 2>/dev/null || true)"
+          NOTES="$(timeout --kill-after=5s 30s gh release view "$RELEASE_TAG" --json body --jq '.body' 2>/dev/null)" || NOTES=""
           # Discord renders no markdown tables; strip the marker-delimited
           # Downloads block (the release page keeps it — the embed links
           # there).
-          NOTES="$(printf '%s' "$NOTES" | sed '/<!-- ok-downloads:start -->/,/<!-- ok-downloads:end -->/d')"
+          NOTES="$(printf '%s' "$NOTES" | sed -e '/<!-- ok-downloads:start -->/,/<!-- ok-downloads:end -->/d' -e '/^<!-- ok-notes-source: .* -->$/d')"
           NOTES_LIMIT=3500
           if [[ "${#NOTES}" -gt "$NOTES_LIMIT" ]]; then
             NOTES="${NOTES:0:$NOTES_LIMIT}…"
@@ -2080,8 +2263,8 @@ jobs:
                   ) }
               ]
             }')"
-          if curl -sS --fail -X POST -H 'Content-Type: application/json' --data "$payload" "$DISCORD_WEBHOOK_URL"; then
-            echo "Posted stable-release announcement for ${RELEASE_TAG} to Discord."
+          if curl -sS --fail --connect-timeout 10 --max-time 30 -X POST -H 'Content-Type: application/json' --data "$payload" "$DISCORD_WEBHOOK_URL"; then
+            echo "Discord announcement request completed for ${RELEASE_TAG} (best-effort; saved-message confirmation not checked)."
           else
             echo "::warning::Discord announcement failed for ${RELEASE_TAG} (release is published; notification is best-effort)."
           fi
@@ -2089,7 +2272,7 @@ jobs:
   release-consumers:
     needs: finalize
     if: ${{ !cancelled() && needs.finalize.outputs.published == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     cache-mode: none
     timeout-minutes: 5
     permissions:
@@ -2128,15 +2311,12 @@ jobs:
 
   alert:
     needs: [prepare, build-macos, build-windows, build-linux, publish-assets, finalize]
-    # "The release did not publish" — not "some job failed": under a degraded
-    # required-set a non-required platform can fail while the release still
-    # publishes, and paging on that would train readers to ignore the alert.
     # finalize != success covers every blocked shape transitively (prepare,
     # a required build, publish-assets, or finalize itself). prepare failing
     # before channel detection leaves the channel output empty; the steps
     # below treat that as "not stable" (FR5c skips, STUCK-DRAFT still logs).
     if: ${{ !cancelled() && needs.finalize.result != 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     cache-mode: none
     timeout-minutes: 10
     permissions:
@@ -2184,12 +2364,6 @@ jobs:
       # Stable only, matching the smoke gate's own scope. A failed beta cut
       # keeps the STUCK-DRAFT warning below; paging the release channel for
       # every beta hiccup would train readers to ignore the alert.
-      #
-      # Same destination as the release announcement: this alert is the
-      # negative of that message (the release that did NOT ship), so it belongs
-      # with the notes rather than in the product channel. SLACK_WEBHOOK_URL
-      # remains the fallback, with the same unset -> ::notice:: -> skip
-      # tolerance.
       #
       # Slack only, deliberately — rationale lives in the module docstring of
       # .github/scripts/build-smoke-alert-payload.mjs. Ratcheted by
@@ -2254,13 +2428,26 @@ jobs:
           [[ "${RESULT_PUBLISH}" == "failure" ]] && blocked+=("asset publication")
           # finalize is the alert's own trigger, so it is only worth naming when
           # nothing blocking upstream failed — otherwise every page would list it.
-          if [[ ${#blocked[@]} -eq 0 && "${RESULT_FINALIZE}" == "failure" ]]; then
+          if [[ ${#blocked[@]} -eq 0 && ( "${RESULT_FINALIZE}" == "failure" || "${RESULT_FINALIZE}" == "cancelled" ) ]]; then
             blocked+=("finalize")
           fi
           BLOCKED_BY=""
           for b in ${blocked[@]+"${blocked[@]}"}; do
             BLOCKED_BY="${BLOCKED_BY:+${BLOCKED_BY}, }${b}"
           done
+          if [[ "$RESULT_FINALIZE" == "cancelled" && "$BLOCKED_BY" == "finalize" ]]; then
+            RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            TEXT="RELEASE FINALIZATION CANCELLED: ${RELEASE_TAG}: finalize was cancelled. Inspect the Release and run before recovery; publication may have completed. ${RUN_URL}"
+            echo "::warning::${TEXT}"
+            webhook="${SLACK_RELEASES_WEBHOOK_URL:-${SLACK_WEBHOOK_URL:-}}"
+            if [[ -n "$webhook" ]]; then
+              payload="$(jq -nc --arg text "$TEXT" '{text: $text}')"
+              if ! curl -sS --fail --connect-timeout 10 --max-time 30 -X POST -H 'Content-Type: application/json' --data "$payload" "$webhook"; then
+                echo "::warning::The cancelled-finalize alert failed to POST; inspect the run and Release."
+              fi
+            fi
+            exit 0
+          fi
           REASON="${SMOKE_REASON:-the release pipeline failed before completing — see the run}"
           if [[ "${RETRY_OUTCOME:-}" == "failure" ]]; then
             REASON="${REASON}. Not re-run automatically: the re-run decision failed, see the run"
@@ -2288,37 +2475,27 @@ jobs:
               # Never go silent. Losing the formatting is a degradation; losing
               # the page is the outage this step exists to prevent.
               echo "::warning::Smoke-alert payload builder unavailable for ${RELEASE_TAG}; sending the plain-text alert."
-              payload="$(jq -nc --arg t "🚨 RELEASE BLOCKED: ${RELEASE_TAG} — ${BLOCKED_BY:-pipeline ${VERDICT}} — nothing shipped. ${REASON} ${RUN_URL}" '{text: $t}')"
+              payload="$(jq -nc --arg t "🚨 RELEASE BLOCKED: ${RELEASE_TAG} — ${BLOCKED_BY:-pipeline ${VERDICT}} — publication may have completed. Inspect the Release, npm and run before recovery. ${REASON} ${RUN_URL}" '{text: $t}')"
             fi
             # The failing curl sits in an `if` condition, so a webhook outage
             # routes to the warning instead of masking the failure.
-            if curl -sS --fail -X POST -H 'Content-type: application/json' --data "$payload" "$webhook"; then
+            if curl -sS --fail --connect-timeout 10 --max-time 30 -X POST -H 'Content-type: application/json' --data "$payload" "$webhook"; then
               echo "Posted the ${label} smoke alert for ${RELEASE_TAG}."
             else
-              echo "::warning::${label} smoke alert failed to POST for ${RELEASE_TAG} — the release is still blocked; only the notification was lost."
+              echo "::warning::${label} smoke alert failed to POST for ${RELEASE_TAG} — delivery is unconfirmed; inspect the Release, npm and run before recovery."
             fi
           }
 
           post "${SLACK_RELEASES_WEBHOOK_URL:-${SLACK_WEBHOOK_URL:-}}" Slack
           # The annotation is emitted IN ADDITION to the page, so the run page
           # tells the same story as the channel.
-          echo "::error::RELEASE BLOCKED: ${RELEASE_TAG} — ${BLOCKED_BY:-pipeline ${VERDICT}} — ${REASON}. The Release stays a draft and npm latest is untouched."
+          echo "::error::RELEASE BLOCKED: ${RELEASE_TAG} — ${BLOCKED_BY:-pipeline ${VERDICT}} — ${REASON}. Publication may have completed. Inspect the Release, npm and run before recovery."
 
-      # Lightweight discoverability for stuck-draft state. NOT a substitute
-      # for full paging observability — this is a zero-cost log marker that
-      # makes stuck drafts findable via GitHub Actions log search using the
-      # STUCK-DRAFT tag. Operators bisecting a missing release can grep
-      # workflow logs for the tag, then run the recovery command in the
-      # message. (Recovery re-publishes nothing by itself — re-run the failed
-      # jobs first so publish-assets has verified the inventory.)
       - name: Warn on stuck draft
         run: |
-          # Recovery command mirrors the Promote step's combined PATCH shape
-          # (--draft=false [--latest]) — empirically atomic per GitHub's
-          # post-state evaluation of make_latest.
-          if [[ "$CHANNEL" == "latest" ]]; then
-            RECOVERY="gh release edit ${RELEASE_TAG} --draft=false --latest"
+          if [[ "$CHANNEL" == "beta" ]]; then
+            RECOVERY="Follow RELEASES.md, Recovering unpublished beta installers; re-dispatch desktop-release.yml for this tag so the build and inventory gates pass before publication."
           else
-            RECOVERY="gh release edit ${RELEASE_TAG} --draft=false"
+            RECOVERY="Follow RELEASES.md, Recovery workflow revision and Resuming a blocked cut; stable recovery must publish through a lock-bearing finalize. Never recover a tag the shipped-fix check or the release hold refused."
           fi
-          echo "::warning::STUCK-DRAFT: Release ${RELEASE_TAG} may be stuck as draft (channel=${CHANNEL:-unknown}). Recovery after the failed jobs are re-run green: ${RECOVERY}"
+          echo "::warning::STUCK-DRAFT: Release ${RELEASE_TAG} may be stuck as draft (channel=${CHANNEL:-unknown}). ${RECOVERY}"

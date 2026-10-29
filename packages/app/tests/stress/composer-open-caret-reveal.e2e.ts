@@ -4,12 +4,13 @@ import { join } from 'node:path';
 import type { Page } from '@playwright/test';
 import { CARET_REVEAL_GAP_PX } from '../../src/editor/caret-reveal';
 import {
+  DOCUMENT_SCROLL_HOST_SELECTOR,
   FULL_PAGE_CM_HOST_SELECTORS,
   FULL_PAGE_CM_SCROLLPORTS,
   type FullPageCmHost,
   SCROLL_PIN_SLACK_PX,
 } from '../../src/editor/document-scrollports';
-import { expect, test, toggleMode } from './_helpers';
+import { acpCatalogBody, expect, test, toggleMode } from './_helpers';
 
 const COMPOSER_CARD = '[data-testid="bottom-composer"] > div';
 const WYSIWYG_SCROLLPORT = '[data-testid="editor-scroll-container"]';
@@ -111,11 +112,13 @@ const occlusionClearanceOf = (result: CaseResult): number =>
   occlusionTopOf(result) - result.after.bottom;
 
 async function readComposerHeight(page: Page): Promise<number> {
-  return page.evaluate(() =>
-    Number.parseFloat(
-      getComputedStyle(document.documentElement).getPropertyValue('--ask-composer-height') || '0',
-    ),
-  );
+  return page.evaluate((scrollHostSelector) => {
+    const scrollHost = document.querySelector(scrollHostSelector);
+    if (!scrollHost) return 0;
+    return Number.parseFloat(
+      getComputedStyle(scrollHost).getPropertyValue('--ask-composer-height') || '0',
+    );
+  }, DOCUMENT_SCROLL_HOST_SELECTOR);
 }
 
 async function readCardTop(page: Page): Promise<number> {
@@ -528,6 +531,9 @@ function assertCaretRevealed(result: CaseResult): void {
   ).toBeLessThanOrEqual(CARET_REVEAL_GAP_PX + (result.after.bottom - result.after.top));
 }
 
+test.beforeEach(async ({ page }) => {
+  await page.route('**/api/acp/catalog', (route) => route.fulfill({ json: acpCatalogBody([]) }));
+});
 test.describe('opening the Ask AI composer reveals the caret it would otherwise bury', () => {
   test.setTimeout(CASE_TIMEOUT_MS);
 

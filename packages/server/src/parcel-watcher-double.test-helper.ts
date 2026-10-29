@@ -14,6 +14,7 @@ interface Registration extends NativeSubscriptionDouble {
 }
 
 const registrations: Registration[] = [];
+const failingReleases = new Set<string>();
 
 function register(dir: string, callback: SubscribeCallback): Registration {
   let releases = 0;
@@ -33,9 +34,14 @@ function register(dir: string, callback: SubscribeCallback): Registration {
     release: async () => {
       releases += 1;
       for (const { events, error } of queuedForRelease.splice(0)) await deliver(events, error);
+      if (failingReleases.delete(dir)) {
+        throw new Error(`the watcher double failed to release ${dir}`);
+      }
     },
   };
 }
+
+const refusals = new Map<string, number>();
 
 const parcelWatcherDouble = {
   subscribe(
@@ -43,6 +49,11 @@ const parcelWatcherDouble = {
     callback: SubscribeCallback,
     _options?: Options,
   ): Promise<AsyncSubscription> {
+    const refused = refusals.get(resolve(dir)) ?? 0;
+    if (refused > 0) {
+      refusals.set(resolve(dir), refused - 1);
+      return Promise.reject(new Error(`the watcher double refused to watch ${dir}`));
+    }
     const registration = register(resolve(dir), callback);
     registrations.push(registration);
     return Promise.resolve({ unsubscribe: () => registration.release() });
@@ -59,6 +70,26 @@ export const parcelWatcherModule = { default: parcelWatcherDouble, ...parcelWatc
 
 export function forgetNativeSubscriptions(): void {
   registrations.length = 0;
+  refusals.clear();
+  failingReleases.clear();
+}
+
+export function failNextNativeRelease(dir: string): void {
+  failingReleases.add(resolve(dir));
+}
+
+export function refuseNativeSubscriptions(dir: string, count: number): void {
+  refusals.set(resolve(dir), count);
+}
+
+export function nativeSubscriptionCount(dir: string): number {
+  return registrations.filter((registration) => registration.dir === dir).length;
+}
+
+export function latestNativeSubscriptionOn(dir: string): NativeSubscriptionDouble {
+  const latest = registrations.filter((registration) => registration.dir === dir).at(-1);
+  if (!latest) throw new Error(`no native subscription on ${dir}`);
+  return latest;
 }
 
 export function nativeSubscriptionDirs(): string[] {

@@ -13,6 +13,7 @@ import { Plural, Trans, useLingui } from '@lingui/react/macro';
 import { Check, FileText, Folder, GitBranch, Hash, Sparkles } from 'lucide-react';
 import {
   type Dispatch,
+  Fragment,
   lazy,
   type KeyboardEvent as ReactKeyboardEvent,
   type SetStateAction,
@@ -42,7 +43,7 @@ import {
   buildWorkspaceEntries,
   classifyOmnibarSearchHint,
   fetchWorkspaceSearchEntries,
-  matchesCommandQuery,
+  rankRows,
   SEMANTIC_RESULT_LIMIT,
   searchWorkspaceEntries,
   splitTextByQueryMatches,
@@ -78,6 +79,7 @@ import {
   CommandItem,
   CommandList,
   CommandShortcut,
+  useSelectFirstItemOn,
 } from '@/components/ui/command';
 import { Kbd } from '@/components/ui/kbd';
 import { Spinner } from '@/components/ui/spinner';
@@ -87,12 +89,8 @@ import { useCreateBlankSkill } from '@/hooks/use-create-blank-skill';
 import { useIsEmbedded } from '@/hooks/use-is-embedded';
 import { useSemanticSearchStatus } from '@/hooks/use-semantic-search-status';
 import { useWorktrees } from '@/hooks/use-worktrees';
-import type {
-  OkDesktopBridge,
-  OkMenuAction,
-  OkMenuActionOrigin,
-  RecentProjectEntry,
-} from '@/lib/desktop-bridge-types';
+import { useBugReport } from '@/lib/bug-report-capture';
+import type { OkDesktopBridge, OkMenuAction, RecentProjectEntry } from '@/lib/desktop-bridge-types';
 import { hashFromDocName } from '@/lib/doc-hash';
 import { runWithToast as runWithToastBase } from '@/lib/error-state';
 import { openExternalUrl as openExternalUrlViaHost } from '@/lib/external-link';
@@ -104,7 +102,10 @@ import {
 } from '@/lib/keyboard-shortcuts';
 import { emitLocalMenuAction } from '@/lib/local-menu-action-bus';
 import { isOverlayLayerOpen } from '@/lib/overlay-layers';
+import { revealEditor } from '@/lib/reveal-editor';
+import { physicalSide, useChatHistorySide } from '@/lib/sidebar-side-store';
 import { useSingleFileMode } from '@/lib/single-file-mode';
+import { useDocumentDirection } from '@/lib/use-document-direction';
 import { useWorkspace } from '@/lib/use-workspace';
 import { cn } from '@/lib/utils.ts';
 import { useViewMenuState } from '@/lib/view-menu-state-store';
@@ -133,6 +134,7 @@ interface CommandPaletteProps {
 }
 
 function navigateToDocHash(docName: string): void {
+  revealEditor();
   window.location.assign(hashFromDocName(docName));
 }
 
@@ -283,7 +285,7 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
   const [createDialogKind, setCreateDialogKind] = useState<'file' | 'folder' | null>(null);
   const [seedDialogOpen, setSeedDialogOpen] = useState(false);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
-  const [reportBugOrigin, setReportBugOrigin] = useState<OkMenuActionOrigin | null>(null);
+  const bugReport = useBugReport();
 
   const [reportBugHistoryOpen, setReportBugHistoryOpen] = useState(false);
   const [historyEverOpened, setHistoryEverOpened] = useState(false);
@@ -300,6 +302,7 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
   );
   const tagsListFetchedRef = useRef(false);
   const listRef = useRef<HTMLDivElement>(null);
+  useSelectFirstItemOn(listRef, deferredQuery);
   const inputRef = useRef<HTMLInputElement>(null);
   const semanticAbortRef = useRef<AbortController | null>(null);
   const semanticTimerRef = useRef<number | null>(null);
@@ -651,20 +654,16 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
     searchStatus === 'loading' &&
     !showNavigation &&
     !showSearchPreparing;
-  const showProjectRecents =
-    !inExclusiveMode &&
-    bridge !== null &&
-    switchableProjects.length > 0 &&
-    (trimmedDeferredQuery === '' ||
-      switchableProjects.some((row) =>
-        matchesCommandQuery(`${row.name} ${row.path}`, deferredQuery, ['open recent project']),
-      ));
-  const matchedWorktrees = switchableWorktrees.filter(
-    (entry) =>
-      trimmedDeferredQuery === '' ||
-      matchesCommandQuery(entry.branch ?? '', deferredQuery, ['worktree branch']),
-  );
-  const showWorktrees = !inExclusiveMode && bridge !== null && matchedWorktrees.length > 0;
+  const rankedProjects = rankRows(switchableProjects, deferredQuery, (row) => ({
+    label: `${row.name} ${row.path}`,
+    keywords: ['open recent project'],
+  })).slice(0, 10);
+  const showProjectRecents = !inExclusiveMode && bridge !== null && rankedProjects.length > 0;
+  const rankedWorktrees = rankRows(switchableWorktrees, deferredQuery, (entry) => ({
+    label: entry.branch ?? '',
+    keywords: ['worktree branch'],
+  })).slice(0, 10);
+  const showWorktrees = !inExclusiveMode && bridge !== null && rankedWorktrees.length > 0;
   const isEmbedded = useIsEmbedded();
   const hostAgentTargets = VISIBLE_TARGETS.filter((target) =>
     isTargetOfferedOnHost(target, {
@@ -672,19 +671,15 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
       installed: installStates[target.id]?.installed,
     }),
   );
+  const rankedAgentTargets = rankRows(hostAgentTargets, deferredQuery, (target) => {
+    const displayName = target.displayName;
+    return {
+      label: t`Open with AI ${displayName} Desktop`,
+      keywords: [target.id, 'agent handoff', 'open in'],
+    };
+  });
   const showAgentGroup =
-    !inExclusiveMode &&
-    !isEmbedded &&
-    handoffInput !== null &&
-    ((trimmedDeferredQuery === '' && hostAgentTargets.length > 0) ||
-      hostAgentTargets.some((target) => {
-        const displayName = target.displayName;
-        return matchesCommandQuery(t`Open with AI ${displayName} Desktop`, deferredQuery, [
-          target.id,
-          'agent handoff',
-          'open in',
-        ]);
-      }));
+    !inExclusiveMode && !isEmbedded && handoffInput !== null && rankedAgentTargets.length > 0;
   const tagListItems =
     paletteMode.kind === 'tag-list' ? filterTagList(tagsList, paletteMode.query) : [];
   const showTagListEmpty =
@@ -693,6 +688,7 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
     paletteMode.kind === 'tag-docs' && tagDocsStatus === 'success' && tagDocs.length === 0;
 
   const viewMenuState = useViewMenuState();
+  const chatHistorySide = physicalSide(useChatHistorySide(), useDocumentDirection());
   const runMenuAction = (action: OkMenuAction) => {
     onOpenChange(false);
     emitLocalMenuAction(action, { launcherBorne: true });
@@ -710,6 +706,7 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
     activeDocName,
     contextualTargetKind: projectContextualTargetKind(activeTarget),
     viewMenuState,
+    chatHistorySide,
     emitMenuAction: runMenuAction,
     runAction,
     openExternalUrl,
@@ -717,7 +714,7 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
     openNewItemDialog: (kind) => setCreateDialogKind(kind),
     openSeedDialog: () => setSeedDialogOpen(true),
     openCreateProjectDialog: () => setCreateProjectOpen(true),
-    openReportBugDialog: () => setReportBugOrigin({ launcherBorne: true }),
+    reportBug: () => bugReport.start({ launcherBorne: true }, () => onOpenChange(false)),
     openBugReportHistory: () => {
       setHistoryEverOpened(true);
       setReportBugHistoryOpen(true);
@@ -728,12 +725,15 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
   };
   const visibleFixedCommands = inExclusiveMode
     ? []
-    : PALETTE_COMMANDS.flatMap((cmd) => {
-        if (!cmd.available(paletteCtx)) return [];
-        if (cmd.visibility === 'search-only' && trimmedDeferredQuery === '') return [];
-        const label = cmd.label(paletteCtx);
-        return matchesCommandQuery(label, deferredQuery, cmd.keywords) ? [{ cmd, label }] : [];
-      });
+    : rankRows(
+        PALETTE_COMMANDS.flatMap((cmd) => {
+          if (!cmd.available(paletteCtx)) return [];
+          if (cmd.visibility === 'search-only' && trimmedDeferredQuery === '') return [];
+          return [{ cmd, label: cmd.label(paletteCtx) }];
+        }),
+        deferredQuery,
+        ({ cmd, label }) => ({ label, keywords: cmd.keywords }),
+      ).map(({ row, rank }) => ({ ...row, rank }));
   const hasVisibleFixedCommand = visibleFixedCommands.length > 0;
   const commandGroupHeading = (group: PaletteCommandGroup): string => {
     switch (group) {
@@ -927,6 +927,161 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
     exitSemanticMode();
   }
 
+  const firstRank = (rows: readonly { rank: number }[]) =>
+    rows[0]?.rank ?? Number.POSITIVE_INFINITY;
+  const commandGroupBlock = (group: PaletteCommandGroup) => ({
+    key: group,
+    rank: firstRank(visibleFixedCommands.filter((row) => row.cmd.group === group)),
+    node: renderCommandGroup(group),
+  });
+  const rankedCommandBlocks = [
+    commandGroupBlock('commands'),
+    {
+      key: 'open-with-ai',
+      rank: firstRank(rankedAgentTargets),
+      node: showAgentGroup ? (
+        <CommandGroup heading={t`Open with AI`}>
+          {rankedAgentTargets.map(({ row: target }) => {
+            const installState = installStates[target.id];
+            const enabled = installState.installed === true && handoffInput !== null;
+            const displayName = target.displayName;
+            const hint =
+              installState.installed === null
+                ? t`Detecting`
+                : installState.installed === false
+                  ? t`Not installed`
+                  : null;
+            const accessibleLabel = hint
+              ? t`Open with AI ${displayName} Desktop, ${hint}`
+              : t`Open with AI ${displayName} Desktop`;
+
+            return (
+              <CommandItem
+                key={target.id}
+                value={`send to ai ${target.displayName} desktop ${target.id} agent open in`}
+                disabled={!enabled}
+                onSelect={() => {
+                  if (!enabled || !handoffInput) return;
+                  onOpenChange(false);
+                  void dispatchHandoff(target.id, handoffInput, { installState });
+                }}
+                data-testid={`command-palette-open-in-${target.id}`}
+                aria-label={accessibleLabel}
+              >
+                <span className="flex-1">
+                  <Trans>Open with AI {displayName} Desktop</Trans>
+                </span>
+                {hint ? (
+                  <span aria-hidden="true" className="ml-auto text-muted-foreground text-xs">
+                    {hint}
+                  </span>
+                ) : null}
+              </CommandItem>
+            );
+          })}
+        </CommandGroup>
+      ) : null,
+    },
+    commandGroupBlock('project'),
+    {
+      key: 'recent-projects',
+      rank: firstRank(rankedProjects),
+      node:
+        showProjectRecents && bridge ? (
+          <CommandGroup heading={t`Open recent project`}>
+            {rankedProjects.map(({ row }) => {
+              const isWorktree = row.isLinkedWorktree === true;
+              const RowIcon = isWorktree ? GitBranch : Folder;
+              const worktreeOf =
+                isWorktree && row.mainRoot !== undefined ? basenameOf(row.mainRoot) : null;
+              return (
+                <RecentItemContextMenu
+                  key={row.path}
+                  path={row.path}
+                  onRemoveRecent={onRemoveRecent}
+                  testIdPrefix="command-palette-recent"
+                >
+                  <div className="group/recent relative flex items-center">
+                    <CommandItem
+                      value={`${row.name} ${row.path} recent project`}
+                      onSelect={() =>
+                        runAction(
+                          () =>
+                            bridge.project.open({
+                              path: row.path,
+                              target: 'new-window',
+                              entryPoint: 'recents',
+                            }),
+                          t`Failed to open project.`,
+                        )
+                      }
+                      data-testid={`command-palette-recent-${row.path}`}
+                      className="flex-1 items-start pr-8"
+                    >
+                      <RowIcon className="mt-0.5" />
+                      <div className="flex min-w-0 flex-col gap-1">
+                        <UserText className="truncate font-medium">{row.name}</UserText>
+                        {worktreeOf !== null ? (
+                          <span className="truncate text-muted-foreground text-xs">
+                            <Trans>worktree of {worktreeOf}</Trans>
+                          </span>
+                        ) : null}
+                        <UserText className="truncate text-muted-foreground text-xs">
+                          {row.path}
+                        </UserText>
+                      </div>
+                    </CommandItem>
+                    <RecentRemoveButton
+                      path={row.path}
+                      name={row.name}
+                      onRemoveRecent={onRemoveRecent}
+                      testIdPrefix="command-palette-recent"
+                    />
+                  </div>
+                </RecentItemContextMenu>
+              );
+            })}
+          </CommandGroup>
+        ) : null,
+    },
+    {
+      key: 'worktrees',
+      rank: firstRank(rankedWorktrees),
+      node:
+        showWorktrees && bridge ? (
+          <CommandGroup heading={t`Worktrees`}>
+            {rankedWorktrees.map(({ row: entry }) => (
+              <CommandItem
+                key={entry.branch}
+                value={`${entry.branch} worktree branch`}
+                onSelect={() => openWorktreeEntry(entry)}
+                data-testid={`command-palette-worktree-${entry.branch}`}
+                className="items-start"
+              >
+                <GitBranch className="mt-0.5" />
+                <div className="flex min-w-0 flex-col gap-1">
+                  <UserText className="truncate font-medium">{entry.branch}</UserText>
+                  {entry.worktreePath === null ? (
+                    <span className="truncate text-muted-foreground text-xs">
+                      {t`Create worktree`}
+                    </span>
+                  ) : (
+                    <UserText className="truncate text-muted-foreground text-xs">
+                      {entry.worktreePath}
+                    </UserText>
+                  )}
+                </div>
+              </CommandItem>
+            ))}
+          </CommandGroup>
+        ) : null,
+    },
+    commandGroupBlock('file'),
+    commandGroupBlock('view'),
+    commandGroupBlock('terminal'),
+    commandGroupBlock('app'),
+  ].sort((a, b) => a.rank - b.rank);
+
   return (
     <>
       <CommandDialog
@@ -942,6 +1097,7 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
             '[&_[cmdk-input-wrapper]_svg]:h-4 [&_[cmdk-input-wrapper]_svg]:w-4 [&_[cmdk-item]_svg]:h-4 [&_[cmdk-item]_svg]:w-4',
         }}
         onEscapeKeyDown={onPaletteEscapeKeyDown}
+        contentAttributes={{ 'data-bug-report-launcher': '' }}
       >
         <CommandInput
           ref={inputRef}
@@ -952,7 +1108,6 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
             isSemanticMode ? t`Search by meaning` : t`Search files, folders, or commands`
           }
         />
-        {}
         <div className="flex flex-wrap gap-1.5 border-b px-3 py-2">
           <button
             type="button"
@@ -979,7 +1134,6 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
               <Trans>By tag</Trans>
             </span>
           </button>
-          {}
           {semanticSearchOffered ? (
             <button
               type="button"
@@ -1004,7 +1158,6 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
         <CommandList ref={listRef} className="subtle-scrollbar">
           {isSemanticMode && semanticView ? (
             <>
-              {}
               {semanticCoverageIncomplete ? (
                 <div
                   className="px-3 py-2 text-muted-foreground text-xs"
@@ -1021,7 +1174,6 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
                 </div>
               ) : null}
 
-              {}
               {semanticView.submit ? (
                 <CommandGroup>
                   <CommandItem
@@ -1032,7 +1184,7 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
                     {semanticView.submit.kind === 'retry' ? (
                       <>
                         <Sparkles />
-                        <span className="min-w-0 flex-1 truncate text-amber-700 dark:text-amber-400">
+                        <span className="min-w-0 flex-1 truncate text-warning">
                           {presentedSemanticStatus === 'provider_error' ? (
                             <Trans>Couldn't reach the embeddings provider — retry</Trans>
                           ) : (
@@ -1117,7 +1269,6 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
 
           {isSemanticMode && semanticView ? (
             <>
-              {}
               {semanticView.results.show ? (
                 <CommandGroup
                   heading={
@@ -1276,157 +1427,9 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
             </CommandGroup>
           ) : null}
 
-          {renderCommandGroup('commands')}
-
-          {showAgentGroup ? (
-            <CommandGroup heading={t`Open with AI`}>
-              {hostAgentTargets
-                .filter((target) => {
-                  const displayName = target.displayName;
-                  return matchesCommandQuery(
-                    t`Open with AI ${displayName} Desktop`,
-                    deferredQuery,
-                    [target.id, 'agent handoff', 'open in'],
-                  );
-                })
-                .map((target) => {
-                  const installState = installStates[target.id];
-                  const enabled = installState.installed === true && handoffInput !== null;
-                  const displayName = target.displayName;
-                  const hint =
-                    installState.installed === null
-                      ? t`Detecting`
-                      : installState.installed === false
-                        ? t`Not installed`
-                        : null;
-                  const accessibleLabel = hint
-                    ? t`Open with AI ${displayName} Desktop, ${hint}`
-                    : t`Open with AI ${displayName} Desktop`;
-
-                  return (
-                    <CommandItem
-                      key={target.id}
-                      value={`send to ai ${target.displayName} desktop ${target.id} agent open in`}
-                      disabled={!enabled}
-                      onSelect={() => {
-                        if (!enabled || !handoffInput) return;
-                        onOpenChange(false);
-                        void dispatchHandoff(target.id, handoffInput, { installState });
-                      }}
-                      data-testid={`command-palette-open-in-${target.id}`}
-                      aria-label={accessibleLabel}
-                    >
-                      <span className="flex-1">
-                        <Trans>Open with AI {displayName} Desktop</Trans>
-                      </span>
-                      {hint ? (
-                        <span aria-hidden="true" className="ml-auto text-muted-foreground text-xs">
-                          {hint}
-                        </span>
-                      ) : null}
-                    </CommandItem>
-                  );
-                })}
-            </CommandGroup>
-          ) : null}
-
-          {renderCommandGroup('project')}
-
-          {showProjectRecents && bridge ? (
-            <CommandGroup heading={t`Open recent project`}>
-              {switchableProjects
-                .filter((row) =>
-                  matchesCommandQuery(`${row.name} ${row.path}`, deferredQuery, [
-                    'open recent project',
-                  ]),
-                )
-                .slice(0, 10)
-                .map((row) => {
-                  const isWorktree = row.isLinkedWorktree === true;
-                  const RowIcon = isWorktree ? GitBranch : Folder;
-                  const worktreeOf =
-                    isWorktree && row.mainRoot !== undefined ? basenameOf(row.mainRoot) : null;
-                  return (
-                    <RecentItemContextMenu
-                      key={row.path}
-                      path={row.path}
-                      onRemoveRecent={onRemoveRecent}
-                      testIdPrefix="command-palette-recent"
-                    >
-                      <div className="group/recent relative flex items-center">
-                        <CommandItem
-                          value={`${row.name} ${row.path} recent project`}
-                          onSelect={() =>
-                            runAction(
-                              () =>
-                                bridge.project.open({
-                                  path: row.path,
-                                  target: 'new-window',
-                                  entryPoint: 'recents',
-                                }),
-                              t`Failed to open project.`,
-                            )
-                          }
-                          data-testid={`command-palette-recent-${row.path}`}
-                          className="flex-1 items-start pr-8"
-                        >
-                          <RowIcon className="mt-0.5" />
-                          <div className="flex min-w-0 flex-col gap-1">
-                            <UserText className="truncate font-medium">{row.name}</UserText>
-                            {worktreeOf !== null ? (
-                              <span className="truncate text-muted-foreground text-xs">
-                                <Trans>worktree of {worktreeOf}</Trans>
-                              </span>
-                            ) : null}
-                            <UserText className="truncate text-muted-foreground text-xs">
-                              {row.path}
-                            </UserText>
-                          </div>
-                        </CommandItem>
-                        <RecentRemoveButton
-                          path={row.path}
-                          name={row.name}
-                          onRemoveRecent={onRemoveRecent}
-                          testIdPrefix="command-palette-recent"
-                        />
-                      </div>
-                    </RecentItemContextMenu>
-                  );
-                })}
-            </CommandGroup>
-          ) : null}
-
-          {showWorktrees && bridge ? (
-            <CommandGroup heading={t`Worktrees`}>
-              {matchedWorktrees.slice(0, 10).map((entry) => (
-                <CommandItem
-                  key={entry.branch}
-                  value={`${entry.branch} worktree branch`}
-                  onSelect={() => openWorktreeEntry(entry)}
-                  data-testid={`command-palette-worktree-${entry.branch}`}
-                  className="items-start"
-                >
-                  <GitBranch className="mt-0.5" />
-                  <div className="flex min-w-0 flex-col gap-1">
-                    <UserText className="truncate font-medium">{entry.branch}</UserText>
-                    {entry.worktreePath === null ? (
-                      <span className="truncate text-muted-foreground text-xs">
-                        {t`Create worktree`}
-                      </span>
-                    ) : (
-                      <UserText className="truncate text-muted-foreground text-xs">
-                        {entry.worktreePath}
-                      </UserText>
-                    )}
-                  </div>
-                </CommandItem>
-              ))}
-            </CommandGroup>
-          ) : null}
-
-          {(['file', 'view', 'terminal', 'app'] as const).map((groupKey) =>
-            renderCommandGroup(groupKey),
-          )}
+          {rankedCommandBlocks.map((block) => (
+            <Fragment key={block.key}>{block.node}</Fragment>
+          ))}
 
           {showNavigation ? (
             <CommandGroup heading={t`Search`}>
@@ -1442,10 +1445,10 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
           ) : null}
         </CommandList>
 
-        {}
         <SearchHint
           mode={classifyOmnibarSearchHint(trimmedDeferredQuery, visibleSearchResults, {
             truncated: searchTruncated,
+            pending: showSearchPreparing || showSearchLoading,
           })}
           inExclusiveMode={inExclusiveMode}
           paletteModeKind={paletteMode.kind}
@@ -1468,8 +1471,11 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
         kind="folder"
         initialDir={initialCreateDir}
       />
-      <SeedDialog open={seedDialogOpen} onOpenChange={setSeedDialogOpen} />
-      {}
+      <SeedDialog
+        open={seedDialogOpen}
+        onOpenChange={setSeedDialogOpen}
+        onSeedApplied={revealEditor}
+      />
       {bridge ? (
         <CreateProjectDialog
           open={createProjectOpen}
@@ -1477,30 +1483,18 @@ export function CommandPalette({ bridge = null, open, onOpenChange }: CommandPal
           bridge={bridge}
         />
       ) : null}
-      {}
-      {bridge ? (
-        <ReportBugDialog
-          open={reportBugOrigin !== null}
-          onOpenChange={(next) => {
-            if (!next) setReportBugOrigin(null);
-          }}
-          launcherBorne={reportBugOrigin?.launcherBorne === true}
-        />
-      ) : null}
-      {}
+      {bridge ? <ReportBugDialog capture={bugReport.capture} onClose={bugReport.close} /> : null}
       {bridge && historyEverOpened ? (
         <Suspense fallback={null}>
           <BugReportHistoryDialog
             open={reportBugHistoryOpen}
             onOpenChange={setReportBugHistoryOpen}
-            onReportABug={() => {
-              setReportBugHistoryOpen(false);
-              setReportBugOrigin({ launcherBorne: false });
-            }}
+            onReportABug={() =>
+              bugReport.start({ launcherBorne: false }, () => setReportBugHistoryOpen(false))
+            }
           />
         </Suspense>
       ) : null}
-      {}
       <FeedbackFormDialog
         open={feedbackOpen}
         onOpenChange={setFeedbackOpen}

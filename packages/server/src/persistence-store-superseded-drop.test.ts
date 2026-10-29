@@ -63,6 +63,8 @@ describe('persistence superseded-store drop — a store that loses the publish r
 
   function createPersistence(): ReturnType<typeof createPersistenceExtension> {
     return createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir: tmpDir,
       projectDir: tmpDir,
       gitEnabled: false,

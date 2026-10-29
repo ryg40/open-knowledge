@@ -1,7 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
+import { ContextMenuItem } from '@/components/ui/context-menu';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import {
   expectVisualClassTokens,
@@ -31,14 +32,12 @@ function renderStrip(props?: {
   draggable?: boolean;
   renameDisabled?: boolean;
   withTrailing?: boolean;
-  reserveRightRevealTabGutter?: boolean;
 }) {
   const onSelect = vi.fn((_id: string) => {});
   const onTabActivate = vi.fn((_id: string) => {});
   const onNewButtonClick = vi.fn(() => {});
   const onClose = vi.fn((_id: string) => {});
   const onRename = vi.fn((_id: string, _label: string) => {});
-  const onCollapse = vi.fn(() => {});
   const onPlacementChange = vi.fn((_placement: 'bottom' | 'right') => {});
   const view = render(
     <TooltipProvider>
@@ -60,8 +59,6 @@ function renderStrip(props?: {
         sessionKind={props?.sessionKind ?? (props?.edge === 'right' ? 'agent' : 'terminal')}
         edge={props?.draggable ? undefined : (props?.edge ?? 'bottom')}
         onPlacementChange={props?.draggable ? undefined : onPlacementChange}
-        reserveRightRevealTabGutter={props?.reserveRightRevealTabGutter}
-        onCollapse={props?.draggable ? undefined : onCollapse}
         draggable={props?.draggable}
       />
     </TooltipProvider>,
@@ -72,10 +69,38 @@ function renderStrip(props?: {
     onNewButtonClick,
     onClose,
     onRename,
-    onCollapse,
     onPlacementChange,
     rerender: view.rerender,
   };
+}
+
+function StripWithMovingControl() {
+  const [atStart, setAtStart] = useState(false);
+  const controlRef = useRef<HTMLButtonElement>(null);
+  const control = (
+    <button ref={controlRef} type="button" aria-label="Moving control">
+      M
+    </button>
+  );
+  return (
+    <TooltipProvider>
+      <TerminalTabStrip
+        sessions={SESSIONS}
+        activeSessionId="s1"
+        onSelect={() => {}}
+        onClose={() => {}}
+        sessionKind="agent"
+        leadingControls={atStart ? control : null}
+        trailingControls={atStart ? null : control}
+        rowMenu={
+          <ContextMenuItem onSelect={() => setAtStart((current) => !current)}>
+            Move the control
+          </ContextMenuItem>
+        }
+        rowMenuFocusFallback={controlRef}
+      />
+    </TooltipProvider>
+  );
 }
 
 describe('TerminalTabStrip', () => {
@@ -322,26 +347,36 @@ describe('TerminalTabStrip', () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
-  test('the New button hugs the last tab, preceding the trailing collapse control', () => {
+  test('the New button hugs the last tab, preceding the trailing placement control', () => {
     renderStrip();
     const newButton = screen.getByRole('button', { name: 'New session' });
-    const collapse = screen.getByRole('button', { name: 'Collapse Terminal' });
+    const placement = screen.getByRole('button', { name: 'Move Terminal to right' });
     expect(
-      newButton.compareDocumentPosition(collapse) & Node.DOCUMENT_POSITION_FOLLOWING,
+      newButton.compareDocumentPosition(placement) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
-  test('trailing controls render at the far right, immediately left of the collapse control', () => {
+  test('trailing controls render at the far right, immediately left of the placement control', () => {
     renderStrip({ withTrailing: true });
     const trailing = screen.getByRole('button', { name: 'Reopen a past chat' });
     const newButton = screen.getByRole('button', { name: 'New session' });
-    const collapse = screen.getByRole('button', { name: 'Collapse Terminal' });
+    const placement = screen.getByRole('button', { name: 'Move Terminal to right' });
     expect(
       newButton.compareDocumentPosition(trailing) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
-      trailing.compareDocumentPosition(collapse) & Node.DOCUMENT_POSITION_FOLLOWING,
+      trailing.compareDocumentPosition(placement) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  test('neither strip offers an in-pane collapse control; the header buttons and shortcuts hide the panes', () => {
+    renderStrip({ edge: 'bottom', sessionKind: 'terminal', withTrailing: true });
+    expect(screen.queryByRole('button', { name: /^Collapse/ })).toBeNull();
+    cleanup();
+    renderStrip({ edge: 'right', sessionKind: 'agent', withTrailing: true });
+    expect(screen.queryByRole('button', { name: /^Collapse/ })).toBeNull();
+    const buttons = screen.getAllByRole('button');
+    expect(buttons.at(-1)).toBe(screen.getByRole('button', { name: 'Reopen a past chat' }));
   });
 
   test('a tab close control reports onClose with that session id only', async () => {
@@ -410,6 +445,42 @@ describe('TerminalTabStrip', () => {
     expect(focusedTab).toBe(document.activeElement);
   });
 
+  test('when a row menu action chosen from the keyboard moves the control that opened the menu, focus lands on that control in its new place', async () => {
+    const user = userEvent.setup();
+    render(<StripWithMovingControl />);
+    const control = screen.getByRole('button', { name: 'Moving control' });
+    act(() => control.focus());
+
+    fireEvent.keyDown(control, { key: 'F10', shiftKey: true });
+    expect(await screen.findByRole('menuitem', { name: 'Move the control' })).toBe(
+      document.activeElement,
+    );
+    await user.keyboard('{Enter}');
+
+    const moved = screen.getByRole('button', { name: 'Moving control' });
+    expect(moved).not.toBe(control);
+    await waitFor(() => expect(document.activeElement).toBe(moved));
+  });
+
+  test('while a tab is being renamed, right-click and the context-menu keys in the field keep the native text menu and leave the rename open', async () => {
+    const user = userEvent.setup();
+    const { onRename } = renderStrip({ edge: 'bottom', sessionKind: 'terminal' });
+    await user.dblClick(screen.getByRole('tab', { name: 'Terminal 2' }));
+    const input = screen.getByRole('textbox', { name: 'Rename Terminal 2' });
+
+    expect(fireEvent.contextMenu(input)).toBe(true);
+    expect(fireEvent.keyDown(input, { key: 'F10', shiftKey: true })).toBe(true);
+    expect(fireEvent.keyDown(input, { key: 'ContextMenu' })).toBe(true);
+
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(input).toBe(document.activeElement);
+    expect(onRename).not.toHaveBeenCalled();
+
+    await user.keyboard('{Escape}');
+    fireEvent.contextMenu(screen.getByRole('tablist', { name: 'Terminal sessions' }));
+    expect(await screen.findByRole('menuitem', { name: 'Move to right panel' })).toBeDefined();
+  });
+
   test('the right Terminal header has a named 24px dock control that moves it bottom', async () => {
     const user = userEvent.setup();
     const { onPlacementChange } = renderStrip({ edge: 'right', sessionKind: 'terminal' });
@@ -436,36 +507,14 @@ describe('TerminalTabStrip', () => {
     expect(onPlacementChange).toHaveBeenCalledWith('right');
   });
 
-  test('the right Terminal header clears the collapsed agents reveal control', () => {
-    renderStrip({
-      edge: 'right',
-      sessionKind: 'terminal',
-      reserveRightRevealTabGutter: true,
-    });
-
-    expect(document.querySelector('[data-terminal-tab-row]')?.className).toContain('pr-9');
-  });
-
   test('the agent strip keeps independent names and controls without Terminal placement actions', () => {
     renderStrip({ edge: 'right', sessionKind: 'agent' });
 
     expect(screen.getByRole('tablist', { name: 'Agent chats' })).toBeDefined();
-    expect(screen.getByRole('button', { name: 'Collapse agent panel' })).toBeDefined();
     expect(screen.queryByRole('button', { name: /Move Terminal/ })).toBeNull();
 
     fireEvent.contextMenu(screen.getByRole('tablist', { name: 'Agent chats' }));
     expect(screen.queryByRole('menu')).toBeNull();
-  });
-
-  test('the collapse control reports onCollapse and never onClose / new-button', async () => {
-    const user = userEvent.setup();
-    const { onCollapse, onClose, onNewButtonClick } = renderStrip();
-
-    await user.click(screen.getByRole('button', { name: 'Collapse Terminal' }));
-
-    expect(onCollapse).toHaveBeenCalledTimes(1);
-    expect(onClose).not.toHaveBeenCalled();
-    expect(onNewButtonClick).not.toHaveBeenCalled();
   });
 
   test('no drag-to-dock grip is rendered (dragging was removed)', () => {
@@ -475,7 +524,7 @@ describe('TerminalTabStrip', () => {
 
   test('every strip-owned icon-only control exposes an accessible name', () => {
     renderStrip();
-    expect(screen.getByRole('button', { name: 'Collapse Terminal' })).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Move Terminal to right' })).toBeDefined();
     for (const label of ['Terminal 1', 'Terminal 2', 'Terminal 3']) {
       expect(screen.getByRole('button', { name: `Close ${label}` })).toBeDefined();
     }
@@ -484,7 +533,6 @@ describe('TerminalTabStrip', () => {
   test('window mode marks the bar as the draggable macOS title region; dock mode does not', () => {
     renderStrip({ draggable: true });
     expect(document.querySelector('[data-electron-drag]')).not.toBeNull();
-    expect(screen.queryByRole('button', { name: 'Collapse Terminal' })).toBeNull();
     expect(screen.getByRole('button', { name: 'New session' })).toBeDefined();
     cleanup();
     renderStrip();
@@ -635,7 +683,6 @@ describe('TerminalTabStrip', () => {
           onClose={() => {}}
           onRename={() => {}}
           edge="bottom"
-          onCollapse={() => {}}
         />
       </TooltipProvider>,
     );
@@ -659,5 +706,52 @@ describe('TerminalTabStrip', () => {
     const tablist = screen.getByRole('tablist', { name: 'Terminal sessions' });
     expect(within(tablist).getAllByRole('tab')).toHaveLength(3);
     expect(within(tablist).queryAllByRole('button', { name: /^Terminal/ })).toHaveLength(0);
+  });
+});
+
+describe('TerminalTabStrip as a card top bar', () => {
+  afterEach(() => {
+    cleanup();
+    Reflect.deleteProperty(window, 'okDesktop');
+  });
+
+  test('a docked strip is a 44px top bar with no hairline, matching the tab row', () => {
+    renderStrip({ edge: 'right', sessionKind: 'agent' });
+    const row = document.querySelector('[data-terminal-tab-row]');
+    expect(row?.className).toContain('h-11');
+    expect(row?.className).not.toContain('shadow-[inset_0_-1px_0_var(--border)]');
+    expect(row?.className).not.toContain('h-[62px]');
+    expect(row?.className).not.toContain('[-webkit-app-region:drag]');
+    expect(row?.hasAttribute('data-electron-drag')).toBe(false);
+  });
+
+  test('the detached terminal window keeps its 62px title strip', () => {
+    renderStrip({ edge: 'bottom', sessionKind: 'terminal', draggable: true });
+    const row = document.querySelector('[data-terminal-tab-row]');
+    expect(row?.className).toContain('h-[62px]');
+    expect(row?.className).not.toContain('h-11');
+    expect(row?.className).toContain('[-webkit-app-region:drag]');
+  });
+
+  test('on desktop the docked strip opts its empty space into the window drag region while every control opts out', () => {
+    Object.defineProperty(window, 'okDesktop', {
+      configurable: true,
+      value: { config: { mode: 'editor' } },
+    });
+    renderStrip({ edge: 'bottom', sessionKind: 'terminal', withTrailing: true });
+    const row = document.querySelector('[data-terminal-tab-row]');
+    expect(row?.getAttribute('data-electron-drag')).toBe('');
+    expect(row?.className).toContain('[-webkit-app-region:drag]');
+    expect(row?.className).toContain('h-11');
+    for (const control of [
+      screen.getByRole('button', { name: 'Move Terminal to right' }),
+      screen.getByRole('button', { name: 'Reopen a past chat' }),
+      screen.getByRole('tab', { name: 'Terminal 1' }),
+    ]) {
+      expect(
+        control.closest('.\\[-webkit-app-region\\:no-drag\\]'),
+        `${control.getAttribute('aria-label') ?? control.textContent} opts out of the drag band`,
+      ).not.toBeNull();
+    }
   });
 });

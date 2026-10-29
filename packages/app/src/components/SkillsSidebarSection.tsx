@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 import type { ConfigBinding } from '@inkeep/open-knowledge-core/config/bind-config-doc';
 import { humanFormat } from '@inkeep/open-knowledge-core/config/errors';
 import { externalSkillLiveDocName } from '@inkeep/open-knowledge-core/constants/cc1';
@@ -15,6 +16,7 @@ import { SidebarGroup, SidebarGroupContent } from '@/components/ui/sidebar';
 import { Spinner } from '@/components/ui/spinner';
 import { useDocumentContext } from '@/editor/DocumentContext';
 import { findLocalSkillPreviewTabId } from '@/editor/editor-tabs';
+import { previewOpenDisposition } from '@/editor/preview-open-disposition';
 import { useCreateBlankSkill } from '@/hooks/use-create-blank-skill';
 import { useOpenSkill } from '@/hooks/use-open-skill';
 import { useOpenSkillForEdit } from '@/hooks/use-open-skill-for-edit';
@@ -53,8 +55,8 @@ export function SkillsSidebarSection({ dockExpanded = false }: { dockExpanded?: 
   const { openTarget, activeDocName, activeTarget, openTabs, activateTab } = useDocumentContext();
   const { merged, userBinding, userSynced, projectLocalBinding, projectLocalSynced } =
     useConfigContext();
-  const tabBehavior: 'append' | 'replace-active' =
-    (merged?.editor?.previewTabs ?? true) ? 'replace-active' : 'append';
+  const previewTabsEnabled = merged?.editor?.previewTabs ?? true;
+  const tabDisposition = previewOpenDisposition(previewTabsEnabled);
   const showSkillGroups = merged?.appearance?.sidebar?.showSkillGroups ?? true;
   const pinnedByScope = {
     project: readPins(merged, 'project'),
@@ -188,12 +190,12 @@ export function SkillsSidebarSection({ dockExpanded = false }: { dockExpanded?: 
   }
 
   const openSkillDoc = (docName: string) => {
-    openTarget({ kind: 'doc', target: docName, docName }, { tabBehavior });
-    pushHashWithoutNavigation(hashFromDocName(docName));
+    openTarget({ kind: 'doc', target: docName, docName }, { disposition: tabDisposition });
+    pushHashWithoutNavigation(hashFromDocName(docName), tabDisposition);
   };
   const openSkillMd = (skill: SkillsListEntry) => {
     openSkill(skill.scope, skill.name, {
-      replaceActive: tabBehavior === 'replace-active',
+      replaceActive: previewTabsEnabled,
       ...(skill.path ? { path: skill.path } : {}),
       ...(skill.hostQualifier !== undefined ? { host: skill.hostQualifier } : {}),
     });
@@ -209,7 +211,7 @@ export function SkillsSidebarSection({ dockExpanded = false }: { dockExpanded?: 
       );
       if (existing) {
         activateTab(existing);
-        pushHashWithoutNavigation(hashFromSkillPreview(target));
+        pushHashWithoutNavigation(hashFromSkillPreview(target), tabDisposition);
         return;
       }
     }
@@ -224,9 +226,9 @@ export function SkillsSidebarSection({ dockExpanded = false }: { dockExpanded?: 
         level: target.level,
         path: target.path,
       },
-      { tabBehavior },
+      { disposition: tabDisposition },
     );
-    pushHashWithoutNavigation(hashFromSkillPreview(target));
+    pushHashWithoutNavigation(hashFromSkillPreview(target), tabDisposition);
   };
   const openManaged = (skill: SkillsListEntry) => {
     openPreviewReplacing({
@@ -258,7 +260,7 @@ export function SkillsSidebarSection({ dockExpanded = false }: { dockExpanded?: 
         path: filePath,
         ...(host ? { host } : {}),
       },
-      { tabBehavior },
+      { disposition: tabDisposition },
     );
     pushHashWithoutNavigation(
       hashFromSkillFile({
@@ -267,6 +269,7 @@ export function SkillsSidebarSection({ dockExpanded = false }: { dockExpanded?: 
         path: filePath,
         ...(host ? { host } : {}),
       }),
+      tabDisposition,
     );
   };
   const isPreviewActiveFor = (name: string, scope: SkillScope, path?: string): boolean =>
@@ -320,8 +323,7 @@ export function SkillsSidebarSection({ dockExpanded = false }: { dockExpanded?: 
       });
       return;
     }
-    const replaceActive = tabBehavior === 'replace-active';
-    void openSkillForEdit(s.name, source, { replaceActive, rel }).then((r) => {
+    void openSkillForEdit(s.name, source, { replaceActive: previewTabsEnabled, rel }).then((r) => {
       if (!r.ok) toast.error(t`Couldn't open ${s.name} for editing: ${r.error}`);
     });
   };

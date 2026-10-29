@@ -89,6 +89,44 @@ describe('edit — body-XOR-frontmatter + exactly-one-target teaching errors', (
   });
 });
 
+describe('edit — occurrence on a path with no document', () => {
+  test('names the missing document instead of implying it is pending', async () => {
+    let requests = 0;
+    const server = await startFetchTestServer({
+      fetch() {
+        requests += 1;
+        return Response.json({ error: 'unexpected request' }, { status: 500 });
+      },
+    });
+    try {
+      const cwd = newProject();
+      let handler: Handler | undefined;
+      registerEdit(
+        {
+          registerTool(_name: string, _cfg: unknown, h: Handler) {
+            handler = h;
+          },
+        } as unknown as ServerInstance,
+        {
+          serverUrl: `http://127.0.0.1:${server.port}`,
+          config: BASE_CONFIG,
+          resolveCwd: async () => cwd,
+        } as unknown as Parameters<typeof registerEdit>[1],
+      );
+      if (!handler) throw new Error('tool did not register');
+      const r = await handler({
+        document: { path: 'system/ops', find: 'x', replace: 'y', occurrence: 2 },
+      });
+      expect(r.isError).toBe(true);
+      expect(textOf(r)).toContain('No document at "system/ops" on disk');
+      expect(textOf(r)).not.toContain('not on disk yet');
+      expect(requests).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+});
+
 describe('delete — exactly-one-target teaching error', () => {
   test('two targets rejected', async () => {
     const del = capture(registerDelete, newProject());
@@ -139,7 +177,7 @@ describe('write/edit/delete({ template }) — server-routed for attribution (PRD
       template: { path: 'x/a.b', content: 'ok', frontmatter: { title: 'A' } },
     });
     expect(r.isError).toBe(true);
-    expect(textOf(r)).toContain('must be letters, digits');
+    expect(textOf(r)).toContain('must use letters and digits');
     expect(existsSync(join(cwd, 'x', '.ok', 'templates', 'a.b.md'))).toBe(false);
   });
 });
@@ -258,6 +296,19 @@ describe('write({ document }) — template-availability nudge on create', () => 
       const r = await write({ document: { path: 'notes/second', template: 'note' } });
       expect(r.isError).toBeUndefined();
       expect(textOf(r)).not.toContain('templates you can start from');
+    });
+  });
+
+  test('a decomposed template name finds the composed template', async () => {
+    const cwd = newProject();
+    mkdirSync(join(cwd, 'menus', '.ok', 'templates'), { recursive: true });
+    writeFileSync(
+      join(cwd, 'menus', '.ok', 'templates', 'café.md'),
+      '---\ntitle: Café\ndescription: A menu\n---\n\n## Menu\n',
+    );
+    await withWriteStub(cwd, async (write) => {
+      const r = await write({ document: { path: 'menus/today', template: 'cafe\u0301' } });
+      expect(r.isError).toBeUndefined();
     });
   });
 

@@ -1,5 +1,23 @@
 const GROUP_SELECTOR = ':scope > [data-group]';
 const PANEL_SELECTOR = ':scope > [data-panel]';
+const PANEL_GROUP_UNAVAILABLE_MESSAGE =
+  /^(?:Could not find Group with id "|Group .+ not found$|Layout not found for Panel |Panel constraints not found for Panel )/;
+
+export function reportUnexpectedPanelGroupFailure(
+  event: string,
+  error: unknown,
+  context?: Readonly<Record<string, unknown>>,
+) {
+  if (error instanceof Error && PANEL_GROUP_UNAVAILABLE_MESSAGE.test(error.message)) return;
+  const { event: _shadowedEvent, error: _shadowedError, ...fields } = context ?? {};
+  console.warn(
+    JSON.stringify({
+      event,
+      error: error instanceof Error ? error.message : String(error),
+      ...fields,
+    }),
+  );
+}
 
 export function findRailPanelGroup(container: Element | null | undefined): HTMLElement | null {
   const group = container?.querySelector(GROUP_SELECTOR);
@@ -62,47 +80,4 @@ export function resolveRailPanelSpace(container: Element | null | undefined): Ra
 export function resolveRailPanelSpacePx(container: Element | null | undefined): number | null {
   const result = resolveRailPanelSpace(container);
   return result.ok ? result.panelSpacePx : null;
-}
-
-export interface RailWidthShortfall {
-  readonly targetPx: number;
-  readonly renderedPx: number | null;
-}
-
-function missesExactTarget(renderedPx: number, targetPx: number): boolean {
-  return Math.abs(renderedPx - targetPx) > 1;
-}
-
-function collectShortfall(
-  targetsPx: Readonly<Record<string, number>>,
-  renderedWidths: ReadonlyMap<string, number>,
-  isShort: (renderedPx: number, targetPx: number) => boolean,
-): Record<string, RailWidthShortfall> {
-  const shortfall: Record<string, RailWidthShortfall> = {};
-  for (const [id, targetPx] of Object.entries(targetsPx)) {
-    const renderedPx = renderedWidths.get(id);
-    if (renderedPx == null) {
-      shortfall[id] = { targetPx, renderedPx: null };
-      continue;
-    }
-    if (!isShort(renderedPx, targetPx)) continue;
-    shortfall[id] = { targetPx, renderedPx };
-  }
-  return shortfall;
-}
-
-export function describeRailWidthShortfall(
-  pinnedPx: Readonly<Record<string, number>>,
-  renderedWidths: ReadonlyMap<string, number>,
-): Record<string, RailWidthShortfall> {
-  return collectShortfall(pinnedPx, renderedWidths, missesExactTarget);
-}
-
-export function describeRailFloorShortfall(
-  floorPx: Readonly<Record<string, number>>,
-  renderedWidths: ReadonlyMap<string, number>,
-): Record<string, RailWidthShortfall> {
-  return collectShortfall(floorPx, renderedWidths, (renderedPx, targetPx) =>
-    targetPx === 0 ? missesExactTarget(renderedPx, targetPx) : renderedPx < targetPx - 1,
-  );
 }

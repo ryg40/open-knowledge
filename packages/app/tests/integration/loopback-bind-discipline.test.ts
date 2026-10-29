@@ -1,12 +1,14 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { basename, dirname, join, relative } from 'node:path';
+import { basename, dirname, join, relative, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import { isTestOnlySourceFile } from '../../../../test-support/test-only-source-file.mjs';
+import { LOOPBACK_SCAN_ROOTS } from './loopback-bind-discipline.reads';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = join(__dirname, '..', '..');
-const SCAN_ROOTS = [__dirname, join(PACKAGE_ROOT, 'tests', 'stress')];
+const OK_ROOT = join(PACKAGE_ROOT, '..', '..');
+const SCAN_ROOTS = LOOPBACK_SCAN_ROOTS.map((root) => join(OK_ROOT, root));
 
 const SELF_BASENAME = basename(fileURLToPath(import.meta.url));
 
@@ -15,7 +17,7 @@ interface FileLines {
   lines: string[];
 }
 
-function listScannedFiles(): FileLines[] {
+function listScannedFiles(relativePath: typeof relative = relative): FileLines[] {
   const out: FileLines[] = [];
   function walk(dir: string) {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -27,7 +29,7 @@ function listScannedFiles(): FileLines[] {
       if (!entry.isFile() || !entry.name.endsWith('.ts')) continue;
       if (entry.name === SELF_BASENAME) continue;
       out.push({
-        path: relative(PACKAGE_ROOT, abs),
+        path: relativePath(PACKAGE_ROOT, abs).replaceAll('\\', '/'),
         lines: readFileSync(abs, 'utf-8').split('\n'),
       });
     }
@@ -42,6 +44,7 @@ function isCommentOnlyLine(line: string): boolean {
 }
 
 const LOOPBACK_HOST_LITERAL = /['"](?:127\.0\.0\.1|::1)['"]/;
+const UNIX_SOCKET_LISTEN = /^\.listen\(\s*\{(?=[^}]*\bpath\s*[:,}])(?![^}]*\bport\b)/;
 
 export function findNonLoopbackListenCalls(lines: string[]): Array<{ line: number; text: string }> {
   const violations: Array<{ line: number; text: string }> = [];
@@ -56,7 +59,7 @@ export function findNonLoopbackListenCalls(lines: string[]): Array<{ line: numbe
     }
     const paren = window.indexOf(')');
     if (paren !== -1) window = window.slice(0, paren + 1);
-    if (!LOOPBACK_HOST_LITERAL.test(window)) {
+    if (!LOOPBACK_HOST_LITERAL.test(window) && !UNIX_SOCKET_LISTEN.test(window)) {
       violations.push({ line: i + 1, text: line.trim() });
     }
   }
@@ -136,6 +139,15 @@ describe('loopback bind discipline (app test sources)', () => {
     expect(files.some((f) => f.path.endsWith('integration/test-harness.ts'))).toBe(true);
     expect(files.some((f) => f.path.endsWith('_helpers/server-process.ts'))).toBe(true);
     expect(files.some((f) => isTestOnlySourceFile(f.path, 'playwright'))).toBe(true);
+  });
+
+  test('win32 path semantics yield the /-separated keys the sanity checks and listen exemptions match', () => {
+    const win32Files = listScannedFiles(win32.relative);
+    expect(win32Files.some((f) => f.path.endsWith('integration/test-harness.ts'))).toBe(true);
+    expect(win32Files.some((f) => f.path.endsWith('_helpers/server-process.ts'))).toBe(true);
+    expect(win32Files.map((f) => f.path)).toContain(RECORDING_OWNERSHIP_CASE);
+    expect(win32Files.flatMap((f) => findUnexemptedListenCalls(f.path, f.lines))).toEqual([]);
+    expect(findStaleListenExemptions(win32Files)).toEqual([]);
   });
 
   test('every .listen( call binds an explicit loopback host literal', () => {
@@ -299,5 +311,23 @@ describe('loopback bind discipline (app test sources)', () => {
     );
 
     expect(findAmbiguousLocalhostDials(["  host: 'localhost:5173',"]).length).toBe(0);
+  });
+
+  test('a listen on a Unix-socket path is not a host bind, while the object form with a port still needs a loopback host', () => {
+    const planted = [
+      '  s.listen(0);',
+      '  server.listen(port, () => resolve());',
+      '  server.listen({ port }, cb);',
+      "  server.listen({ port: 0, host: '0.0.0.0' }, cb);",
+      '  server.listen({ path: socketPath, port: 0 }, cb);',
+      '  server.listen({ path: socketPath }, () => {',
+      '  server.listen({ path }, cb);',
+      '  server.listen(',
+      '    { path: join(dir, "supervisor.sock") },',
+      '    () => resolve(),',
+      '  );',
+      "  server.listen({ port: 0, host: '127.0.0.1' }, cb);",
+    ];
+    expect(findNonLoopbackListenCalls(planted).map((v) => v.line)).toEqual([1, 2, 3, 4, 5]);
   });
 });

@@ -1,9 +1,12 @@
 import {
   type FrontmatterValue,
   FrontmatterValueSchema,
+  frontmatterRecord,
   MANAGED_ARTIFACT_SCOPES,
   SKILL_NAME_REGEX,
+  skillFilePathSegments,
   TEMPLATE_NAME_REGEX,
+  TEMPLATE_NAME_RULE,
 } from '@inkeep/open-knowledge-core';
 import { z } from 'zod';
 import { SUPPORTED_DOC_EXTENSIONS } from '../../doc-extensions.ts';
@@ -19,8 +22,7 @@ const FrontmatterAdvertisedValue = z.union([
   z.null(),
 ]) as unknown as z.ZodType<FrontmatterValue | null>;
 
-export const FrontmatterArg = z
-  .record(z.string(), FrontmatterAdvertisedValue)
+export const FrontmatterArg = frontmatterRecord(FrontmatterAdvertisedValue)
   .superRefine((patch, ctx) => {
     for (const [key, value] of Object.entries(patch)) {
       if (!FrontmatterPatchValue.safeParse(value).success) {
@@ -66,8 +68,7 @@ export function splitTargetPath(path: string): { folder: string; name: string } 
     : { folder: clean.slice(0, idx), name: clean.slice(idx + 1) };
 }
 
-export const TEMPLATE_PATH_DESCRIBE =
-  'Template path = `<folder>/<name>` (e.g. "fishing-log/trip-log"). The slashes are the folder it belongs to; the final segment is the template name (letters, digits, `_`, `-` only — no dots/spaces). Stored at `<folder>/.ok/templates/<name>.md`.';
+export const TEMPLATE_PATH_DESCRIBE = `Template path = \`<folder>/<name>\` (e.g. "fishing-log/trip-log"). The slashes are the folder it belongs to; the final segment is the template name, which must use ${TEMPLATE_NAME_RULE}. Stored at \`<folder>/.ok/templates/<name>.md\`.`;
 export const TEMPLATE_CONTENT_DESCRIBE =
   "Starter content — the Markdown a new document becomes. A leading `---…---` frontmatter block here sets the STARTING PROPERTIES every doc created from this template gets (e.g. `type`, `status`, `tags`); the markdown below it is the body. The template's own picker identity (title/description) is the separate `frontmatter` field, NOT this block — it is stripped at instantiation and never copied onto created docs. (On disk this composes to one frontmatter block with the identity under a reserved `template:` key; you don't author that — just give the starter content here.) Only the `{{date}}` and `{{user}}` substitution tokens are allowed; any other `{{...}}` token hard-errors at write time.";
 
@@ -78,7 +79,7 @@ export function resolveTemplatePath(
   if (!TEMPLATE_NAME_REGEX.test(name)) {
     return {
       ok: false,
-      error: `the final segment of a template path is its name — "${name}" must be letters, digits, \`_\`, \`-\` only (no dots/spaces). e.g. { template: { path: "fishing-log/trip-log" } }.`,
+      error: `the final segment of a template path is its name — "${name}" must use ${TEMPLATE_NAME_RULE}. e.g. { template: { path: "fishing-log/trip-log" } }.`,
     };
   }
   return { ok: true, folder, name };
@@ -90,6 +91,16 @@ export const SKILL_DESCRIPTION_DESCRIBE =
   'One-line description (≤1024 chars) — the PRIMARY triggering surface telling an agent WHEN to use this skill. No XML tags (`<...>`), which break the skill loader.';
 export const SKILL_BODY_DESCRIBE =
   'SKILL.md body (markdown guidance). Authored WITHOUT frontmatter — `name` + `description` are passed separately and composed server-side. Keep under ~500 lines; move depth into one-level-deep `references/`.';
+export const TEMPLATE_EDIT_CONTROL_ADVICE =
+  'Any body offset refers to the full stored template body resubmitted by this edit, including any supplied replace. Clean controls in replace, or, if stored controls remain, use a clean full replacement through write({ template: ... }).';
+export const TEMPLATE_METADATA_CONTROL_ADVICE =
+  'Any body offset refers to the full stored template body resubmitted by this edit. Remove stored controls through a clean full replacement using write({ template: ... }).';
+export const SKILL_EDIT_CONTROL_ADVICE =
+  'Any body offset refers to the full stored skill body resubmitted by this edit, including any supplied replace. Clean controls in replace, or, if stored controls remain, use a clean full replacement through write({ skill: ... }).';
+export const SKILL_METADATA_CONTROL_ADVICE =
+  'Any body offset refers to the full stored skill body resubmitted by this edit. Remove stored controls through a clean full replacement using write({ skill: ... }).';
+export const SKILL_FILE_EDIT_CONTROL_ADVICE =
+  'Any content offset refers to the full stored file content resubmitted by this edit, including frontmatter and any supplied replace. Clean controls in replace, or, if stored controls remain, use a clean full replacement through write({ skill: { files: ... } }).';
 const SKILL_SCOPE_DESCRIBE =
   'Level: "project" (default — a Project skill: lives in this KB wherever its folder is, shared with teammates via git) or "global" (a Global skill: lives under your user home, available in every project on this machine — not shared, not version-tracked). Pass the literal value "global" for a Global skill.';
 
@@ -138,10 +149,7 @@ export function resolveSkillFilePath(
       error: `a skill file \`path\` must be skill-relative, not absolute — "${path}" is rejected. e.g. { path: "references/tiers.md" }.`,
     };
   }
-  const segments = path
-    .replace(/\\/g, '/')
-    .split('/')
-    .filter((s) => s !== '' && s !== '.');
+  const segments = skillFilePathSegments(path);
   if (segments.some((s) => s === '..')) {
     return {
       ok: false,

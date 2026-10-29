@@ -6,11 +6,7 @@ import { type Config, ConfigSchema } from '../../config/schema.ts';
 import { type FetchTestServer, startFetchTestServer } from './fetch-test-server.test-helper.ts';
 import { DESCRIPTION, type LintDeps, register } from './lint.ts';
 import type { ServerInstance } from './shared.ts';
-import {
-  AUDIT_FILE_CAP,
-  AUDIT_FILE_DIAGNOSTIC_CAP,
-  HOCUSPOCUS_NOT_RUNNING_ERROR,
-} from './shared.ts';
+import { AUDIT_FILE_CAP, AUDIT_FILE_DIAGNOSTIC_CAP, hocuspocusNotRunningError } from './shared.ts';
 
 const BASE_CONFIG: Config = ConfigSchema.parse({});
 
@@ -30,7 +26,7 @@ interface RegisteredTool {
   name: string;
   description: string;
   annotations?: Record<string, unknown>;
-  handler: (args: LintHandlerArgs) => Promise<ToolResult>;
+  handler: (args: LintHandlerArgs, signal?: AbortSignal) => Promise<ToolResult>;
 }
 
 function createFakeServer() {
@@ -39,13 +35,13 @@ function createFakeServer() {
     registerTool(
       name: string,
       cfg: { description?: string; annotations?: Record<string, unknown> },
-      handler: (args: LintHandlerArgs) => Promise<ToolResult>,
+      handler: (args: LintHandlerArgs, extra: { signal: AbortSignal }) => Promise<ToolResult>,
     ) {
       registered = {
         name,
         description: cfg.description ?? '',
         annotations: cfg.annotations,
-        handler,
+        handler: (args, signal = new AbortController().signal) => handler(args, { signal }),
       };
     },
   } as unknown as ServerInstance;
@@ -61,6 +57,17 @@ function createFakeServer() {
 function makeDeps(serverUrl: string | undefined, cwdDir: string): LintDeps {
   return { serverUrl, config: BASE_CONFIG, resolveCwd: async () => cwdDir };
 }
+
+test('project-wide lint honors the MCP request cancellation signal', async () => {
+  const { server, getTool } = createFakeServer();
+  register(server, makeDeps(baseUrl, tmpDir));
+  const signal = AbortSignal.abort(new DOMException('Caller deadline expired', 'TimeoutError'));
+
+  const result = await getTool().handler({}, signal);
+
+  expect(result.isError).toBe(true);
+  expect(result.content[0]?.text).toContain('Caller deadline expired');
+});
 
 let testServer: FetchTestServer;
 let baseUrl: string;
@@ -240,7 +247,7 @@ describe('lint — registration + DESCRIPTION', () => {
     register(server, makeDeps(undefined, tmpDir));
     const result = await getTool().handler({});
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toBe(HOCUSPOCUS_NOT_RUNNING_ERROR);
+    expect(result.content[0]?.text).toBe(hocuspocusNotRunningError());
   });
 });
 

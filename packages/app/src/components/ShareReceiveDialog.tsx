@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 // oxlint-disable ok/no-raw-html-interactive-element -- pre-rule backlog — Q2 card grid uses raw <button> awaiting shadcn migration; tracked at https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-html-interactive-element
 
 // oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — physical margin/padding/inset utilities predate the rule; drain by swapping ml/mr → ms/me, pl/pr → ps/pe, left/right → start/end, then deleting this line. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-physical-direction-utility
@@ -550,7 +551,7 @@ function ShareReceiveDialogInner({
             <div
               ref={cloneErrorRef}
               tabIndex={-1}
-              className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 outline-none"
+              className="rounded-lg border border-destructive/40 p-4 outline-none"
               data-testid="share-receive-clone-error"
             >
               <p className="text-sm font-semibold text-foreground" role="alert">
@@ -591,7 +592,6 @@ function ShareReceiveDialogInner({
                   }}
                   data-testid="share-receive-clone-retry"
                 >
-                  {}
                   <Trans>Try again</Trans>
                 </Button>
                 <Button

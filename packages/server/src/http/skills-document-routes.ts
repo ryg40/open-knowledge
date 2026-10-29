@@ -35,14 +35,22 @@ import {
   type SkillsLock,
 } from '@inkeep/open-knowledge-core/skills-catalog';
 import type { AgentSessionManager } from '../agent-sessions.ts';
+import {
+  type AgentWriteFlushOutcome,
+  answeredWithSuccessOnAppRoutes,
+  outcomeOfSavedWrite,
+} from '../agent-write-outcome.ts';
 import { composeAndWriteRawBody } from '../bridge-intake.ts';
 import { isLinkIndexExcludedDoc } from '../cc1-broadcast.ts';
+import type { RemovalLifecycleStatus } from '../conflict-kinds.ts';
 import {
   applySkillDelete,
   applySkillDirNameSync,
   applySkillMove,
   applySkillWrite,
   composeSkillContent,
+  skillMutationErrorStatus,
+  validateSkillMutationPath,
 } from '../content/skills-write.ts';
 import type { ContentFilter } from '../content-filter.ts';
 import type {
@@ -157,16 +165,9 @@ export interface SkillsDocumentRouteDeps {
   };
   sessionManager: AgentSessionManager;
   respondStaleExternalWrite: (res: ServerResponse, handler: string, docName: string) => void;
-  flushDiskAndDetectOutcome: (
-    docName: string,
-  ) => Promise<
-    | { kind: 'failure'; failure: StoreFailure }
-    | { kind: 'divergence' }
-    | { kind: 'stale-external-write' }
-    | null
-  >;
+  flushDiskAndDetectOutcome: (docName: string) => Promise<AgentWriteFlushOutcome>;
+  markAgentWriteStore: (docName: string) => void;
   respondPersistenceFailure: (res: ServerResponse, failure: StoreFailure, handler: string) => void;
-  respondDiskDivergence: (res: ServerResponse, handler: string) => void;
   okArtifactKey: (
     kind: 'template' | 'folder-frontmatter' | 'folder' | 'skill',
     folder: string,
@@ -179,7 +180,7 @@ export interface SkillsDocumentRouteDeps {
   ) => ReturnType<typeof extractActorIdentity>;
   captureAndCloseDocuments: (
     docNames: string[],
-    lifecycleStatus: 'deleted-upstream' | 'renamed',
+    lifecycleStatus: RemovalLifecycleStatus,
   ) => Promise<Map<string, string>>;
   log: PinoLogger;
   commitOkArtifactWrite: (context: string) => Promise<unknown>;
@@ -238,9 +239,9 @@ export function createSkillsDocumentRoutes(deps: SkillsDocumentRouteDeps): ApiRo
     extractAgentIdentity,
     sessionManager,
     flushDiskAndDetectOutcome,
+    markAgentWriteStore,
     respondStaleExternalWrite,
     respondPersistenceFailure,
-    respondDiskDivergence,
     okArtifactKey,
     resolveSkillsRoot,
     extractActorIdentityFromQuery,
@@ -552,6 +553,7 @@ export function createSkillsDocumentRoutes(deps: SkillsDocumentRouteDeps): ApiRo
             return;
           }
           const wr = applySkillWrite({
+            boundary: putBase,
             skillsRoot: resolve(putBase, homeRel),
             name: body.name,
             body: typeof body.body === 'string' ? body.body : '',
@@ -561,11 +563,20 @@ export function createSkillsDocumentRoutes(deps: SkillsDocumentRouteDeps): ApiRo
             },
           });
           if (!wr.ok) {
-            errorResponse(res, 400, 'urn:ok:error:invalid-request', 'Invalid skill request.', {
-              handler: 'skill-put',
-              detail: wr.error.code,
-              cause: new Error(wr.error.message),
-            });
+            const status = skillMutationErrorStatus(wr.error.code);
+            errorResponse(
+              res,
+              status,
+              status === 500
+                ? 'urn:ok:error:internal-server-error'
+                : 'urn:ok:error:invalid-request',
+              wr.error.message,
+              {
+                handler: 'skill-put',
+                detail: wr.error.code,
+                cause: wr.error.cause ?? new Error(wr.error.message),
+              },
+            );
             return;
           }
           if (body.scope === 'project') {
@@ -588,6 +599,7 @@ export function createSkillsDocumentRoutes(deps: SkillsDocumentRouteDeps): ApiRo
             200,
             SkillPutSuccessSchema,
             {
+              ...outcomeOfSavedWrite(undefined, null),
               path: `${homeRel}/${body.name}/SKILL.md`,
               created: true,
               warnings: wr.warnings,
@@ -621,14 +633,14 @@ export function createSkillsDocumentRoutes(deps: SkillsDocumentRouteDeps): ApiRo
         session.dc.document.transact(() => {
           composeAndWriteRawBody(session.dc.document, composed.content, 'agent');
         }, session.origin);
+        markAgentWriteStore(docName);
 
         const flushOutcome = await flushDiskAndDetectOutcome(docName);
-        if (flushOutcome?.kind === 'failure') {
+        if (
+          flushOutcome?.kind === 'failure' &&
+          !answeredWithSuccessOnAppRoutes(flushOutcome.failure)
+        ) {
           respondPersistenceFailure(res, flushOutcome.failure, 'skill-put');
-          return;
-        }
-        if (flushOutcome?.kind === 'divergence') {
-          respondDiskDivergence(res, 'skill-put');
           return;
         }
         if (flushOutcome?.kind === 'stale-external-write') {
@@ -651,6 +663,7 @@ export function createSkillsDocumentRoutes(deps: SkillsDocumentRouteDeps): ApiRo
           200,
           SkillPutSuccessSchema,
           {
+            ...outcomeOfSavedWrite(undefined, flushOutcome),
             path: relPath,
             created,
             warnings: composed.warnings,
@@ -873,6 +886,28 @@ export function createSkillsDocumentRoutes(deps: SkillsDocumentRouteDeps): ApiRo
           body.scope,
           body.fromName,
         );
+        const fromScanBase = body.scope === 'project' ? contentDir : skillsHome;
+        const sourceSkillDir = resolve(skillsRoot, body.fromName);
+        const pathCheck = validateSkillMutationPath(
+          fromScanBase,
+          sourceSkillDir,
+          resolve(sourceSkillDir, 'SKILL.md'),
+        );
+        if (!pathCheck.ok) {
+          const status = skillMutationErrorStatus(pathCheck.error.code);
+          errorResponse(
+            res,
+            status,
+            status === 500 ? 'urn:ok:error:internal-server-error' : 'urn:ok:error:invalid-request',
+            pathCheck.error.message,
+            {
+              handler: 'skill-move',
+              detail: pathCheck.error.code,
+              cause: pathCheck.error.cause,
+            },
+          );
+          return;
+        }
         const occupiedToDir = resolveSkillDirForRead(body.scope, body.toName);
         if (occupiedToDir !== null) {
           const retentionBase = skillInstallBase(body.scope);
@@ -914,7 +949,6 @@ export function createSkillsDocumentRoutes(deps: SkillsDocumentRouteDeps): ApiRo
         const priorInstall = moveBase
           ? readInstalledSkills(moveBase).skills[body.fromName]
           : undefined;
-        const fromScanBase = body.scope === 'project' ? contentDir : skillsHome;
         const renameScanEntry = (
           body.scope === 'project'
             ? scanInPlaceSkills(contentDir)
@@ -983,7 +1017,7 @@ export function createSkillsDocumentRoutes(deps: SkillsDocumentRouteDeps): ApiRo
           return;
         }
 
-        let contentEditError: { code: string; message: string } | null = null;
+        let contentEditError: { code: string; message: string; cause?: unknown } | null = null;
         const movedSkillMd = resolve(skillsRoot, body.toName, 'SKILL.md');
         let parsedBody = '';
         let parsedDescription = '';
@@ -998,6 +1032,7 @@ export function createSkillsDocumentRoutes(deps: SkillsDocumentRouteDeps): ApiRo
         const writeDescription =
           body.frontmatter !== undefined ? body.frontmatter.description : parsedDescription;
         const rewrite = applySkillWrite({
+          boundary: fromScanBase,
           skillsRoot,
           name: body.toName,
           body: writeBody,
@@ -1112,16 +1147,19 @@ export function createSkillsDocumentRoutes(deps: SkillsDocumentRouteDeps): ApiRo
         signalChannel?.('files');
 
         if (contentEditError) {
-          const isServerError = contentEditError.code === 'WRITE_ERROR';
+          const status =
+            contentEditError.code === 'WRITE_ERROR'
+              ? 500
+              : skillMutationErrorStatus(contentEditError.code);
           errorResponse(
             res,
-            isServerError ? 500 : 400,
-            isServerError ? 'urn:ok:error:internal-server-error' : 'urn:ok:error:invalid-request',
+            status,
+            status === 500 ? 'urn:ok:error:internal-server-error' : 'urn:ok:error:invalid-request',
             `Skill renamed to "${body.toName}", but updating its SKILL.md failed — its name frontmatter may not match the new directory.`,
             {
               handler: 'skill-move',
               detail: contentEditError.code,
-              cause: new Error(contentEditError.message),
+              cause: contentEditError.cause ?? new Error(contentEditError.message),
             },
           );
           return;

@@ -52,6 +52,7 @@ import { yXmlFragmentToProseMirrorRootNode } from '@tiptap/y-tiptap';
 import * as Y from 'yjs';
 import { configureTestGitRepository } from '../../../../test-support/configure-git-fixture.test-helper.ts';
 import { testAuthorityRegistryPath } from '../../../../test-support/server-authority-registry.test-helper.ts';
+import { listenOnLoopback } from '../../../server/src/loopback-rig-test-helpers.ts';
 import {
   ORIGIN_TEXT_TO_TREE,
   ORIGIN_TREE_TO_TEXT,
@@ -60,7 +61,7 @@ import {
 import type { ProviderPool } from '../../src/editor/provider-pool';
 import { dispatchCC1Stateless, SYSTEM_DOC_NAME } from '../../src/lib/cc1';
 import { createSyncedReconnectGate, refreshServerInfo } from '../../src/lib/server-info-refresh';
-import { getFreePort } from '../free-port.test-helper.ts';
+import { getServerInstanceId } from '../../src/lib/server-instance-store';
 import {
   removeAllDuringTeardown,
   removeAllStrictDuringTeardown,
@@ -107,6 +108,10 @@ export interface CreateTestServerOptions {
   pushIntervalSeconds?: number;
   agentSessionOptions?: ServerOptions['agentSessionOptions'];
   seedSkillHostRoot?: boolean;
+  watcherBackend?: ServerOptions['watcherBackend'];
+  watcherClock?: ServerOptions['watcherClock'];
+  freshnessIntervalMs?: ServerOptions['freshnessIntervalMs'];
+  mergeHistoryWriter?: ServerOptions['mergeHistoryWriter'];
 }
 
 export async function createTestServer(options: CreateTestServerOptions = {}): Promise<TestServer> {
@@ -116,70 +121,88 @@ export async function createTestServer(options: CreateTestServerOptions = {}): P
     options.contentDir !== undefined
       ? realpathSync(options.contentDir)
       : realpathSync(mkdtempSync(join(tmpdir(), 'ok-test-')));
-  const ownedHomeDir =
-    options.configHomedirOverride === undefined
-      ? realpathSync(mkdtempSync(join(tmpdir(), 'ok-test-home-')))
-      : null;
-  const homeOverride = options.configHomedirOverride ?? (ownedHomeDir as string);
-  if (ownedHomeDir !== null && (options.seedSkillHostRoot ?? true)) {
-    mkdirSync(join(ownedHomeDir, '.claude', 'skills'), { recursive: true });
-  }
-
   const createdProjectDir = ephemeral && options.projectDir === undefined;
-  const projectDir = options.projectDir
-    ? realpathSync(options.projectDir)
-    : ephemeral
-      ? realpathSync(mkdtempSync(join(tmpdir(), 'ok-ephemeral-test-')))
-      : contentDir;
+  let ownedHomeDir: string | null = null;
+  let projectDir: string | undefined;
+  let port: number;
+  let srv: ServerInstance;
+  try {
+    if (options.configHomedirOverride === undefined) {
+      ownedHomeDir = realpathSync(mkdtempSync(join(tmpdir(), 'ok-test-home-')));
+    }
+    const homeOverride = options.configHomedirOverride ?? (ownedHomeDir as string);
 
-  if (!ephemeral) {
-    if (options.contentDir === undefined) {
-      writeFileSync(join(contentDir, 'test-doc.md'), '', 'utf-8');
+    if (ownedHomeDir !== null && (options.seedSkillHostRoot ?? true)) {
+      mkdirSync(join(ownedHomeDir, '.claude', 'skills'), { recursive: true });
     }
 
-    if (options.contentDir === undefined) {
-      mkdirSync(join(contentDir, '.ok'), { recursive: true });
-      const seedConfig =
-        options.seedProjectConfigYml ??
-        (options.markdownlintEnabled ? 'contentRules:\n  markdownlint:\n    enabled: true\n' : '');
-      writeFileSync(join(contentDir, '.ok', 'config.yml'), seedConfig, 'utf-8');
+    projectDir = options.projectDir
+      ? realpathSync(options.projectDir)
+      : ephemeral
+        ? realpathSync(mkdtempSync(join(tmpdir(), 'ok-ephemeral-test-')))
+        : contentDir;
+
+    if (!ephemeral) {
+      if (options.contentDir === undefined) {
+        writeFileSync(join(contentDir, 'test-doc.md'), '', 'utf-8');
+      }
+
+      if (options.contentDir === undefined) {
+        mkdirSync(join(contentDir, '.ok'), { recursive: true });
+        const seedConfig =
+          options.seedProjectConfigYml ??
+          (options.markdownlintEnabled
+            ? 'contentRules:\n  markdownlint:\n    enabled: true\n'
+            : '');
+        writeFileSync(join(contentDir, '.ok', 'config.yml'), seedConfig, 'utf-8');
+      }
+
+      if (options.contentDir === undefined && (options.seedSkillHostRoot ?? true)) {
+        mkdirSync(join(contentDir, '.claude', 'skills'), { recursive: true });
+      }
+
+      const gitSetup = await ensureProjectGit(contentDir);
+      if (gitSetup.didInit || existsSync(join(contentDir, '.git', 'config'))) {
+        configureTestGitRepository(contentDir);
+      }
     }
 
-    if (options.contentDir === undefined && (options.seedSkillHostRoot ?? true)) {
-      mkdirSync(join(contentDir, '.claude', 'skills'), { recursive: true });
-    }
-
-    const gitSetup = await ensureProjectGit(contentDir);
-    if (gitSetup.didInit || existsSync(join(contentDir, '.git', 'config'))) {
-      configureTestGitRepository(contentDir);
-    }
+    srv = createServer({
+      authorityRegistryPath: options.authorityRegistryPath ?? testAuthorityRegistryPath,
+      contentDir,
+      projectDir,
+      ingressPolicy: options.ingressPolicy,
+      quiet: true,
+      debounce: options.debounce ?? 200,
+      maxDebounce: options.maxDebounce ?? 1000,
+      stalenessGraceMs: options.stalenessGraceMs,
+      stalenessSweepIntervalMs: options.stalenessSweepIntervalMs,
+      gitEnabled: ephemeral ? false : (options.gitEnabled ?? false),
+      commitDebounceMs: options.commitDebounceMs ?? 200,
+      contentRoot: options.gitEnabled === true ? '.' : undefined,
+      enableTestRoutes: true,
+      localOpCliArgs: options.localOpCliArgs,
+      authStreamHeartbeatMs: options.authStreamHeartbeatMs,
+      configHomedirOverride: homeOverride,
+      mdManager: options.mdManager,
+      pullIntervalSeconds: options.pullIntervalSeconds,
+      pushIntervalSeconds: options.pushIntervalSeconds,
+      agentSessionOptions: options.agentSessionOptions,
+      watcherBackend: options.watcherBackend,
+      watcherClock: options.watcherClock,
+      freshnessIntervalMs: options.freshnessIntervalMs ?? null,
+      mergeHistoryWriter: options.mergeHistoryWriter,
+      ...(ephemeral ? { ephemeral: true, singleDocRelPath: options.singleDocRelPath } : {}),
+      skipStateManifestCheck: true,
+    });
+  } catch (error) {
+    removeAllStrictDuringTeardown(
+      ...(options.contentDir === undefined ? [contentDir] : []),
+      ...(ownedHomeDir !== null ? [ownedHomeDir] : []),
+      ...(createdProjectDir && projectDir !== undefined ? [projectDir] : []),
+    );
+    throw error;
   }
-
-  const port = await getFreePort();
-  const srv = createServer({
-    authorityRegistryPath: options.authorityRegistryPath ?? testAuthorityRegistryPath,
-    contentDir,
-    projectDir,
-    ingressPolicy: options.ingressPolicy,
-    quiet: true,
-    debounce: options.debounce ?? 200,
-    maxDebounce: options.maxDebounce ?? 1000,
-    stalenessGraceMs: options.stalenessGraceMs,
-    stalenessSweepIntervalMs: options.stalenessSweepIntervalMs,
-    gitEnabled: ephemeral ? false : (options.gitEnabled ?? false),
-    commitDebounceMs: options.commitDebounceMs ?? 200,
-    contentRoot: options.gitEnabled === true ? '.' : undefined,
-    enableTestRoutes: true,
-    localOpCliArgs: options.localOpCliArgs,
-    authStreamHeartbeatMs: options.authStreamHeartbeatMs,
-    configHomedirOverride: homeOverride,
-    mdManager: options.mdManager,
-    pullIntervalSeconds: options.pullIntervalSeconds,
-    pushIntervalSeconds: options.pushIntervalSeconds,
-    agentSessionOptions: options.agentSessionOptions,
-    ...(ephemeral ? { ephemeral: true, singleDocRelPath: options.singleDocRelPath } : {}),
-    skipStateManifestCheck: true,
-  });
 
   await srv.ready;
 
@@ -207,17 +230,7 @@ export async function createTestServer(options: CreateTestServerOptions = {}): P
     keepaliveGraceMs: options.keepaliveGraceMs,
   });
 
-  await new Promise<void>((resolve, reject) => {
-    const onErr = (err: Error): void => {
-      httpServer.off('error', onErr);
-      reject(err);
-    };
-    httpServer.once('error', onErr);
-    httpServer.listen(port, '127.0.0.1', () => {
-      httpServer.off('error', onErr);
-      resolve();
-    });
-  });
+  ({ port } = await listenOnLoopback(httpServer));
 
   return {
     port,
@@ -641,6 +654,31 @@ export async function pollUntil(
   );
 }
 
+export async function refreshServerInfoAndAwaitMismatch(
+  pool: ProviderPool,
+  baseUrl: string,
+): Promise<void> {
+  const res = await fetch(`${baseUrl}/api/server-info`);
+  if (!res.ok) {
+    throw new Error(`refreshServerInfoAndAwaitMismatch: /api/server-info returned ${res.status}`);
+  }
+  const { serverInstanceId } = ServerInfoSuccessSchema.parse(await res.json());
+  await refreshServerInfo(pool, baseUrl);
+  const adopted = getServerInstanceId();
+  if (adopted !== serverInstanceId) {
+    throw new Error(
+      `refreshServerInfoAndAwaitMismatch: refreshServerInfo did not adopt server instance ${serverInstanceId} from ${baseUrl}/api/server-info (store holds ${adopted})`,
+    );
+  }
+  const poolInstanceId = await pool.whenServerInstanceKnown();
+  if (poolInstanceId !== serverInstanceId) {
+    throw new Error(
+      `refreshServerInfoAndAwaitMismatch: pool holds server instance ${poolInstanceId} after refreshServerInfo, expected ${serverInstanceId}`,
+    );
+  }
+  await pool.awaitMismatchSettled();
+}
+
 export async function awaitFileWatcherIndexed(
   server: TestServer,
   docPath: string,
@@ -1036,7 +1074,6 @@ export interface InspectableServer {
 }
 
 export interface CreateInspectableServerOptions extends CreateTestServerOptions {
-  port?: number;
   gitEnabled?: boolean;
   commitDebounceMs?: number;
 }
@@ -1080,7 +1117,6 @@ export async function createInspectableServer(
   await ensureProjectGit(contentDir);
   configureTestGitRepository(contentDir);
 
-  const port = options.port ?? (await getFreePort());
   const srv = createServer({
     authorityRegistryPath: options.authorityRegistryPath ?? testAuthorityRegistryPath,
     contentDir,
@@ -1117,37 +1153,7 @@ export async function createInspectableServer(
   });
   const wss = mount.wss;
 
-  const listenWithRetry = async (): Promise<void> => {
-    const deadline = Date.now() + 2500;
-    let lastErr: unknown;
-    while (Date.now() < deadline) {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const onErr = (err: Error): void => {
-            httpServer.off('error', onErr);
-            reject(err);
-          };
-          httpServer.once('error', onErr);
-          httpServer.listen(port, '127.0.0.1', () => {
-            httpServer.off('error', onErr);
-            resolve();
-          });
-        });
-        return;
-      } catch (err) {
-        lastErr = err;
-        const code = (err as NodeJS.ErrnoException)?.code;
-        if (code !== 'EADDRINUSE') throw err;
-        await wait(100);
-      }
-    }
-    throw new Error(
-      `createRestartableServer: could not bind port ${port} within 2500ms; last error: ${
-        lastErr instanceof Error ? lastErr.message : String(lastErr)
-      }`,
-    );
-  };
-  await listenWithRetry();
+  const { port } = await listenOnLoopback(httpServer);
 
   let networkKilled = false;
 

@@ -4,6 +4,7 @@ import {
   AdvisoryWarningSchema,
   BrokenLinkSchema,
   BrokenLinkSuppressionSchema,
+  currentCliCommandName,
   getAgentCanonicalDescriptors,
   isAuditEmptyScopeWarning,
   SERVER_TIMEOUT_ERROR_PREFIX,
@@ -158,8 +159,17 @@ export function requestFailureText(result: { [key: string]: unknown }): string {
   return `${title}${detail}${retryAfter}`;
 }
 
-export function errorTextWithDetail(result: { [key: string]: unknown }): string {
-  return `Error: ${requestFailureText(result)}`;
+export function errorTextWithDetail(
+  result: { [key: string]: unknown },
+  invalidRequestAdvice?: string,
+): string {
+  const advice =
+    result.type === 'urn:ok:error:invalid-request' &&
+    result.contentControlAdmission === true &&
+    invalidRequestAdvice
+      ? ` ${invalidRequestAdvice}`
+      : '';
+  return `Error: ${requestFailureText(result)}${advice}`;
 }
 
 export function textResult(text: string, isError?: boolean) {
@@ -197,8 +207,9 @@ export function textPlusStructured<T>(text: string, structured: T, isError?: boo
   };
 }
 
-export const HOCUSPOCUS_NOT_RUNNING_ERROR =
-  'Error: Hocuspocus server is not running. Start it with `ok start`, then retry.\nDo not fall back to native file edits for in-scope markdown; route writes through OpenKnowledge so attribution and live sync stay intact.';
+export function hocuspocusNotRunningError(): string {
+  return `Error: Hocuspocus server is not running. Start it with \`${currentCliCommandName()} start\`, then retry.\nDo not fall back to native file edits for in-scope markdown; route writes through OpenKnowledge so attribution and live sync stay intact.`;
+}
 
 export type ServerUrlOrResolver =
   | string
@@ -249,7 +260,7 @@ export async function requireProjectServer(
 > {
   const context = await resolveProjectServerContext(resolveCwd, config, serverUrl, explicitCwd);
   if (!context.ok) return { ok: false, result: textResult(`Error: ${context.error}`, true) };
-  if (!context.url) return { ok: false, result: textResult(HOCUSPOCUS_NOT_RUNNING_ERROR, true) };
+  if (!context.url) return { ok: false, result: textResult(hocuspocusNotRunningError(), true) };
   return {
     ok: true,
     cwd: context.cwd,
@@ -367,7 +378,16 @@ export function apiTarget(url: string, local: LocalApiDispatch | undefined): Api
 }
 
 export function isTimeoutError(err: unknown): boolean {
-  return err instanceof Error && err.name === 'TimeoutError';
+  return (
+    err instanceof Error &&
+    (err.name === 'TimeoutError' ||
+      [err, err.cause].some(
+        (cause) =>
+          cause instanceof Error &&
+          'code' in cause &&
+          (cause.code === 'UND_ERR_HEADERS_TIMEOUT' || cause.code === 'UND_ERR_BODY_TIMEOUT'),
+      ))
+  );
 }
 
 export function serverRequestFailure(err: unknown, opts?: { mutating?: boolean }): string {
@@ -424,9 +444,19 @@ async function localApiCall(
   return includeHttpStatus ? { ...normalized, httpStatus: raw.status } : normalized;
 }
 
+export function httpGet(
+  base: string,
+  path: string,
+  signal: AbortSignal,
+): Promise<{ ok: boolean; [key: string]: unknown }>;
+export function httpGet(
+  base: ApiTarget,
+  path: string,
+): Promise<{ ok: boolean; [key: string]: unknown }>;
 export async function httpGet(
   base: ApiTarget,
   path: string,
+  signal?: AbortSignal,
 ): Promise<{ ok: boolean; [key: string]: unknown }> {
   if (typeof base !== 'string') {
     const local = await localApiCall(base.local, 'GET', path, undefined, true);
@@ -435,7 +465,7 @@ export async function httpGet(
   }
   let res: Response;
   try {
-    res = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(30_000) });
+    res = await fetch(`${base}${path}`, { signal: signal ?? AbortSignal.timeout(30_000) });
   } catch (err) {
     return { ok: false, error: serverRequestFailure(err, { mutating: false }) };
   }

@@ -1,8 +1,17 @@
 import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import {
+  accessSync,
+  existsSync,
+  constants as fsConstants,
+  lstatSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import type { Document, Extension } from '@hocuspocus/server';
 import { Hocuspocus, IncomingMessage, MessageType } from '@hocuspocus/server';
 import {
@@ -13,6 +22,7 @@ import {
   CONFIG_DOC_NAME_USER,
   CONFIG_DOC_NAMES,
   type ConfigDiagnosticsReport,
+  type ConfigDocName,
   type ConfigIssue,
   createBasenameIndex,
   DEFAULT_ATTACHMENT_FOLDER_PATH,
@@ -51,6 +61,7 @@ import {
   resolveShadowDir,
 } from '@inkeep/open-knowledge-core/shadow-repo-layout';
 import simpleGit from 'simple-git';
+import type { Doc } from 'yjs';
 import { AcpPermissionStore } from './acp/permissions.ts';
 import { AcpRegistry, loadCustomAgents } from './acp/registry.ts';
 import { AgentFocusBroadcaster } from './agent-focus.ts';
@@ -73,7 +84,11 @@ import {
 import {
   CC1Broadcaster,
   isConfigDoc,
+  isEditableTextDoc,
+  isExcalidrawDoc,
   isManagedArtifactDoc,
+  isMermaidDoc,
+  isPersistenceExcludedDoc,
   isReservedForUserTree,
   SYSTEM_DOC_NAME,
 } from './cc1-broadcast.ts';
@@ -84,7 +99,12 @@ import {
   startConfigFileWatcher,
   startMultiPathConfigFileWatcher,
 } from './config-file-watcher.ts';
-import { applyExternalConfigChange, isConfigEcho } from './config-persistence.ts';
+import {
+  applyExternalConfigChange,
+  configDocAbsPath,
+  isConfigEcho,
+  resetConfigDocForTest,
+} from './config-persistence.ts';
 import { bindConflictAuthority, ConflictAuthority } from './conflict-authority.ts';
 import { createGeneratedIndexWarningScope } from './content/generate-index.ts';
 import { type GeneratedArtifactEnv, writeGeneratedArtifact } from './content/generated-artifact.ts';
@@ -117,6 +137,8 @@ import {
 } from './derived-document-index.ts';
 import { resolveDirectoryRoot } from './directory-root.ts';
 import { applyDiskContentToDoc } from './disk-content-intake.ts';
+import { DiskReceiptLog, receiptFileIsGoneIn } from './disk-receipts.ts';
+import { displayPathFor } from './display-path.ts';
 import {
   canonicalDocName,
   docNameToRelativePath,
@@ -125,10 +147,19 @@ import {
   stripDocExtension,
 } from './doc-extensions.ts';
 import { runDocLineageGuard } from './doc-lineage-guard.ts';
+import { DocNoticeLedger, type NoticeFile } from './doc-notices.ts';
 import {
   DocumentDurabilityState,
   type StaleExternalWriteConflict,
+  type StoreIntakeMerge,
+  type WrittenThrough,
+  writtenThroughOf,
 } from './document-durability-state.ts';
+import {
+  createReconnectRefreshExtension,
+  type DocumentRefreshResult,
+  type DocumentRefreshTrigger,
+} from './document-refresh.ts';
 import {
   type Embedder,
   type EmbeddingsKeyStore,
@@ -143,8 +174,13 @@ import {
 import {
   applyExternalChange,
   FILE_WATCHER_ORIGIN,
+  type FrozenResidentRevival,
   redactedErrorSummary,
   refuseStaleExternalWrite,
+  reportReconcileBothKept,
+  reportReconcileCheckFailed,
+  reportReconcileKeptLive,
+  reviveFrozenResidentDoc,
   serializeYDocSource,
   wireReasonForRefusal,
 } from './external-change.ts';
@@ -152,7 +188,12 @@ import {
   assertNeverDiskEvent,
   contentHash,
   type DiskEvent,
+  getMarkdownEventFacts,
+  getMarkdownRemovalCurrentness,
+  hasAdmittedMarkdownFile,
+  type NativeWatcherBackend,
   pathToDocName,
+  type RecheckResult,
   reconcileFileIndexAfterFilterRebuild,
   registerRemoval,
   registerWrite,
@@ -182,7 +223,7 @@ import type { NativeApiHandle } from './http/http-app.ts';
 import type { LocalApiDispatch } from './http/local-api-dispatch.ts';
 import type { GeneratedIndexSettingsStatus } from './http/workspace-tools-routes.ts';
 import {
-  scanGlobalInPlaceSkills,
+  scanGlobalInPlaceSkillsAsync,
   scanInPlaceSkillDirs,
   scanInPlaceSkills,
   skillRootPathsFor,
@@ -211,6 +252,7 @@ import {
 import {
   applyExternalManagedArtifactChange,
   homeFor,
+  managedArtifactAbsPath,
   managedArtifactDocNameForPath,
   managedArtifactSkillsRoots,
 } from './managed-artifact-persistence.ts';
@@ -218,14 +260,20 @@ import { startManagedArtifactWatcher } from './managed-artifact-watcher.ts';
 import { recoverPendingManagedRename } from './managed-rename-journal.ts';
 import type { NativeTomlMcpEditor } from './mcp-config-reconciler.ts';
 import { mdManager, schema } from './md-manager.ts';
+import { createMergeHistoryRecorder, type MergeHistoryWriter } from './merge-history.ts';
+import { applyExternalEnginelessChange } from './mermaid-persistence.ts';
 import {
   incrementBatch,
   incrementBranchSwitch,
+  incrementBranchSwitchRecheckShortfalls,
   incrementConflict,
   incrementDiskAuthoritativeIngest,
   incrementDiskAuthoritativeIngestApplyFailures,
   incrementDiskAuthoritativeIngestUnrescued,
+  incrementOutsideRenameClaimFailures,
+  incrementOutsideRenameRecordFailures,
   incrementPark,
+  incrementReceiptIntakeSkip,
   incrementRecentlyRemovedDocsEviction,
   incrementReconcile,
   incrementReconcileInsertDedupSkipped,
@@ -233,6 +281,7 @@ import {
   incrementRescueBufferWriteFailures,
   incrementRescueCheckpointWriteFailures,
   incrementUpstreamImport,
+  recordVanishOutcome,
   setRecentlyRemovedDocsSize,
 } from './metrics.ts';
 import { destroyParsePool } from './parse-pool.ts';
@@ -251,10 +300,12 @@ import { runRemovalRedirectGuard } from './removal-redirect-guard.ts';
 import { loadRemovedDocsJournal, saveRemovedDocsJournal } from './removed-docs-journal.ts';
 import {
   gcRenameLog,
+  getOrLoadRenameLogIndex,
   loadRenameLogIndex,
   setRenameLogIndex,
   sweepLazyPopOrphans,
 } from './rename-log.ts';
+import { followRenameRecords } from './rename-records.ts';
 import {
   acquireServerAuthority,
   contentScopeContainsPath,
@@ -286,18 +337,19 @@ import {
   registerLoadedDocsProvider,
   registerPersistenceQueueDepthProvider,
 } from './server-workload-telemetry.ts';
+import { AttachmentFolderPathConfigError } from './services/assets.ts';
 import { shadowOpGateFor } from './shadow-op-gate.ts';
 import {
   buildWipTree,
   commitUpstreamImport,
   configureShadowGc,
   destroyShadowRepo,
+  FILE_SYSTEM_WRITER,
   initShadowRepo,
   isShadowExcludesDegraded,
   OK_GENERATOR_WRITER,
   type ParkableDoc,
   parkBranch,
-  readParkedState,
   SERVICE_WRITER,
   type ShadowHandle,
   type ShadowRef,
@@ -312,12 +364,23 @@ import {
 import { resyncRecordedSkillCopies } from './skill-placements.ts';
 import { skillStateYamlPath } from './skill-state.ts';
 import { assertCompatibleStateManifest } from './state-manifest.ts';
+import { classifyIntakeAgainstReceipt, receiptIntakeSkipOf } from './store-compare.ts';
 import { assertRealpathWithinDir } from './symlink-guard.ts';
 import { SyncEngine } from './sync-engine.ts';
 import { createSyncHandshakeSpanExtension } from './sync-handshake-span-extension.ts';
 import { initTelemetry, shutdownTelemetry, withSpan } from './telemetry.ts';
 import { trustSystemCertificates } from './trust-system-ca.ts';
 import { cleanupOrphanUploadTempfiles } from './upload-streaming.ts';
+import {
+  type RecentCreate,
+  VANISH_HOLD_LIMIT_MS,
+  VANISH_OVERDUE_FAULT_LIMIT,
+  VANISH_RECHECK_DELAY_MS,
+  type VanishedDocument,
+  VanishedDocuments,
+} from './vanished-documents.ts';
+import { type WatcherClock, type WatcherTimer, watcherClock } from './watcher-clock.ts';
+import { FRESHNESS_BASE_INTERVAL_MS } from './watcher-freshness.ts';
 
 export interface ServerOptions {
   acpRegistryFetchImpl?: typeof fetch;
@@ -364,6 +427,10 @@ export interface ServerOptions {
   embedderLoader?: (input: LoadOpenAiEmbedderInput) => Promise<Embedder | null>;
   singleDocRelPath?: string;
   ephemeral?: boolean;
+  watcherBackend?: NativeWatcherBackend;
+  watcherClock?: WatcherClock;
+  freshnessIntervalMs?: number | null;
+  mergeHistoryWriter?: MergeHistoryWriter;
   generatedIndexTestHooks?: {
     beforePlan?: (context: { fullSweep: boolean; signal: AbortSignal }) => Promise<void> | void;
     beforeDecision?: (context: {
@@ -413,6 +480,7 @@ export interface ServerInstance {
   readonly resolveTrackedFile: (relativePath: string) => string | undefined;
   readonly acpRegistry: AcpRegistry;
   readonly acpPermissions: AcpPermissionStore;
+  readonly recheckDisk: () => Promise<RecheckResult>;
 }
 
 export function observeShutdownDocumentRetirements(
@@ -435,6 +503,10 @@ export function observeShutdownDocumentRetirements(
 }
 
 export const SHADOW_FANOUT_WARMUP_MS = 3000;
+
+export const BRANCH_SWITCH_FOLLOW_UP_LIMIT = 3;
+
+export const BRANCH_SWITCH_FOLLOW_UP_DELAY_MS = 5_000;
 
 const PARK_SNAPSHOT_ORIGIN = (() => {
   const ctx = Object.freeze({ origin: 'park-snapshot', paired: true as const });
@@ -568,8 +640,13 @@ export function createServer(options: ServerOptions): ServerInstance {
   const generatedIndexWarningScope = createGeneratedIndexWarningScope(resolve(contentDir));
   let cc1Broadcaster: CC1Broadcaster | null = null;
   const initialBranch = readProjectHeadState(projectDir).branch ?? 'main';
+  const diskReceipts = new DiskReceiptLog({
+    path: join(getLocalDir(projectDir), 'receipts.jsonl'),
+  });
+  const receiptFileIsGone = receiptFileIsGoneIn(contentDir);
   const durabilityState = new DocumentDurabilityState(initialBranch, {
     persistencePath: join(getLocalDir(projectDir), 'stale-external-writes.json'),
+    receipts: diskReceipts,
     onStaleExternalWriteChange: () => {
       cc1Broadcaster?.signal('sync-status');
       hydrateStaleExternalWrites();
@@ -593,15 +670,29 @@ export function createServer(options: ServerOptions): ServerInstance {
   const deleteReconciledBase = (docName: string) => durabilityState.deleteReconciledBase(docName);
   const switchReconciledBaseScope = (branch: string) =>
     durabilityState.switchReconciledBaseScope(branch);
-  const setBatchInProgress = (value: boolean) => durabilityState.setBatchInProgress(value);
-  const setBatchInProgressAndDrain = (value: boolean) => {
-    setBatchInProgress(value);
-    if (!value) {
-      void persistence.flushDeferredStores('within-branch').catch((err) => {
-        log.error({ err }, '[persistence] deferred store drain failed after batch');
-      });
+  const vanishedDocuments = new VanishedDocuments();
+  const holdBatch = (owner: string): void => durabilityState.holdBatch(owner);
+  const releaseBatchHold = (owner: string): boolean => durabilityState.releaseBatch(owner);
+  const finishBatch = async (): Promise<void> => {
+    try {
+      await drainEventBuffer();
+    } finally {
+      disposeBufferedRemovalScopes();
     }
+    await persistence.flushDeferredStores('within-branch');
   };
+  const batchFlagFor =
+    (owner: string) =>
+    (value: boolean): void => {
+      if (value) {
+        holdBatch(owner);
+        return;
+      }
+      if (!releaseBatchHold(owner)) return;
+      void finishBatch().catch((err: unknown) => {
+        log.error({ err, owner }, '[batch] draining after the batch failed');
+      });
+    };
   const isBatchInProgress = () => durabilityState.isBatchInProgress();
 
   const conflicts = new ConflictAuthority({
@@ -631,6 +722,7 @@ export function createServer(options: ServerOptions): ServerInstance {
           throw cause;
         }
         contentFilter.decrementMdDir(dirname(docName));
+        commentDocHooksRef.current?.deleted(docName);
       },
       applyResolvedContent: async (docName, absPath, bytes) => {
         assertContentPath(absPath);
@@ -659,70 +751,110 @@ export function createServer(options: ServerOptions): ServerInstance {
           }
           durabilityState.clearStaleExternalWrite(docName);
         }
+        if (strategy === 'delete' && hasAdmittedMarkdownBinding(docName)) {
+          log.debug(
+            { docName, source: 'resolve-delete', bindingRecreated: true },
+            `[reconcile] delete skipped: ${docName} (binding recreated)`,
+          );
+          return;
+        }
         const document = hocuspocus.documents.get(docName);
         const lifecycle = document?.getMap('lifecycle');
         if (strategy === 'delete') {
-          const isDirty = document
-            ? rescueUnflushedEditsBeforeTeardown(
-                docName,
-                headWatcher?.getLastKnownBranch() ?? 'main',
-                'delete',
-                true,
-              )
-            : false;
-          await derivedDocumentIndex.recordDiskDelete(docName);
-          log.info(
-            { docName, isDirty, source: 'resolve-delete' },
-            `[reconcile] delete: ${docName} (dirty=${isDirty})`,
-          );
-          const priorLifecycle = lifecycle
-            ? {
-                status: lifecycle.get('status'),
-                reason: lifecycle.get('reason'),
-                detectedAt: lifecycle.get('detectedAt'),
-              }
-            : undefined;
-          lifecycle?.set('status', 'deleted-upstream');
-          lifecycle?.delete('reason');
-          lifecycle?.delete('detectedAt');
-          if (document) {
-            try {
-              hocuspocus.closeConnections(docName);
-              await forceUnloadDocument(document);
-            } catch (cause) {
-              if (lifecycle && priorLifecycle) {
-                for (const [key, value] of Object.entries(priorLifecycle)) {
-                  if (value === undefined) lifecycle.delete(key);
-                  else lifecycle.set(key, value);
-                }
-              }
-              if (priorStaleExternalWrite) {
-                try {
-                  durabilityState.restoreStaleExternalWrite(
-                    priorStaleExternalWrite.conflict,
-                    priorStaleExternalWrite.branch,
-                  );
-                } catch (rollbackFailure) {
-                  log.error(
-                    { err: rollbackFailure, docName },
-                    `[reconcile] stale-external-write rollback failed for ${docName}; the retry may not find the conflict`,
-                  );
-                }
-              }
-              throw cause;
+          const removal = beginRemoval(docName);
+          try {
+            const isDirty =
+              removal.residentCurrent() && document
+                ? rescueUnflushedEditsBeforeTeardown(
+                    docName,
+                    headWatcher?.getLastKnownBranch() ?? 'main',
+                    'delete',
+                    true,
+                  )
+                : false;
+            if (removal.namespaceCurrent()) {
+              commentDocHooksRef.current?.deleted(docName);
+              await derivedDocumentIndex.recordDiskDelete(docName);
             }
+            if (!removal.namespaceCurrent() && !removal.residentCurrent()) {
+              log.debug(
+                {
+                  docName,
+                  source: 'resolve-delete',
+                  namespaceCurrent: false,
+                  residentCurrent: false,
+                },
+                `[reconcile] delete skipped: ${docName} (stale removal)`,
+              );
+              return;
+            }
+            log.info(
+              { docName, isDirty, source: 'resolve-delete' },
+              `[reconcile] delete: ${docName} (dirty=${isDirty})`,
+            );
+            const priorLifecycle = lifecycle
+              ? {
+                  status: lifecycle.get('status'),
+                  reason: lifecycle.get('reason'),
+                  detectedAt: lifecycle.get('detectedAt'),
+                }
+              : undefined;
+            if (document && removal.residentCurrent()) {
+              lifecycle?.set('status', 'deleted-upstream');
+              lifecycle?.delete('reason');
+              lifecycle?.delete('detectedAt');
+              try {
+                hocuspocus.closeConnections(docName);
+                await forceUnloadDocument(document, removal.residentCurrent);
+              } catch (cause) {
+                if (removal.residentCurrent() && lifecycle && priorLifecycle) {
+                  for (const [key, value] of Object.entries(priorLifecycle)) {
+                    if (value === undefined) lifecycle.delete(key);
+                    else lifecycle.set(key, value);
+                  }
+                }
+                if (removal.namespaceCurrent() && priorStaleExternalWrite) {
+                  try {
+                    durabilityState.restoreStaleExternalWrite(
+                      priorStaleExternalWrite.conflict,
+                      priorStaleExternalWrite.branch,
+                    );
+                  } catch (rollbackFailure) {
+                    log.error(
+                      { err: rollbackFailure, docName },
+                      `[reconcile] stale-external-write rollback failed for ${docName}; the retry may not find the conflict`,
+                    );
+                  }
+                }
+                throw cause;
+              }
+            }
+            if (!removal.namespaceCurrent()) {
+              log.debug(
+                {
+                  docName,
+                  source: 'resolve-delete',
+                  namespaceCurrent: false,
+                  residentCurrent: removal.residentCurrent(),
+                },
+                `[reconcile] delete: ${docName} not recorded as removed (stale removal)`,
+              );
+              return;
+            }
+            deleteReconciledBase(docName);
+            onUpstreamDelete(docName);
+            scheduleIndexRegenerationAfterRemoval(docName);
+            console.info(
+              JSON.stringify({
+                event: 'recently-removed-docs-populate',
+                docName,
+                kind: 'deleted',
+                source: 'resolve-delete',
+              }),
+            );
+          } finally {
+            removal.dispose();
           }
-          deleteReconciledBase(docName);
-          onUpstreamDelete(docName);
-          scheduleIndexRegenerationAfterRemoval(docName);
-          console.info(
-            JSON.stringify({
-              event: 'recently-removed-docs-populate',
-              docName,
-              kind: 'deleted',
-              source: 'resolve-delete',
-            }),
-          );
         } else if (lifecycle?.get('reason') === entry.reason) {
           lifecycle.delete('status');
           lifecycle.delete('reason');
@@ -765,8 +897,7 @@ export function createServer(options: ServerOptions): ServerInstance {
             )
           : [];
       if (attachmentIssues.length > 0) {
-        const details = attachmentIssues.map((issue) => issue.message).join('; ');
-        throw new Error(`Invalid content.attachmentFolderPath in project config: ${details}`);
+        throw new AttachmentFolderPathConfigError(attachmentIssues.map((issue) => issue.message));
       }
       if (options?.requireValid) {
         throw new Error('Project config is invalid', { cause: project.error });
@@ -1165,24 +1296,64 @@ export function createServer(options: ServerOptions): ServerInstance {
   });
 
   let loadedPrincipal: Principal | null = null;
-  const forceUnloadSet = new Set<Document>();
+  const forceUnloadRequests = new Map<Document, Set<() => boolean>>();
   let shutdownAllowsUnload = false;
   const unregisterWorkloadProviders: Array<() => void> = [];
-  let forceUnloadDocument!: (document: Document) => Promise<void>;
+  let forceUnloadDocument!: (document: Document, isCurrent?: () => boolean) => Promise<void>;
   let defaultShouldUnloadDocument!: (document: Document) => boolean;
 
-  let resolveReady!: () => void;
-  let rejectReady!: (err: unknown) => void;
-  const ready = new Promise<void>((res, rej) => {
-    resolveReady = res;
-    rejectReady = rej;
+  const {
+    promise: ready,
+    resolve: resolveReady,
+    reject: rejectReady,
+  } = Promise.withResolvers<void>();
+  let readyForNotices = false;
+  void ready.then(
+    () => {
+      readyForNotices = true;
+    },
+    () => {},
+  );
+  const noticeDisplayPath = (abs: string): string =>
+    displayPathFor(abs, projectDir, configHomedirOverride ?? homedir());
+  let heldSaveProbe: (docName: string) => boolean = () => true;
+  const noticeFileOutsideContent = (docName: string): NoticeFile | null => {
+    let abs: string;
+    try {
+      if (isConfigDoc(docName)) abs = configDocAbsPath(docName, persistence.configPersistenceCtx);
+      else if (isManagedArtifactDoc(docName)) {
+        abs = managedArtifactAbsPath(docName, persistence.managedArtifactCtx);
+      } else return null;
+    } catch (err) {
+      log.debug(
+        { err, docName },
+        '[doc-notices] no file to name for a notice outside the content folder',
+      );
+      return null;
+    }
+    return { abs, display: noticeDisplayPath(abs) };
+  };
+  const docNotices = new DocNoticeLedger({
+    projectDir,
+    contentDir,
+    getShadow: () => shadowRef?.current,
+    isReady: () => readyForNotices,
+    signal: () => cc1Broadcaster?.signal('sync-status'),
+    isHeld: (docName) => vanishedDocuments.has(docName),
+    isSaveHeld: (docName) => heldSaveProbe(docName),
+    resolveFile: noticeFileOutsideContent,
+  });
+  const mergeHistory = createMergeHistoryRecorder({
+    getShadow: () => shadowRef?.current,
+    contentRoot: contentRoot ?? '',
+    getBranch: getStorageBranch,
+    writeCheckpoint: options.mergeHistoryWriter,
+    notices: docNotices,
   });
   const offlineRemovalsReconciled = Promise.withResolvers<void>();
 
-  let resolveBranchScopeAligned!: () => void;
-  const branchScopeAligned = new Promise<void>((res) => {
-    resolveBranchScopeAligned = res;
-  });
+  const { promise: branchScopeAligned, resolve: resolveBranchScopeAligned } =
+    Promise.withResolvers<void>();
 
   const BRANCH_SCOPE_GATE_TIMEOUT_MS = 10_000;
 
@@ -1236,10 +1407,8 @@ export function createServer(options: ServerOptions): ServerInstance {
 
   let generatedIndexSweepSettled = false;
   let generatedIndexBootSweepCount = 0;
-  let resolveGeneratedIndexSweep!: (result: GeneratedIndexSweepResult) => void;
-  const generatedIndexSweepReady = new Promise<GeneratedIndexSweepResult>((resolve) => {
-    resolveGeneratedIndexSweep = resolve;
-  });
+  const { promise: generatedIndexSweepReady, resolve: resolveGeneratedIndexSweep } =
+    Promise.withResolvers<GeneratedIndexSweepResult>();
 
   function settleGeneratedIndexSweep(result: GeneratedIndexSweepResult): void {
     if (generatedIndexSweepSettled) return;
@@ -1595,7 +1764,7 @@ export function createServer(options: ServerOptions): ServerInstance {
 
     try {
       const content = readFileSync(configResult.path, 'utf-8');
-      applyExternalConfigChange(
+      await applyExternalConfigChange(
         hocuspocus.documents.get(CONFIG_DOC_NAME_PROJECT) ?? null,
         CONFIG_DOC_NAME_PROJECT,
         content,
@@ -1787,6 +1956,156 @@ export function createServer(options: ServerOptions): ServerInstance {
   removedDocsJournalWritable = true;
   const commentDocHooksRef: { current: CommentDocHooks | null } = { current: null };
 
+  type ResidentOccurrence = {
+    source: string | undefined;
+    mutation: { occurrence: ResidentOccurrence } | undefined;
+    adoption: object | undefined;
+    pendingRetirement: boolean;
+  };
+  let residentOccurrences = new WeakMap<Doc, ResidentOccurrence>();
+  type RemovalOperation = { namespaceAllowed: boolean; residentAllowed: boolean };
+  const activeRemovals = new Map<string, Set<RemovalOperation>>();
+
+  const resolvedContentDir = resolve(contentDir);
+  function resolveDocFilePath(docName: string): string | null {
+    if (!isSafeDocName(docName)) return null;
+    const relativePath = docNameToRelativePath(docName);
+    const filePath = resolve(resolvedContentDir, relativePath);
+    if (!isWithinDir(filePath, resolvedContentDir)) return null;
+    return filePath;
+  }
+
+  function hasAdmittedMarkdownBinding(docName: string): boolean {
+    const owner = watcher?.getFileIndex().get(docName);
+    const filePath = owner?.canonicalPath ?? resolveDocFilePath(docName);
+    if (filePath === null) return false;
+    return hasAdmittedMarkdownFile(docName, filePath, contentDir, contentFilter);
+  }
+
+  function occurrenceFor(document: Doc): ResidentOccurrence {
+    let occurrence = residentOccurrences.get(document);
+    if (!occurrence) {
+      occurrence = {
+        source: document.getText('source').toString(),
+        mutation: undefined,
+        adoption: undefined,
+        pendingRetirement: false,
+      };
+      residentOccurrences.set(document, occurrence);
+    }
+    return occurrence;
+  }
+
+  function revokeNamespaceRemovals(docName: string): void {
+    for (const removal of activeRemovals.get(docName) ?? []) removal.namespaceAllowed = false;
+  }
+
+  function acceptResident(document: Doc, docName: string): void {
+    if (
+      documentAdmissionClosed ||
+      document.isDestroyed ||
+      hocuspocus.documents.get(docName) !== document
+    )
+      return;
+    const occurrence = occurrenceFor(document);
+    occurrence.pendingRetirement = false;
+    occurrence.adoption = {};
+    for (const removal of activeRemovals.get(docName) ?? []) {
+      removal.namespaceAllowed = false;
+      removal.residentAllowed = false;
+    }
+  }
+
+  function markResidentForRetirement(document: Doc): void {
+    residentOccurrences.set(document, {
+      source: document.getText('source').toString(),
+      mutation: undefined,
+      adoption: undefined,
+      pendingRetirement: true,
+    });
+  }
+
+  function acceptNamespaceCreate(docName: string): void {
+    if (documentAdmissionClosed) return;
+    revokeNamespaceRemovals(docName);
+    const document = hocuspocus.documents.get(docName);
+    if (document) markResidentForRetirement(document);
+    commentDocHooksRef.current?.deleted(docName);
+  }
+
+  function captureNamespaceMove(docName: string): () => void {
+    const document = hocuspocus.documents.get(docName);
+    const occurrence = document ? occurrenceFor(document) : undefined;
+    const adoption = occurrence?.adoption;
+    return () => {
+      if (documentAdmissionClosed) return;
+      revokeNamespaceRemovals(docName);
+      if (
+        document &&
+        hocuspocus.documents.get(docName) === document &&
+        residentOccurrences.get(document) === occurrence &&
+        occurrence?.adoption === adoption
+      )
+        markResidentForRetirement(document);
+    };
+  }
+
+  function capturePublicationReceipt(document: Doc, docName: string): (() => void) | undefined {
+    const mutation = residentOccurrences.get(document)?.mutation;
+    if (!mutation) return undefined;
+    return () => {
+      if (residentOccurrences.get(document) === mutation.occurrence)
+        acceptResident(document, docName);
+    };
+  }
+
+  function acceptConnectedDocument(docName: string, document: Document): void {
+    if (hasAdmittedMarkdownBinding(docName)) acceptResident(document, docName);
+  }
+
+  function beginRemoval(docName: string, observedCurrent?: () => boolean) {
+    const document = hocuspocus.documents.get(docName);
+    const isApplicable = () =>
+      (observedCurrent?.() ?? true) && !hasAdmittedMarkdownBinding(docName);
+    const namespaceAllowed = !documentAdmissionClosed && isApplicable();
+    const operation: RemovalOperation = {
+      namespaceAllowed,
+      residentAllowed:
+        !documentAdmissionClosed &&
+        document !== undefined &&
+        (namespaceAllowed || occurrenceFor(document).pendingRetirement),
+    };
+    const removals = activeRemovals.get(docName) ?? new Set<RemovalOperation>();
+    if (!documentAdmissionClosed) {
+      removals.add(operation);
+      activeRemovals.set(docName, removals);
+    }
+    const namespaceCurrent = () => {
+      if (operation.namespaceAllowed && !isApplicable()) operation.namespaceAllowed = false;
+      return operation.namespaceAllowed;
+    };
+    return {
+      document,
+      namespaceCurrent,
+      residentCurrent: () => {
+        if (
+          operation.residentAllowed &&
+          (document === undefined ||
+            document.isDestroyed ||
+            hocuspocus.documents.get(docName) !== document)
+        )
+          operation.residentAllowed = false;
+        return operation.residentAllowed;
+      },
+      dispose: () => {
+        operation.namespaceAllowed = false;
+        operation.residentAllowed = false;
+        removals.delete(operation);
+        if (removals.size === 0) activeRemovals.delete(docName);
+      },
+    };
+  }
+
   const onUpstreamRename = (oldDocName: string, newDocName: string): void => {
     if (isReservedForUserTree(oldDocName)) return;
     recentlyRemovedDocs.setRenamed(oldDocName, newDocName);
@@ -1804,7 +2123,6 @@ export function createServer(options: ServerOptions): ServerInstance {
       return;
     }
     recentlyRemovedDocs.setDeleted(docName);
-    commentDocHooksRef.current?.deleted(docName);
   };
   const onUpstreamAdd = (docName: string): void => {
     if (isReservedForUserTree(docName)) return;
@@ -1818,7 +2136,7 @@ export function createServer(options: ServerOptions): ServerInstance {
     } catch (err) {
       log.warn(
         { err },
-        '[content-filter] invalid attachment folder at boot — using sibling admission',
+        '[content-filter] invalid attachment folder at boot — using default attachment placement',
       );
     }
     lastAppliedAttachmentFolderPath = initialAttachmentFolderPath;
@@ -1946,6 +2264,7 @@ export function createServer(options: ServerOptions): ServerInstance {
       getPrincipal: () => loadedPrincipal,
       onAgentCommit: () => cc1Broadcaster?.signal('session-activity'),
       onFlushCommit: () => maintenanceCoordinator?.noteFlushCommit(),
+      capturePublicationReceipt,
       onDiskFlush: (docName, sv, persistedMarkdown, previousMarkdown) => {
         cc1Broadcaster?.emitDiskAck(docName, sv);
         if (isReservedForUserTree(docName)) return;
@@ -1969,7 +2288,8 @@ export function createServer(options: ServerOptions): ServerInstance {
         globalCopyResyncTimer = setTimeout(() => {
           globalCopyResyncTimer = null;
           const home = configHomedirOverride ?? homedir();
-          void resyncRecordedSkillCopies(home, home, scanGlobalInPlaceSkills(home))
+          void scanGlobalInPlaceSkillsAsync(home)
+            .then((inPlace) => resyncRecordedSkillCopies(home, home, inPlace))
             .then((n) => {
               if (n > 0) log.info({ refreshed: n }, '[in-place-skills] post-edit copy re-sync');
             })
@@ -1980,9 +2300,33 @@ export function createServer(options: ServerOptions): ServerInstance {
       isRecentlyRemoved: (docName) => recentlyRemovedDocs.has(docName),
       mdManager: options.mdManager,
       getLossRing: () => lossRing,
+      mergeHistory,
+      ingestDiskAtStore: async (docName, absPath, content) => {
+        let outcome: DiskIntakeOutcome;
+        try {
+          outcome = await intakeDiskUpdate({ kind: 'update', path: absPath, docName, content });
+        } catch (error) {
+          return { kind: 'failed', error };
+        }
+        switch (outcome.kind) {
+          case 'applied':
+            return outcome.merge === undefined
+              ? { kind: 'taken-in' }
+              : { kind: 'taken-in', merge: outcome.merge };
+          case 'nothing-to-take':
+            return { kind: 'taken-in' };
+          case 'conflict':
+            return { kind: 'conflict' };
+          case 'failed':
+            return { kind: 'failed', error: outcome.error };
+          default:
+            return assertNeverDiskIntakeOutcome(outcome);
+        }
+      },
     };
 
     persistence = createPersistenceExtension({ ...persistenceOpts, durabilityState });
+    heldSaveProbe = (docName) => persistence.hasHeldSave(docName);
 
     hocuspocus = new Hocuspocus({
       quiet,
@@ -1990,6 +2334,34 @@ export function createServer(options: ServerOptions): ServerInstance {
       maxDebounce,
       extensions: [persistence.extension],
     });
+
+    const dispatchHooks = hocuspocus.hooks.bind(hocuspocus);
+    hocuspocus.hooks = (name, payload, callback) => {
+      if (
+        (name === 'afterLoadDocument' || name === 'onChange') &&
+        'document' in payload &&
+        !isReservedForUserTree(payload.document.name)
+      ) {
+        const document = payload.document;
+        const occurrence = occurrenceFor(document);
+        if (name === 'onChange' && occurrence.mutation === undefined) {
+          const source = document.getText('source').toString();
+          if (source !== occurrence.source) {
+            occurrence.source = undefined;
+            occurrence.mutation = { occurrence };
+          }
+        }
+      }
+      if (
+        name === 'connected' &&
+        'connection' in payload &&
+        payload.connection &&
+        !isReservedForUserTree(payload.documentName)
+      ) {
+        acceptConnectedDocument(payload.documentName, payload.connection.document);
+      }
+      return dispatchHooks(name, payload, callback);
+    };
 
     const openDirect = hocuspocus.openDirectConnection.bind(hocuspocus);
     function assertDocumentProjectScope(documentName: string): void {
@@ -2037,6 +2409,9 @@ export function createServer(options: ServerOptions): ServerInstance {
         getLoadedDocuments: () => hp.documents,
         lifecycleOf: (document, documentName) => conflicts.lifecycleOf(document, documentName),
         forceStore: (document, documentName) => persistence.forceStore(document, documentName),
+        isHeldSaveDue: (documentName) => persistence.isHeldSaveDue(documentName),
+        retryHeldSave: (document, documentName) =>
+          persistence.retryHeldSave(document, documentName),
         getBase: (documentName) => durabilityState.getReconciledBase(documentName),
         isBatchActive: () => durabilityState.isBatchInProgress(),
         hasInFlight: (documentName) => durabilityState.inFlightFlushCount(documentName) > 0,
@@ -2079,9 +2454,8 @@ export function createServer(options: ServerOptions): ServerInstance {
 
     defaultShouldUnloadDocument = hocuspocus.shouldUnloadDocument.bind(hocuspocus);
     hocuspocus.shouldUnloadDocument = (document) => {
-      if (forceUnloadSet.has(document)) {
-        return true;
-      }
+      const requests = forceUnloadRequests.get(document);
+      if (requests) return [...requests].some((isCurrent) => isCurrent());
       if (
         shutdownAllowsUnload &&
         !isReservedForUserTree(document.name) &&
@@ -2100,12 +2474,17 @@ export function createServer(options: ServerOptions): ServerInstance {
       return defaultShouldUnloadDocument(document);
     };
 
-    forceUnloadDocument = async (document: Document): Promise<void> => {
-      forceUnloadSet.add(document);
+    forceUnloadDocument = async (document, isCurrent): Promise<void> => {
+      const request = () =>
+        hocuspocus.documents.get(document.name) === document && (isCurrent?.() ?? true);
+      const requests = forceUnloadRequests.get(document) ?? new Set<() => boolean>();
+      requests.add(request);
+      forceUnloadRequests.set(document, requests);
       try {
         await hocuspocus.unloadDocument(document);
       } finally {
-        forceUnloadSet.delete(document);
+        requests.delete(request);
+        if (requests.size === 0) forceUnloadRequests.delete(document);
       }
     };
 
@@ -2116,6 +2495,7 @@ export function createServer(options: ServerOptions): ServerInstance {
     sessionManager = new AgentSessionManager(hocuspocus, {
       ...options.agentSessionOptions,
       assertDocumentScope: assertDocumentProjectScope,
+      awaitWriteAdmission: () => durabilityState.whenWriteAdmitted(),
     });
     const sm = sessionManager;
     unregisterWorkloadProviders.push(
@@ -2233,16 +2613,6 @@ export function createServer(options: ServerOptions): ServerInstance {
     };
     hocuspocus.configuration.extensions.push(configDocAdmissionGuard);
 
-    const resolvedContentDir = resolve(contentDir);
-    function resolveDocFilePath(docName: string): string | null {
-      if (!isSafeDocName(docName)) return null;
-      const relativePath = docNameToRelativePath(docName);
-      const filePath = resolve(resolvedContentDir, relativePath);
-      if (!isWithinDir(filePath, resolvedContentDir)) {
-        return null;
-      }
-      return filePath;
-    }
     const removalRedirectGuard: Extension & { __kind: 'removal-redirect-guard' } = {
       __kind: 'removal-redirect-guard',
       async onAuthenticate(payload) {
@@ -2296,7 +2666,16 @@ export function createServer(options: ServerOptions): ServerInstance {
     };
     hocuspocus.configuration.extensions.push(systemDocBroadcastGuard);
 
+    const renameCarryRetirement: Extension = {
+      async afterUnloadDocument({ documentName }) {
+        durabilityState.endRenameCarry(documentName);
+      },
+    };
+    hocuspocus.configuration.extensions.push(renameCarryRetirement);
+
     const apiExtension = createApiExtension({
+      mergeHistoryWriter: options.mergeHistoryWriter,
+      docNotices,
       declaredGitHubHosts,
       resolveSyncCredentialConfig,
       hocuspocus,
@@ -2304,6 +2683,10 @@ export function createServer(options: ServerOptions): ServerInstance {
       ingressPolicy,
       sessionManager,
       commentDocHooksRef,
+      onNamespaceCreateAccepted: acceptNamespaceCreate,
+      capturePublicationReceipt,
+      captureNamespaceMove,
+      onResidentAdopted: acceptResident,
       contentDir,
       assertContentPath,
       assertContentSubtree,
@@ -2326,10 +2709,14 @@ export function createServer(options: ServerOptions): ServerInstance {
             }
             break;
           case 'create':
+            reviveFrozenResident(event.docName, event.content);
+            scheduleIndexRegeneration(event.docName);
+            break;
           case 'conflict':
             scheduleIndexRegeneration(event.docName);
             break;
           case 'delete':
+            commentDocHooksRef.current?.deleted(event.docName);
             scheduleIndexRegenerationAfterRemoval(event.docName);
             break;
           case 'rename':
@@ -2355,6 +2742,9 @@ export function createServer(options: ServerOptions): ServerInstance {
       getFolderAliasIndex: () => (watcher ? watcher.getFolderAliasIndex() : new Map()),
       resolveTrackedFile,
       rescanFiles: () => watcher?.rescanFromDisk(),
+      settleDiskEventsForTest: async () => {
+        await watcher?.settle();
+      },
       enableTestRoutes,
       shadowRef,
       flushGitCommit: () => persistence.flushPendingGitCommit(),
@@ -2371,7 +2761,8 @@ export function createServer(options: ServerOptions): ServerInstance {
       onAgentWrite: options.onAgentWrite,
       getSyncEngine: () => syncEngine,
       conflicts,
-      setBatchInProgress: setBatchInProgressAndDrain,
+      setBatchInProgress: batchFlagFor('conflict-resolve'),
+      refreshDocumentsFromDisk,
       localOpCliArgs,
       authStreamHeartbeatMs,
       projectDir,
@@ -2382,6 +2773,20 @@ export function createServer(options: ServerOptions): ServerInstance {
       acpRegistry,
       loadAcpCustomAgents: () => loadCustomAgents(lockDir, getLogger('acp-registry')),
       homeDirOverride: configHomedirOverride,
+      resetSettingsForTest:
+        configHomedirOverride === undefined
+          ? undefined
+          : () => {
+              for (const configDocName of CONFIG_DOC_NAMES) {
+                resetConfigDocForTest(
+                  hocuspocus.documents.get(configDocName) ?? null,
+                  configDocName,
+                  persistence.configPersistenceCtx,
+                );
+                configFileWatcherResyncs.get(configDocName)?.();
+                applyPersistedConfigToConsumers(configDocName);
+              }
+            },
       forceUnloadDocument,
       ready,
       recentlyRemovedDocs,
@@ -2405,6 +2810,12 @@ export function createServer(options: ServerOptions): ServerInstance {
       },
     });
     hocuspocus.configuration.extensions.push(apiExtension);
+    hocuspocus.configuration.extensions.push(
+      createReconnectRefreshExtension({
+        clock: options.watcherClock ?? watcherClock(),
+        refresh: refreshDocumentsFromDisk,
+      }),
+    );
     nativeApi = apiExtension.nativeApi;
     localApi = apiExtension.localApi;
     shutdownLocalOps = apiExtension.shutdownLocalOps;
@@ -2485,6 +2896,7 @@ export function createServer(options: ServerOptions): ServerInstance {
     docName: string;
     cleanup: ConfigFileWatcherUnsubscribe;
   }> = [];
+  const configFileWatcherResyncs = new Map<ConfigDocName, () => void>();
 
   function safeRescuePath(shadowGitDir: string, docName: string): string | null {
     const rescueBase = resolve(shadowGitDir, 'rescue');
@@ -2500,7 +2912,8 @@ export function createServer(options: ServerOptions): ServerInstance {
     return serializeYDocSource(document);
   }
 
-  const applyToDoc = (docName: string, content: string): void =>
+  const applyToDoc = (docName: string, content: string): void => {
+    const document = hocuspocus.documents.get(docName);
     applyExternalChange(
       durabilityState,
       hocuspocus,
@@ -2510,6 +2923,25 @@ export function createServer(options: ServerOptions): ServerInstance {
       resolveSize,
       bridgeLossReporter,
     );
+    if (document && hasAdmittedMarkdownBinding(docName)) acceptResident(document, docName);
+  };
+
+  const reviveFrozenResident = (docName: string, content: string): FrozenResidentRevival => {
+    const result = reviveFrozenResidentDoc(
+      durabilityState,
+      hocuspocus,
+      docName,
+      content,
+      resolveEmbed,
+      resolveSize,
+      bridgeLossReporter,
+    );
+    const document = hocuspocus.documents.get(docName);
+    if (result === 'revived' && document && hasAdmittedMarkdownBinding(docName)) {
+      acceptResident(document, docName);
+    }
+    return result;
+  };
 
   const refreshLoadedEmbeds = (
     needle: string,
@@ -2658,6 +3090,580 @@ export function createServer(options: ServerOptions): ServerInstance {
     return true;
   };
 
+  const settledVanishEvents = new WeakSet<DiskEvent>();
+  const vanishClock = options.watcherClock ?? watcherClock();
+  let vanishRecheckTimer: WatcherTimer | null = null;
+  let vanishRecheckRunning = false;
+
+  const holdVanished = (entry: VanishedDocument): void => {
+    vanishedDocuments.hold(entry);
+    durabilityState.holdStores(entry.docName);
+  };
+
+  const reportedUnreadableReturns = new Set<string>();
+  const overdueFaults = new Map<string, number>();
+
+  const releaseVanished = (docName: string): void => {
+    vanishedDocuments.release(docName);
+    overdueFaults.delete(docName);
+    reportedUnreadableReturns.delete(docName);
+    durabilityState.releaseStores(docName);
+  };
+
+  let branchSwitchFollowUpTimer: WatcherTimer | null = null;
+  let branchSwitchFollowUpGeneration = 0;
+
+  function supersedeBranchSwitchFollowUps(): void {
+    branchSwitchFollowUpGeneration += 1;
+    vanishClock.clearTimeout(branchSwitchFollowUpTimer);
+    branchSwitchFollowUpTimer = null;
+  }
+
+  function followUpBranchSwitchRecheck(branch: string): void {
+    supersedeBranchSwitchFollowUps();
+    void runBranchSwitchFollowUp(branch, branchSwitchFollowUpGeneration, 1).catch(
+      (err: unknown) => {
+        log.error({ err, branch }, '[branch-switch] the follow-up re-checks stopped');
+      },
+    );
+  }
+
+  async function runBranchSwitchFollowUp(
+    branch: string,
+    generation: number,
+    attempt: number,
+  ): Promise<void> {
+    if (!watcher || generation !== branchSwitchFollowUpGeneration) return;
+    let result: RecheckResult | undefined;
+    try {
+      result = await watcher.recheck('full');
+    } catch (err) {
+      log.warn(
+        { err, branch, attempt },
+        `[branch-switch] follow-up re-check ${attempt} after switching to ${branch} failed`,
+      );
+    }
+    if (generation !== branchSwitchFollowUpGeneration || result?.status === 'closed') return;
+    if (result?.status === 'completed' && !result.partial) {
+      log.info(
+        { branch, attempt },
+        `[branch-switch] follow-up re-check ${attempt} observed the whole tree after switching to ${branch}`,
+      );
+      return;
+    }
+    incrementBranchSwitchRecheckShortfalls();
+    const details = {
+      branch,
+      attempt,
+      status: result?.status ?? 'failed',
+      partial: result?.partial === true,
+    };
+    if (attempt >= BRANCH_SWITCH_FOLLOW_UP_LIMIT) {
+      log.warn(
+        details,
+        `[branch-switch] ${attempt} follow-up re-checks after switching to ${branch} did not observe the whole tree; open documents may keep text from the previous branch until a later re-check observes it`,
+      );
+      return;
+    }
+    log.warn(
+      details,
+      `[branch-switch] follow-up re-check ${attempt} after switching to ${branch} did not observe the whole tree; trying again in ${BRANCH_SWITCH_FOLLOW_UP_DELAY_MS / 1000} s`,
+    );
+    branchSwitchFollowUpTimer = vanishClock.setTimeout(() => {
+      branchSwitchFollowUpTimer = null;
+      void runBranchSwitchFollowUp(branch, generation, attempt + 1).catch((err: unknown) => {
+        log.error({ err, branch }, '[branch-switch] the follow-up re-checks stopped');
+      });
+    }, BRANCH_SWITCH_FOLLOW_UP_DELAY_MS);
+    branchSwitchFollowUpTimer.unref();
+  }
+
+  const scheduleVanishRecheck = (): void => {
+    if (vanishRecheckTimer || vanishRecheckRunning || vanishedDocuments.size === 0) return;
+    vanishRecheckTimer = vanishClock.setTimeout(() => {
+      vanishRecheckTimer = null;
+      void runVanishRecheck().catch((err: unknown) => {
+        log.error({ err }, '[reconcile] the re-check loop for vanished documents failed');
+      });
+    }, VANISH_RECHECK_DELAY_MS);
+    vanishRecheckTimer.unref();
+  };
+
+  async function runVanishRecheck(): Promise<void> {
+    if (!watcher) return;
+    vanishRecheckRunning = true;
+    let result: RecheckResult | undefined;
+    try {
+      result = await watcher.recheck('metadata');
+    } catch (err) {
+      log.warn({ err }, '[reconcile] the re-check for vanished documents failed');
+    } finally {
+      vanishRecheckRunning = false;
+    }
+    try {
+      if (vanishedDocuments.size > 0 && (result?.status !== 'completed' || result.partial)) {
+        log.info(
+          { status: result?.status ?? 'failed', partial: result?.partial === true },
+          `[reconcile] the re-check for ${vanishedDocuments.size} vanished document(s) did not observe the whole tree; trying again`,
+        );
+      }
+      await resolveOverdueVanishedDocuments();
+    } finally {
+      scheduleVanishRecheck();
+    }
+  }
+
+  function pathIsOccupied(path: string): boolean {
+    try {
+      lstatSync(path);
+      return true;
+    } catch (err) {
+      const code = errnoCode(err);
+      if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+      log.warn({ err, path }, '[reconcile] could not tell whether a vanished file is gone');
+      return true;
+    }
+  }
+
+  type MarkdownFileProbe =
+    | { readonly kind: 'present'; readonly path: string; readonly content: string }
+    | { readonly kind: 'absent' }
+    | { readonly kind: 'refused' }
+    | { readonly kind: 'unreadable'; readonly code: string };
+
+  function probeMarkdownFile(docName: string, path: string): MarkdownFileProbe {
+    const unreadable = (err: unknown): MarkdownFileProbe => {
+      const code = errnoCode(err);
+      if (code === 'ENOENT' || code === 'ENOTDIR') return { kind: 'absent' };
+      return { kind: 'unreadable', code: code ?? 'unknown' };
+    };
+    try {
+      lstatSync(path);
+      accessSync(path, fsConstants.R_OK);
+    } catch (err) {
+      const probe = unreadable(err);
+      if (probe.kind === 'absent' || errnoCode(err) !== 'ELOOP') return probe;
+    }
+    if (!hasAdmittedMarkdownFile(docName, path, contentDir, contentFilter))
+      return { kind: 'refused' };
+    try {
+      return { kind: 'present', path, content: readFileSync(path, 'utf-8') };
+    } catch (err) {
+      return unreadable(err);
+    }
+  }
+
+  function probeVanishedFile(entry: VanishedDocument): MarkdownFileProbe {
+    const path =
+      watcher?.getFileIndex().get(entry.docName)?.canonicalPath ??
+      resolveDocFilePath(entry.docName) ??
+      entry.path;
+    return probeMarkdownFile(entry.docName, path);
+  }
+
+  async function holdVanishedDocument(
+    event: Extract<DiskEvent, { kind: 'delete' }>,
+  ): Promise<boolean> {
+    if (!watcher || pathIsOccupied(event.path)) return false;
+    const facts = getMarkdownEventFacts(event);
+    const base = getReconciledBase(event.docName);
+    const hashes = new Set<string>();
+    if (facts.lastHash !== undefined) hashes.add(facts.lastHash);
+    if (base !== undefined) hashes.add(contentHash(base));
+    const vanished = {
+      docName: event.docName,
+      path: event.path,
+      identity: facts.identity,
+      size: facts.size,
+      modified: facts.modified,
+      hashes,
+      text: base ?? serializeDoc(event.docName) ?? undefined,
+    };
+    const readRecentCreate = (create: RecentCreate): string | undefined => {
+      const probe = probeMarkdownFile(create.docName, create.path);
+      return probe.kind === 'present' ? probe.content : undefined;
+    };
+    const recent = vanishedDocuments.matchRecentCreate(
+      vanished,
+      vanishClock.now(),
+      readRecentCreate,
+    );
+    if (recent) {
+      const probe = probeMarkdownFile(recent.create.docName, recent.create.path);
+      if (probe.kind === 'present') {
+        recordVanishOutcome(recent.by === 'identity' ? 'paired-identity' : 'paired-hash');
+        await handleDiskEvent({
+          kind: 'rename',
+          oldPath: event.path,
+          newPath: recent.create.path,
+          oldDocName: event.docName,
+          newDocName: recent.create.docName,
+          content: probe.content,
+        });
+        return true;
+      }
+      log.info(
+        { docName: event.docName, create: recent.create.docName, probe: probe.kind },
+        `[reconcile] ${event.docName}: a recent create could not be read; holding the document instead`,
+      );
+    }
+    holdVanished({
+      ...vanished,
+      afterPass: watcher.recoveryPassesStarted(),
+      heldAt: vanishClock.now(),
+    });
+    recordVanishOutcome('pending');
+    log.info(
+      { docName: event.docName },
+      `[reconcile] ${event.docName}: its file vanished; it stays open until a re-check of the whole tree, in case it was moved`,
+    );
+    scheduleVanishRecheck();
+    return true;
+  }
+
+  const flushReleasedStores = (): void => {
+    if (isBatchInProgress()) return;
+    void persistence.flushDeferredStores('within-branch').catch((err: unknown) => {
+      log.error(
+        { err },
+        '[persistence] deferred store drain failed after a vanished file resolved',
+      );
+    });
+  };
+
+  async function takeReturnedFile(
+    entry: VanishedDocument,
+    probe: Extract<MarkdownFileProbe, { kind: 'present' }>,
+  ): Promise<void> {
+    releaseVanished(entry.docName);
+    try {
+      recordVanishOutcome('recreated');
+      log.info(
+        { docName: entry.docName },
+        `[reconcile] ${entry.docName}: its file is back; taking it in as an update`,
+      );
+      await onDiskEvent({
+        kind: 'update',
+        path: probe.path,
+        docName: entry.docName,
+        content: probe.content,
+      });
+    } finally {
+      flushReleasedStores();
+    }
+  }
+
+  async function standVanishedDelete(
+    entry: VanishedDocument,
+    outcome: 'deleted' | 'unconfirmed',
+  ): Promise<void> {
+    persistence.discardDeferredStore(entry.docName, { kind: 'deleted-outside' });
+    releaseVanished(entry.docName);
+    recordVanishOutcome(outcome);
+    const deleteEvent: DiskEvent = { kind: 'delete', path: entry.path, docName: entry.docName };
+    settledVanishEvents.add(deleteEvent);
+    await onDiskEvent(deleteEvent);
+  }
+
+  function keepUnreadableHeld(entry: VanishedDocument, code: string): void {
+    if (reportedUnreadableReturns.has(entry.docName)) return;
+    reportedUnreadableReturns.add(entry.docName);
+    log.warn(
+      { docName: entry.docName, code },
+      `[reconcile] ${entry.docName}: a file is at its path but cannot be read (${code}); it stays held until it can be read or the hold limit passes`,
+    );
+  }
+
+  interface VanishStep {
+    action: string;
+  }
+
+  function reportVanishFault(
+    entry: VanishedDocument,
+    step: VanishStep,
+    err: unknown,
+    overdueAttempt?: number,
+  ): void {
+    const stillHeld = vanishedDocuments.has(entry.docName);
+    const attempt =
+      overdueAttempt === undefined
+        ? ''
+        : ` (attempt ${overdueAttempt} of ${VANISH_OVERDUE_FAULT_LIMIT} past the hold limit)`;
+    log.error(
+      { err, docName: entry.docName, action: step.action, stillHeld, overdueAttempt },
+      stillHeld
+        ? `[reconcile] ${entry.docName}: ${step.action} failed with an internal error${attempt}; it is still held`
+        : `[reconcile] ${entry.docName}: ${step.action} failed with an internal error${attempt}; its hold had already ended`,
+    );
+  }
+
+  function endHoldAfterOverdueFaults(entry: VanishedDocument, attempts: number): void {
+    releaseVanished(entry.docName);
+    flushReleasedStores();
+    log.error(
+      { docName: entry.docName, attempts },
+      `[reconcile] ${entry.docName}: ended its hold after ${attempts} failed attempts past the hold limit; its deferred saves were released to run as normal saves`,
+    );
+  }
+
+  async function settleVanishedDocuments(pass: number, whole: boolean): Promise<void> {
+    if (!whole) return;
+    for (const entry of vanishedDocuments.dueAfter(pass)) {
+      const step: VanishStep = { action: 'checking its path' };
+      try {
+        await settleVanishedDocument(entry, step);
+      } catch (err) {
+        reportVanishFault(entry, step, err);
+      }
+    }
+  }
+
+  async function settleVanishedDocument(entry: VanishedDocument, step: VanishStep): Promise<void> {
+    const probe = probeVanishedFile(entry);
+    switch (probe.kind) {
+      case 'present':
+        step.action = 'taking its returned file in';
+        await takeReturnedFile(entry, probe);
+        return;
+      case 'unreadable':
+        keepUnreadableHeld(entry, probe.code);
+        return;
+      case 'absent':
+      case 'refused':
+        step.action = 'applying the delete';
+        log.info(
+          { docName: entry.docName, probe: probe.kind },
+          `[reconcile] ${entry.docName}: no move found after a re-check of the whole tree; the delete stands`,
+        );
+        await standVanishedDelete(entry, 'deleted');
+        return;
+      default: {
+        const unhandled: never = probe;
+        throw new Error(`unhandled file probe: ${JSON.stringify(unhandled)}`);
+      }
+    }
+  }
+
+  async function resolveOverdueVanishedDocuments(): Promise<void> {
+    for (const entry of vanishedDocuments.heldBefore(vanishClock.now() - VANISH_HOLD_LIMIT_MS)) {
+      const step: VanishStep = { action: 'resolving its hold at the limit' };
+      try {
+        await resolveOverdueVanishedDocument(entry, step);
+      } catch (err) {
+        if (!vanishedDocuments.has(entry.docName)) {
+          reportVanishFault(entry, step, err);
+          continue;
+        }
+        const attempts = (overdueFaults.get(entry.docName) ?? 0) + 1;
+        overdueFaults.set(entry.docName, attempts);
+        reportVanishFault(entry, step, err, attempts);
+        if (attempts >= VANISH_OVERDUE_FAULT_LIMIT) endHoldAfterOverdueFaults(entry, attempts);
+      }
+    }
+  }
+
+  async function resolveOverdueVanishedDocument(
+    entry: VanishedDocument,
+    step: VanishStep,
+  ): Promise<void> {
+    const limit = `${VANISH_HOLD_LIMIT_MS / 1000} s`;
+    let probe: MarkdownFileProbe | undefined;
+    try {
+      probe = probeVanishedFile(entry);
+    } catch (err) {
+      log.error(
+        { err, docName: entry.docName, limitMs: VANISH_HOLD_LIMIT_MS },
+        `[reconcile] ${entry.docName}: checking its path at the hold limit failed with an internal error; the delete stands as at any hold limit`,
+      );
+    }
+    switch (probe?.kind) {
+      case undefined:
+        break;
+      case 'present':
+        step.action = 'taking its returned file in';
+        await takeReturnedFile(entry, probe);
+        return;
+      case 'absent':
+        log.warn(
+          { docName: entry.docName, probe: probe.kind, limitMs: VANISH_HOLD_LIMIT_MS },
+          `[reconcile] ${entry.docName}: its file is gone and no re-check observed the whole tree within ${limit}; the delete stands and unsaved typing is in its history`,
+        );
+        break;
+      case 'unreadable':
+        log.warn(
+          {
+            docName: entry.docName,
+            probe: probe.kind,
+            code: probe.code,
+            limitMs: VANISH_HOLD_LIMIT_MS,
+          },
+          `[reconcile] ${entry.docName}: a file at its path still cannot be read (${probe.code}) after ${limit}; the hold ends, the document closes and unsaved typing is in its history`,
+        );
+        break;
+      case 'refused':
+        log.warn(
+          { docName: entry.docName, probe: probe.kind, limitMs: VANISH_HOLD_LIMIT_MS },
+          `[reconcile] ${entry.docName}: the entry at its path is still not an admitted Markdown file after ${limit}; the hold ends, the document closes and unsaved typing is in its history`,
+        );
+        break;
+      default: {
+        const unhandled: never = probe;
+        throw new Error(`unhandled file probe: ${JSON.stringify(unhandled)}`);
+      }
+    }
+    step.action = 'applying the delete at the hold limit';
+    await standVanishedDelete(entry, 'unconfirmed');
+  }
+
+  function followRecordsAcrossRename(
+    oldDocName: string,
+    newDocName: string,
+    newPath: string,
+  ): void {
+    const branch = getStorageBranch() ?? 'main';
+    const move = { from: oldDocName, to: newDocName, toFile: `${newDocName}${extname(newPath)}` };
+    const writer = {
+      writerId: FILE_SYSTEM_WRITER.id,
+      displayName: FILE_SYSTEM_WRITER.name,
+      colorSeed: FILE_SYSTEM_WRITER.id,
+    };
+    followRenameRecords({
+      moves: [move],
+      kind: 'file',
+      branch,
+      writer,
+      shadow: undefined,
+      notices: docNotices,
+    });
+    const shadow = shadowRef.current;
+    if (!shadow) return;
+    void recordOutsideRenameInHistory(shadow, branch, move, writer);
+  }
+
+  async function readWriterHeads(shadow: ShadowHandle, branch: string): Promise<string[]> {
+    try {
+      const raw = await shadowGit(shadow).raw(
+        'for-each-ref',
+        '--sort=-committerdate',
+        '--format=%(objectname)',
+        `refs/wip/${branch}/`,
+      );
+      return raw
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((sha) => /^[0-9a-f]{40}$/.test(sha));
+    } catch (err) {
+      log.warn(
+        { err, branch },
+        "[reconcile] rename: could not read the writers' history heads; the move is recorded without them",
+      );
+      return [];
+    }
+  }
+
+  async function recordOutsideRenameInHistory(
+    shadow: ShadowHandle,
+    branch: string,
+    move: { from: string; to: string; toFile: string },
+    writer: { writerId: string; displayName: string; colorSeed: string },
+  ): Promise<void> {
+    const anchors = await readWriterHeads(shadow, branch);
+    let appended: number;
+    try {
+      appended = followRenameRecords({
+        moves: [move],
+        kind: 'file',
+        branch,
+        writer,
+        shadow,
+        notices: undefined,
+        anchors,
+      });
+    } catch (err) {
+      incrementOutsideRenameRecordFailures();
+      log.warn(
+        { err, oldDocName: move.from, newDocName: move.to },
+        `[reconcile] rename: could not write the rename-log entry for ${move.from} -> ${move.to}; history before the move will not show under the new name`,
+      );
+      return;
+    }
+    if (appended === 0) return;
+    let flushError: unknown;
+    try {
+      await persistence.flushContributors();
+    } catch (err) {
+      flushError = err;
+    }
+    const recorded = getOrLoadRenameLogIndex(shadow.gitDir).byTo.get(move.to);
+    if (recorded !== undefined && recorded.commitSha === '') {
+      incrementOutsideRenameClaimFailures();
+      log.warn(
+        { err: flushError, oldDocName: move.from, newDocName: move.to },
+        `[reconcile] rename: wrote the rename-log entry for ${move.from} -> ${move.to}, but no commit claimed it yet; a later commit by the file-system writer claims it, and the next start drops it if none does`,
+      );
+      return;
+    }
+    if (flushError !== undefined) {
+      log.warn(
+        { err: flushError, oldDocName: move.from, newDocName: move.to },
+        '[reconcile] rename: the commit after recording the move failed',
+      );
+    }
+  }
+
+  async function carryLiveTextAcrossRename(
+    newDocName: string,
+    newPath: string,
+    base: string,
+    live: string,
+    diskContent: string,
+  ): Promise<boolean> {
+    let connection: Awaited<ReturnType<Hocuspocus['openDirectConnection']>> | undefined;
+    try {
+      connection = await hocuspocus.openDirectConnection(newDocName);
+      applyToDoc(newDocName, live);
+      setReconciledBase(newDocName, base);
+      if (diskContent !== base) {
+        await handleDiskEvent({
+          kind: 'update',
+          path: newPath,
+          docName: newDocName,
+          content: diskContent,
+        });
+      }
+      log.info({ newDocName }, `[reconcile] rename: unsaved typing carried into ${newDocName}`);
+      return true;
+    } catch (err) {
+      log.error(
+        { err, newDocName },
+        `[reconcile] rename: could not carry unsaved typing into ${newDocName}; it is in the rename checkpoint`,
+      );
+      return false;
+    } finally {
+      await connection?.disconnect();
+    }
+  }
+
+  function tombstoneResidentsResolvingIntoPrivateState(branch: string): void {
+    for (const [docName, document] of hocuspocus.documents) {
+      if (isReservedForUserTree(docName)) continue;
+      if (document.getMap('lifecycle').get('status') !== undefined) continue;
+      try {
+        const filePath = safeContentPath(docName, contentDir);
+        if (!existsSync(filePath)) continue;
+        if (!canonicalContentPathIsRefused(filePath, realpathSync(filePath), contentDir)) continue;
+        rescueUnflushedEditsBeforeTeardown(docName, branch, 'branch-switch');
+        document.getMap('lifecycle').set('status', 'deleted-upstream');
+        log.warn(
+          { docName, branch },
+          `[branch-switch] tombstone: ${docName} resolves outside the content dir or into private state on ${branch}`,
+        );
+      } catch (err) {
+        log.error({ err, docName }, `[branch-switch] could not check where ${docName} resolves`);
+      }
+    }
+  }
+
   const rescueUnflushedEditsBeforeTeardown = (
     docName: string,
     branch: string,
@@ -2683,7 +3689,7 @@ export function createServer(options: ServerOptions): ServerInstance {
     ours: string,
     theirs: string,
   ): void => {
-    if (outcome.kind !== 'merged' && outcome.kind !== 'conflicts') return;
+    if (outcome.kind !== 'merged' && outcome.kind !== 'both-kept') return;
     if (!outcome.dedupSkipped) return;
     incrementReconcileInsertDedupSkipped();
     log.warn(
@@ -2700,8 +3706,9 @@ export function createServer(options: ServerOptions): ServerInstance {
   const applyDiskAuthoritativeIngest = async (
     docName: string,
     theirs: string,
-    baseAbsent: boolean,
-  ): Promise<void> => {
+    priorBase: string | undefined,
+  ): Promise<DiskIntakeOutcome> => {
+    const baseAbsent = priorBase === undefined;
     incrementDiskAuthoritativeIngest();
     const ours = serializeDoc(docName) ?? '';
     const branch = getStorageBranch() ?? 'main';
@@ -2715,18 +3722,19 @@ export function createServer(options: ServerOptions): ServerInstance {
     }
     const oursH = contentHash(ours).slice(0, 6);
     const baseToken = baseAbsent ? 'absent' : 'blockless';
+    let applyError: unknown;
     let ingested = false;
     try {
       applyToDoc(docName, theirs);
       dissolveNonGitConflicts(docName);
       ingested = true;
     } catch (e) {
+      applyError = e;
       incrementDiskAuthoritativeIngestApplyFailures();
       log.error(
         { err: e, docName },
         `[reconcile] failed to apply disk-authoritative ingest to Y.Doc for ${docName}`,
       );
-      setReconciledBase(docName, theirs);
       mintExternalChangeRescue(docName, theirs, branch, 'disk-update', theirsH, true);
       dissolveNonGitConflicts(docName);
       let surviving: string | undefined;
@@ -2738,6 +3746,8 @@ export function createServer(options: ServerOptions): ServerInstance {
           `[reconcile] unable to read ${docName} back after a failed disk-authoritative ingest; treating the live content as lost`,
         );
       }
+      if (surviving === theirs) setReconciledBase(docName, theirs);
+      else durabilityState.restoreReconciledBase(docName, priorBase);
       if (rescue === 'lost' && surviving !== ours) {
         incrementDiskAuthoritativeIngestUnrescued();
         log.warn(
@@ -2771,15 +3781,310 @@ export function createServer(options: ServerOptions): ServerInstance {
         },
         `[reconcile] ${docName} base=${baseToken} reason=no-base result=${result} ours=${oursH} theirs=${theirsH} rescue=${rescue}`,
       );
+      await recordUpsertAfterIntake(docName, theirs);
+      return liveOnlyContentAtRisk
+        ? { kind: 'applied', merge: 'disk-replaced' }
+        : { kind: 'applied' };
+    }
+    return { kind: 'failed', error: applyError };
+  };
+
+  const recordUpsertAfterIntake = async (docName: string, theirs: string): Promise<void> => {
+    try {
       await derivedDocumentIndex.recordDiskUpsert(docName, theirs);
+    } catch (err) {
+      log.warn(
+        { err, docName },
+        `[reconcile] ${docName}: the derived index could not record the disk version`,
+      );
     }
   };
 
-  async function handleDiskEvent(event: DiskEvent): Promise<void> {
+  type DiskIntakeOutcome =
+    | { readonly kind: 'applied'; readonly merge?: StoreIntakeMerge }
+    | { readonly kind: 'nothing-to-take' }
+    | { readonly kind: 'conflict' }
+    | { readonly kind: 'failed'; readonly error: unknown };
+
+  function assertNeverDiskIntakeOutcome(outcome: never): never {
+    throw new Error(`unhandled disk intake outcome: ${(outcome as { kind: string }).kind}`);
+  }
+
+  function assertNeverReconcileOutcome(outcome: never): never {
+    throw new Error(`unhandled reconcile outcome: ${(outcome as { kind: string }).kind}`);
+  }
+
+  async function intakeDiskUpdate(
+    event: Extract<DiskEvent, { kind: 'update' }>,
+  ): Promise<DiskIntakeOutcome> {
+    const { docName, content: theirs } = event;
+    onUpstreamAdd(docName);
+    if (indexedMetadataChanged(event.previousIndexedFields, theirs, docName)) {
+      scheduleIndexRegeneration(docName);
+    }
+    if (conflicts.findByDocName(docName)?.kind === 'merge-native') {
+      try {
+        await conflicts.pruneMergeNativeAgainstGit();
+      } catch (err) {
+        log.warn({ err, docName }, '[reconcile] conflict prune against git failed');
+      }
+    }
+
+    const document = hocuspocus.documents.get(docName);
+    if (!document) {
+      if (!refuseStaleExternalWrite(durabilityState, undefined, docName, theirs, conflicts)) {
+        durabilityState.refreshReceiptWithoutBase(docName, theirs);
+      }
+      await derivedDocumentIndex.recordDiskUpsert(docName, theirs);
+      return { kind: 'nothing-to-take' };
+    }
+    if (reviveFrozenResident(docName, theirs) !== 'not-frozen') {
+      await derivedDocumentIndex.recordDiskUpsert(docName, theirs);
+      return { kind: 'nothing-to-take' };
+    }
+
+    const theirsHash = contentHash(theirs);
+    const receiptIntake = classifyIntakeAgainstReceipt({
+      receiptHash: durabilityState.getReceipt(docName)?.hash,
+      eventHash: theirsHash,
+      isRecentOwnWrite: durabilityState.isRecentOwnWrite(docName, theirsHash),
+      readDiskHash: () => {
+        try {
+          return contentHash(readFileSync(event.path, 'utf-8'));
+        } catch {
+          return null;
+        }
+      },
+    });
+    const receiptSkip = receiptIntakeSkipOf(receiptIntake);
+    if (receiptSkip !== null && durabilityState.getStaleExternalWrite(docName) === undefined) {
+      incrementReceiptIntakeSkip(receiptSkip);
+      log.debug(
+        { docName, receiptIntake },
+        `[reconcile] ${docName}: the disk bytes match its receipt (${receiptIntake}); nothing to take in`,
+      );
+      conflicts.dissolveReconcile(docName);
+      await recordUpsertAfterIntake(docName, theirs);
+      return { kind: 'nothing-to-take' };
+    }
+
+    const base = getReconciledBase(docName);
+    const ours = serializeDoc(docName) ?? base ?? '';
+
+    if (refuseStaleExternalWrite(durabilityState, document, docName, theirs, conflicts, ours)) {
+      await recordUpsertAfterIntake(docName, theirs);
+      return { kind: 'conflict' };
+    }
+
+    if (base === undefined) {
+      return applyDiskAuthoritativeIngest(docName, theirs, undefined);
+    }
+
+    const result = reconcile({ docName, base, ours, theirs });
+
+    const baseH = contentHash(base).slice(0, 6);
+    const oursH = contentHash(ours).slice(0, 6);
+    const theirsH = contentHash(theirs).slice(0, 6);
+    const oursLen = ours.length;
+    const theirsLen = theirs.length;
+    const newLen =
+      result.kind === 'clean' || result.kind === 'merged' || result.kind === 'both-kept'
+        ? result.newContent.length
+        : undefined;
+    const delta = newLen === undefined ? undefined : newLen - Math.max(oursLen, theirsLen);
+    const sizeSuffix = newLen === undefined ? '' : ` newLen=${newLen} delta=${delta}`;
+    log.info(
+      {
+        docName,
+        base: baseH,
+        ours: oursH,
+        theirs: theirsH,
+        result: result.kind,
+        oursLen,
+        theirsLen,
+        ...(newLen === undefined ? {} : { newLen, delta }),
+      },
+      `[reconcile] ${docName} base=${baseH} ours=${oursH} theirs=${theirsH} result=${result.kind} oursLen=${oursLen} theirsLen=${theirsLen}${sizeSuffix}`,
+    );
+
+    reportInsertDedupSkipped(docName, result, ours, theirs);
+
+    switch (result.kind) {
+      case 'noop':
+        conflicts.dissolveReconcile(docName);
+        await recordUpsertAfterIntake(docName, theirs);
+        return { kind: 'nothing-to-take' };
+
+      case 'clean':
+        try {
+          applyToDoc(docName, result.newContent);
+        } catch (e) {
+          log.error(
+            { err: e, docName },
+            `[reconcile] failed to apply clean content to Y.Doc for ${docName}`,
+          );
+          setReconciledBase(docName, base);
+          conflicts.dissolveReconcile(docName);
+          return { kind: 'failed', error: e };
+        }
+        setReconciledBase(docName, result.newContent);
+        incrementReconcile();
+        conflicts.dissolveReconcile(docName);
+        await recordUpsertAfterIntake(docName, theirs);
+        return { kind: 'applied', merge: 'clean' };
+
+      case 'merged':
+        try {
+          applyToDoc(docName, result.newContent);
+        } catch (e) {
+          log.error(
+            { err: e, docName },
+            `[reconcile] failed to apply merged content to Y.Doc for ${docName}`,
+          );
+          setReconciledBase(docName, base);
+          conflicts.dissolveReconcile(docName);
+          return { kind: 'failed', error: e };
+        }
+        setReconciledBase(docName, theirs);
+        incrementReconcile();
+        conflicts.dissolveReconcile(docName);
+        await recordUpsertAfterIntake(docName, theirs);
+        return { kind: 'applied', merge: 'merged' };
+
+      case 'both-kept': {
+        try {
+          applyToDoc(docName, result.newContent);
+        } catch (e) {
+          log.error(
+            { err: e, docName },
+            `[reconcile] failed to apply both-kept content to Y.Doc for ${docName}; raising the conflict`,
+          );
+          setReconciledBase(docName, base);
+          incrementConflict();
+          conflicts.raise({
+            kind: 'reconcile',
+            file: conflicts.fileOf(docName),
+            reason: 'merged-with-markers',
+            stages: { base, ours, theirs },
+          });
+          return { kind: 'failed', error: e };
+        }
+        mergeHistory.bothKept(docName, { ours, theirs }, result.kept);
+        setReconciledBase(docName, theirs);
+        incrementReconcile();
+        reportReconcileBothKept(docName, result.kept, 'watcher');
+        conflicts.dissolveReconcile(docName);
+        await recordUpsertAfterIntake(docName, theirs);
+        return { kind: 'applied', merge: 'both-kept' };
+      }
+
+      case 'refused': {
+        if (result.reason === 'no-base') {
+          return applyDiskAuthoritativeIngest(docName, theirs, base);
+        }
+        reportReconcileCheckFailed(docName, result, 'watcher');
+        if (result.reason === 'check-failed' || result.reason === 'too-large') {
+          if (
+            await mergeHistory.keptLive(docName, { side: 'theirs', bytes: theirs }, result.reason)
+          ) {
+            setReconciledBase(docName, theirs);
+            reportReconcileKeptLive(docName, result.reason, 'watcher');
+            conflicts.dissolveReconcile(docName);
+            await recordUpsertAfterIntake(docName, theirs);
+            return { kind: 'applied', merge: 'kept-live' };
+          }
+        }
+        incrementConflict();
+        conflicts.raise({
+          kind: 'reconcile',
+          file: conflicts.fileOf(docName),
+          reason: wireReasonForRefusal(result.reason),
+          stages: { base, ours, theirs },
+        });
+        return { kind: 'conflict' };
+      }
+      default:
+        return assertNeverReconcileOutcome(result);
+    }
+  }
+
+  const bufferedRemovalScopes = new Map<
+    Extract<DiskEvent, { kind: 'delete' | 'rename' }>,
+    ReturnType<typeof beginRemoval>
+  >();
+
+  async function handleDiskEvent(
+    event: DiskEvent,
+    preparedRemoval = event.kind === 'delete' || event.kind === 'rename'
+      ? (bufferedRemovalScopes.get(event) ??
+        beginRemoval(
+          event.kind === 'delete' ? event.docName : event.oldDocName,
+          getMarkdownRemovalCurrentness(event),
+        ))
+      : undefined,
+  ): Promise<void> {
     try {
       switch (event.kind) {
         case 'create': {
+          const facts = getMarkdownEventFacts(event);
+          const createdHash = contentHash(event.content);
+          const paired = vanishedDocuments.matchCreate({
+            docName: event.docName,
+            identity: facts.identity,
+            size: facts.size,
+            modified: facts.modified,
+            hash: createdHash,
+            content: event.content,
+          });
+          if (paired) {
+            releaseVanished(paired.vanished.docName);
+            if (paired.by === 'same-name') {
+              recordVanishOutcome('recreated');
+              log.info(
+                { docName: event.docName },
+                `[reconcile] ${event.docName}: its file came back; taking it in as an update`,
+              );
+              await handleDiskEvent({
+                kind: 'update',
+                path: event.path,
+                docName: event.docName,
+                content: event.content,
+              });
+              flushReleasedStores();
+              break;
+            }
+            const carry = durabilityState.beginRenameCarry(paired.vanished.docName);
+            try {
+              persistence.discardDeferredStore(paired.vanished.docName, {
+                kind: 'renamed-outside',
+                to: event.docName,
+                carry,
+              });
+              recordVanishOutcome(paired.by === 'identity' ? 'paired-identity' : 'paired-hash');
+              await handleDiskEvent({
+                kind: 'rename',
+                oldPath: paired.vanished.path,
+                newPath: event.path,
+                oldDocName: paired.vanished.docName,
+                newDocName: event.docName,
+                content: event.content,
+              });
+            } finally {
+              durabilityState.abandonRenameCarry(paired.vanished.docName);
+            }
+            break;
+          }
+          vanishedDocuments.rememberCreate({
+            docName: event.docName,
+            path: event.path,
+            identity: facts.identity,
+            size: facts.size,
+            modified: facts.modified,
+            hash: createdHash,
+            at: vanishClock.now(),
+          });
           log.info({ docName: event.docName }, `[reconcile] create: ${event.docName}`);
+          reviveFrozenResident(event.docName, event.content);
           await derivedDocumentIndex.recordDiskUpsert(event.docName, event.content);
           signalChannel('files');
           scheduleIndexRegeneration(event.docName);
@@ -2788,174 +4093,86 @@ export function createServer(options: ServerOptions): ServerInstance {
         }
 
         case 'update': {
-          const { docName, content: theirs } = event;
-          onUpstreamAdd(docName);
-          if (indexedMetadataChanged(event.previousIndexedFields, theirs, docName)) {
-            scheduleIndexRegeneration(docName);
-          }
-          if (conflicts.findByDocName(docName)?.kind === 'merge-native') {
-            try {
-              await conflicts.pruneMergeNativeAgainstGit();
-            } catch (err) {
-              log.warn({ err, docName }, '[reconcile] conflict prune against git failed');
-            }
-          }
-
-          const document = hocuspocus.documents.get(docName);
-          if (!document) {
-            refuseStaleExternalWrite(durabilityState, undefined, docName, theirs, conflicts);
-            await derivedDocumentIndex.recordDiskUpsert(docName, theirs);
-            return;
-          }
-
-          const base = getReconciledBase(docName);
-          const ours = serializeDoc(docName) ?? base ?? '';
-
-          if (
-            refuseStaleExternalWrite(durabilityState, document, docName, theirs, conflicts, ours)
-          ) {
-            await derivedDocumentIndex.recordDiskUpsert(docName, theirs);
-            return;
-          }
-
-          if (base === undefined) {
-            await applyDiskAuthoritativeIngest(docName, theirs, true);
-            break;
-          }
-
-          const result = reconcile({ docName, base, ours, theirs });
-
-          const baseH = contentHash(base).slice(0, 6);
-          const oursH = contentHash(ours).slice(0, 6);
-          const theirsH = contentHash(theirs).slice(0, 6);
-          const oursLen = ours.length;
-          const theirsLen = theirs.length;
-          const newLen =
-            result.kind === 'clean' || result.kind === 'merged' || result.kind === 'conflicts'
-              ? result.newContent.length
-              : undefined;
-          const delta = newLen === undefined ? undefined : newLen - Math.max(oursLen, theirsLen);
-          const sizeSuffix = newLen === undefined ? '' : ` newLen=${newLen} delta=${delta}`;
-          log.info(
-            {
-              docName,
-              base: baseH,
-              ours: oursH,
-              theirs: theirsH,
-              result: result.kind,
-              oursLen,
-              theirsLen,
-              ...(newLen === undefined ? {} : { newLen, delta }),
-            },
-            `[reconcile] ${docName} base=${baseH} ours=${oursH} theirs=${theirsH} result=${result.kind} oursLen=${oursLen} theirsLen=${theirsLen}${sizeSuffix}`,
-          );
-
-          reportInsertDedupSkipped(docName, result, ours, theirs);
-
-          switch (result.kind) {
-            case 'noop':
-              conflicts.dissolveReconcile(docName);
-              await derivedDocumentIndex.recordDiskUpsert(docName, theirs);
-              break;
-
-            case 'clean':
-              {
-                let applied = false;
-                try {
-                  applyToDoc(docName, result.newContent);
-                  setReconciledBase(docName, result.newContent);
-                  incrementReconcile();
-                  conflicts.dissolveReconcile(docName);
-                  applied = true;
-                } catch (e) {
-                  log.error(
-                    { err: e, docName },
-                    `[reconcile] failed to apply clean content to Y.Doc for ${docName}`,
-                  );
-                  setReconciledBase(docName, theirs);
-                  conflicts.dissolveReconcile(docName);
-                }
-                if (applied) {
-                  await derivedDocumentIndex.recordDiskUpsert(docName, theirs);
-                }
-              }
-              break;
-
-            case 'merged':
-              {
-                let applied = false;
-                try {
-                  applyToDoc(docName, result.newContent);
-                  setReconciledBase(docName, theirs);
-                  incrementReconcile();
-                  conflicts.dissolveReconcile(docName);
-                  applied = true;
-                } catch (e) {
-                  log.error(
-                    { err: e, docName },
-                    `[reconcile] failed to apply merged content to Y.Doc for ${docName}`,
-                  );
-                  setReconciledBase(docName, theirs);
-                  conflicts.dissolveReconcile(docName);
-                }
-                if (applied) {
-                  await derivedDocumentIndex.recordDiskUpsert(docName, theirs);
-                }
-              }
-              break;
-
-            case 'conflicts': {
-              let applied = false;
-              try {
-                applyToDoc(docName, result.newContent);
-                setReconciledBase(docName, result.newContent);
-                incrementReconcile();
-                incrementConflict();
-                applied = true;
-              } catch (e) {
-                log.error(
-                  { err: e, docName },
-                  `[reconcile] failed to apply conflict content to Y.Doc for ${docName}`,
-                );
-                setReconciledBase(docName, theirs);
-              }
-              conflicts.raise({
-                kind: 'reconcile',
-                file: conflicts.fileOf(docName),
-                reason: 'merged-with-markers',
-                stages: { base, ours, theirs },
-              });
-              if (applied) {
-                await derivedDocumentIndex.recordDiskUpsert(docName, theirs);
-              }
-              break;
-            }
-
-            case 'refused': {
-              if (result.reason === 'no-base') {
-                await applyDiskAuthoritativeIngest(docName, theirs, false);
-                break;
-              }
-              incrementConflict();
-              conflicts.raise({
-                kind: 'reconcile',
-                file: conflicts.fileOf(docName),
-                reason: wireReasonForRefusal(result.reason),
-                stages: { base, ours, theirs },
-              });
-              break;
-            }
-          }
+          await intakeDiskUpdate(event);
           break;
         }
 
         case 'delete': {
           const { docName } = event;
-          dissolveNonGitConflicts(docName);
-          const document = hocuspocus.documents.get(docName);
-          if (!document) {
-            deleteReconciledBase(docName);
-            await derivedDocumentIndex.recordDiskDelete(docName);
+          const removal =
+            preparedRemoval ?? beginRemoval(docName, getMarkdownRemovalCurrentness(event));
+          bufferedRemovalScopes.delete(event);
+          try {
+            const namespaceCurrent = removal.namespaceCurrent();
+            const residentCurrent = removal.residentCurrent();
+            if (!namespaceCurrent && !residentCurrent) {
+              log.debug(
+                { docName, source: 'watcher-delete', namespaceCurrent, residentCurrent },
+                `[reconcile] delete skipped: ${docName} (stale removal)`,
+              );
+              return;
+            }
+            if (
+              namespaceCurrent &&
+              residentCurrent &&
+              removal.document &&
+              !settledVanishEvents.has(event) &&
+              (await holdVanishedDocument(event))
+            ) {
+              return;
+            }
+            if (namespaceCurrent) {
+              dissolveNonGitConflicts(docName);
+              commentDocHooksRef.current?.deleted(docName);
+            }
+            const { document } = removal;
+            const isDirty =
+              residentCurrent && document
+                ? rescueUnflushedEditsBeforeTeardown(
+                    docName,
+                    getStorageBranch() ?? 'main',
+                    'delete',
+                    true,
+                  )
+                : false;
+            if (residentCurrent) {
+              document?.getMap('lifecycle').set('status', 'deleted-upstream');
+              durabilityState.endRenameCarry(docName);
+            }
+            if (namespaceCurrent) deleteReconciledBase(docName);
+            if (namespaceCurrent) await derivedDocumentIndex.recordDiskDelete(docName);
+            if (!removal.namespaceCurrent() && !removal.residentCurrent()) {
+              log.debug(
+                {
+                  docName,
+                  source: 'watcher-delete',
+                  namespaceCurrent: false,
+                  residentCurrent: false,
+                },
+                `[reconcile] delete skipped: ${docName} (stale removal)`,
+              );
+              return;
+            }
+            log.info(
+              { docName, isDirty, source: 'watcher-delete' },
+              `[reconcile] delete: ${docName} (dirty=${isDirty})`,
+            );
+            if (removal.residentCurrent() && document) {
+              hocuspocus.closeConnections(docName);
+              await forceUnloadDocument(document, removal.residentCurrent);
+            }
+            if (!removal.namespaceCurrent()) {
+              log.debug(
+                {
+                  docName,
+                  source: 'watcher-delete',
+                  namespaceCurrent: false,
+                  residentCurrent: removal.residentCurrent(),
+                },
+                `[reconcile] delete: ${docName} not recorded as removed (stale removal)`,
+              );
+              return;
+            }
             signalChannel('files');
             onUpstreamDelete(docName);
             scheduleIndexRegenerationAfterRemoval(docName);
@@ -2967,117 +4184,135 @@ export function createServer(options: ServerOptions): ServerInstance {
                 source: 'watcher-delete',
               }),
             );
-            return;
+          } finally {
+            removal.dispose();
           }
-
-          const isDirty = rescueUnflushedEditsBeforeTeardown(
-            docName,
-            getStorageBranch() ?? 'main',
-            'delete',
-            true,
-          );
-
-          const lifecycleMap = document.getMap('lifecycle');
-          lifecycleMap.set('status', 'deleted-upstream');
-
-          deleteReconciledBase(docName);
-          await derivedDocumentIndex.recordDiskDelete(docName);
-          log.info(
-            { docName, isDirty, source: 'watcher-delete' },
-            `[reconcile] delete: ${docName} (dirty=${isDirty})`,
-          );
-
-          hocuspocus.closeConnections(docName);
-          await forceUnloadDocument(document);
-          signalChannel('files');
-          onUpstreamDelete(docName);
-          scheduleIndexRegenerationAfterRemoval(docName);
-          console.info(
-            JSON.stringify({
-              event: 'recently-removed-docs-populate',
-              docName,
-              kind: 'deleted',
-              source: 'watcher-delete',
-            }),
-          );
           break;
         }
 
         case 'rename': {
           const { oldDocName, newDocName, content } = event;
-          dissolveNonGitConflicts(oldDocName);
-          const freezeAsRenamed = (doc: Document): void => {
-            const lifecycleMap = doc.getMap('lifecycle');
-            lifecycleMap.set('status', 'renamed');
-            lifecycleMap.set('newPath', newDocName);
-          };
-          const loadedBeforeIndex = hocuspocus.documents.get(oldDocName);
-          const isDirty = loadedBeforeIndex
-            ? rescueUnflushedEditsBeforeTeardown(oldDocName, getStorageBranch() ?? 'main', 'rename')
-            : false;
-          if (loadedBeforeIndex) freezeAsRenamed(loadedBeforeIndex);
-
-          deleteReconciledBase(oldDocName);
-          persistence.forgetObservedFile(oldDocName);
-          setReconciledBase(newDocName, content);
-
-          log.info(
-            { oldDocName, newDocName, isDirty },
-            `[reconcile] rename: ${oldDocName} → ${newDocName} (dirty=${isDirty})`,
-          );
-          signalChannel('files');
-          onUpstreamAdd(newDocName);
-          onUpstreamRename(oldDocName, newDocName);
-
+          const removal =
+            preparedRemoval ?? beginRemoval(oldDocName, getMarkdownRemovalCurrentness(event));
+          bufferedRemovalScopes.delete(event);
+          durabilityState.beginRenameCarry(oldDocName);
+          let carriedThrough: WrittenThrough | null = null;
+          let retiredResident = false;
           try {
-            await derivedDocumentIndex.recordDiskRename(oldDocName, newDocName, content);
-          } catch (err) {
-            log.error(
-              { oldDocName, newDocName, err },
-              `[reconcile] rename: index update failed for ${oldDocName} → ${newDocName}; completing client teardown anyway`,
-            );
-          }
-
-          const document = hocuspocus.documents.get(oldDocName);
-          if (document && document !== loadedBeforeIndex) freezeAsRenamed(document);
-
-          const resident = hocuspocus.documents.get(newDocName);
-          if (resident && resident.getMap('lifecycle').get('status') === 'renamed') {
-            const residentLifecycle = resident.getMap('lifecycle');
-            residentLifecycle.delete('status');
-            residentLifecycle.delete('newPath');
-            applyToDoc(newDocName, content);
+            const document = removal.document;
+            const residentBeforeRename = removal.residentCurrent() && document ? document : null;
+            const liveBeforeRename = residentBeforeRename ? serializeDoc(oldDocName) : null;
+            const textBeforeRename = residentBeforeRename
+              ? writtenThroughOf(residentBeforeRename)
+              : null;
+            const baseBeforeRename = getReconciledBase(oldDocName);
+            const freezeAsRenamed = (doc: Document): void => {
+              const lifecycle = doc.getMap('lifecycle');
+              lifecycle.set('status', 'renamed');
+              lifecycle.set('newPath', newDocName);
+            };
+            const isDirty =
+              removal.residentCurrent() && document
+                ? rescueUnflushedEditsBeforeTeardown(
+                    oldDocName,
+                    getStorageBranch() ?? 'main',
+                    'rename',
+                  )
+                : false;
+            if (removal.residentCurrent() && document) freezeAsRenamed(document);
+            if (removal.namespaceCurrent()) {
+              dissolveNonGitConflicts(oldDocName);
+              deleteReconciledBase(oldDocName);
+              persistence.forgetObservedFile(oldDocName);
+              onUpstreamRename(oldDocName, newDocName);
+            }
+            setReconciledBase(newDocName, content);
             log.info(
-              { newDocName },
-              `[reconcile] rename: cleared stale renamed lifecycle on ${newDocName}`,
+              { oldDocName, newDocName, isDirty },
+              `[reconcile] rename: ${oldDocName} → ${newDocName} (dirty=${isDirty})`,
             );
-          }
-
-          await sessionManager.closeAllForDoc(oldDocName);
-          const closedConnections = document?.getConnectionsCount() ?? 0;
-          /* WARN: the `delete` branch above and `captureAndCloseDocuments` pair their
-             close with `forceUnloadDocument`; this branch does not, so the frozen doc
-             stays resident under the old name and template-watcher-capabilities.test.ts
-             pins that residency. The destination clear above is what stops a move back
-             to this path from being served that stale frozen doc. */
-          hocuspocus.closeConnections(oldDocName);
-          if (closedConnections > 0) {
-            log.info(
-              { oldDocName, newDocName, closedConnections },
-              `[reconcile] rename: closed ${closedConnections} connection(s) on ${oldDocName}`,
+            signalChannel('files');
+            onUpstreamAdd(newDocName);
+            try {
+              if (removal.namespaceCurrent()) {
+                await derivedDocumentIndex.recordDiskRename(oldDocName, newDocName, content);
+              } else {
+                await derivedDocumentIndex.recordDiskUpsert(newDocName, content);
+              }
+            } catch (err) {
+              log.error(
+                { oldDocName, newDocName, err },
+                `[reconcile] rename: index update failed for ${oldDocName} → ${newDocName}; completing client teardown anyway`,
+              );
+            }
+            const loadedDuringIndex = removal.namespaceCurrent()
+              ? hocuspocus.documents.get(oldDocName)
+              : undefined;
+            const lateResident = loadedDuringIndex !== document ? loadedDuringIndex : undefined;
+            if (lateResident) freezeAsRenamed(lateResident);
+            reviveFrozenResident(newDocName, content);
+            scheduleIndexRegeneration(newDocName);
+            if (removal.namespaceCurrent()) {
+              followRecordsAcrossRename(oldDocName, newDocName, event.newPath);
+            }
+            if (liveBeforeRename !== null && baseBeforeRename !== undefined) {
+              const carried =
+                liveBeforeRename === baseBeforeRename ||
+                (await carryLiveTextAcrossRename(
+                  newDocName,
+                  event.newPath,
+                  baseBeforeRename,
+                  liveBeforeRename,
+                  content,
+                ));
+              if (carried) carriedThrough = textBeforeRename;
+            }
+            const retired = removal.residentCurrent() && document ? document : lateResident;
+            retiredResident = Boolean(retired);
+            if (retired) {
+              const closedConnections = retired.getConnectionsCount();
+              /* WARN: the `delete` branch above and `captureAndCloseDocuments` pair their
+               close with `forceUnloadDocument`; this branch does not, so the frozen doc
+               stays resident under the old name and template-watcher-capabilities.test.ts
+               pins that residency. The destination clear above is what stops a move back
+               to this path from being served that stale frozen doc. */
+              hocuspocus.closeConnections(oldDocName);
+              await sessionManager.closeAllForDoc(oldDocName);
+              if (closedConnections > 0) {
+                log.info(
+                  { oldDocName, newDocName, closedConnections },
+                  `[reconcile] rename: closed ${closedConnections} connection(s) on ${oldDocName}`,
+                );
+              }
+            }
+            if (!removal.namespaceCurrent()) {
+              log.debug(
+                {
+                  docName: oldDocName,
+                  newDocName,
+                  source: 'watcher-rename',
+                  namespaceCurrent: false,
+                  residentCurrent: removal.residentCurrent(),
+                },
+                `[reconcile] rename: ${oldDocName} not recorded as removed (stale removal)`,
+              );
+              break;
+            }
+            console.info(
+              JSON.stringify({
+                event: 'recently-removed-docs-populate',
+                from: oldDocName,
+                to: newDocName,
+                kind: 'renamed',
+                source: 'watcher-rename',
+              }),
             );
+            scheduleIndexRegenerationAfterRemoval(oldDocName);
+          } finally {
+            durabilityState.settleRenameCarry(oldDocName, carriedThrough);
+            if (!retiredResident) durabilityState.endRenameCarry(oldDocName);
+            removal.dispose();
           }
-          console.info(
-            JSON.stringify({
-              event: 'recently-removed-docs-populate',
-              from: oldDocName,
-              to: newDocName,
-              kind: 'renamed',
-              source: 'watcher-rename',
-            }),
-          );
-          scheduleIndexRegenerationAfterRemoval(oldDocName);
-          scheduleIndexRegeneration(newDocName);
           break;
         }
 
@@ -3130,6 +4365,7 @@ export function createServer(options: ServerOptions): ServerInstance {
           await derivedDocumentIndex.recordFileTargetUpsert(event.relativePath);
           invalidateReferencedAssetsCache?.();
           signalChannel('files');
+          await takeInEnginelessChange(event.relativePath);
           break;
         }
         case 'file-delete': {
@@ -3153,23 +4389,150 @@ export function createServer(options: ServerOptions): ServerInstance {
   const eventBuffer: DiskEvent[] = [];
 
   async function onDiskEvent(event: DiskEvent): Promise<void> {
-    if (isBatchInProgress()) {
+    if (documentAdmissionClosed) return;
+    if ((event.kind === 'delete' || event.kind === 'rename') && !bufferedRemovalScopes.has(event)) {
+      bufferedRemovalScopes.set(
+        event,
+        beginRemoval(
+          event.kind === 'delete' ? event.docName : event.oldDocName,
+          getMarkdownRemovalCurrentness(event),
+        ),
+      );
+    }
+    if (isBatchInProgress() || draining !== null) {
       eventBuffer.push(event);
       return;
     }
     await handleDiskEvent(event);
   }
 
-  async function drainEventBuffer(): Promise<void> {
-    const events = eventBuffer.splice(0, eventBuffer.length);
-    for (const event of events) {
-      await handleDiskEvent(event);
-    }
+  let draining: Promise<void> | null = null;
+
+  function drainEventBuffer(): Promise<void> {
+    if (draining) return draining;
+    if (eventBuffer.length === 0) return Promise.resolve();
+    const done = Promise.withResolvers<void>();
+    draining = done.promise;
+    void (async () => {
+      try {
+        while (eventBuffer.length > 0) {
+          const events = eventBuffer.splice(0, eventBuffer.length);
+          for (const event of events) await handleDiskEvent(event);
+        }
+        done.resolve();
+      } catch (err) {
+        done.reject(err);
+      } finally {
+        draining = null;
+      }
+    })();
+    return done.promise;
+  }
+
+  function disposeBufferedRemovalScopes(): void {
+    for (const scope of bufferedRemovalScopes.values()) scope.dispose();
+    bufferedRemovalScopes.clear();
   }
 
   let watcher: WatcherHandle | null = null;
+
+  function isEnginelessDoc(docName: string): boolean {
+    return isMermaidDoc(docName) || isExcalidrawDoc(docName) || isEditableTextDoc(docName);
+  }
+
+  async function takeInEnginelessChange(docName: string): Promise<boolean> {
+    if (!isEnginelessDoc(docName)) return false;
+    const document = hocuspocus.documents.get(docName);
+    if (!document) return false;
+    const outcome = await applyExternalEnginelessChange(
+      document,
+      docName,
+      persistence.mermaidPersistenceCtx,
+    );
+    return outcome !== 'unchanged';
+  }
+
+  async function refreshDocumentsFromDisk(
+    docNames: readonly string[],
+    trigger: DocumentRefreshTrigger,
+  ): Promise<DocumentRefreshResult> {
+    if (!watcher) return { checked: 0, found: 0 };
+    const aliases = watcher.getAliasMap();
+    const index = watcher.getFileIndex();
+    const paths: string[] = [];
+    const engineless = { checked: 0, found: 0 };
+    for (const requested of new Set(docNames)) {
+      const docName = aliases.get(requested) ?? requested;
+      if (isReservedForUserTree(docName)) continue;
+      if (isEnginelessDoc(docName)) {
+        engineless.checked++;
+        if (await takeInEnginelessChange(docName)) engineless.found++;
+        continue;
+      }
+      const indexed = index.get(docName)?.canonicalPath;
+      if (indexed !== undefined) {
+        paths.push(indexed);
+        continue;
+      }
+      try {
+        paths.push(safeContentPath(docName, contentDir));
+      } catch (err) {
+        log.debug(
+          { err, trigger },
+          '[reconcile] skipped a re-read for a name outside the content tree',
+        );
+      }
+    }
+    const rechecked =
+      paths.length === 0 ? { checked: 0, found: 0 } : await watcher.recheckPaths(paths);
+    const result = {
+      checked: rechecked.checked + engineless.checked,
+      found: rechecked.found + engineless.found,
+    };
+    const summary = { trigger, ...result };
+    if (result.found > 0)
+      log.info(summary, `[reconcile] re-read on ${trigger} found outside changes`);
+    else log.debug(summary, `[reconcile] re-read on ${trigger} found nothing new`);
+    return result;
+  }
   let syncEngine: SyncEngine | null = null;
   let inflightDestroy: Promise<void> | null = null;
+  let retirementStarted = false;
+  let watcherReleaseState: {
+    phaseErrors: Array<{ phase: string; error: string }>;
+    authorityGateReached: boolean;
+  } | null = null;
+
+  function recordWatcherReleaseFailure(watched: 'head' | 'content', err: unknown): void {
+    const state = watcherReleaseState;
+    if (state === null || state.authorityGateReached) {
+      log.error({ err, watched }, '[server] late watcher release failed after shutdown');
+      return;
+    }
+    state.phaseErrors.push({
+      phase: 'watcher-unsubscribe',
+      error: err instanceof Error ? err.message : String(err),
+    });
+    log.error({ err, watched }, '[server] shutdown phase-1 watcher unsubscribe failed');
+  }
+
+  async function adoptWatcher<T extends { unsubscribe(): Promise<void> }>(
+    start: () => Promise<T>,
+    publish: (handle: T) => void,
+    watched: 'head' | 'content',
+  ): Promise<void> {
+    if (retirementStarted) return;
+    const handle = await start();
+    if (retirementStarted) {
+      try {
+        await handle.unsubscribe();
+      } catch (err) {
+        recordWatcherReleaseFailure(watched, err);
+      }
+      return;
+    }
+    publish(handle);
+  }
 
   const rescueDocToShadowBuffer = (
     docName: string,
@@ -3189,7 +4552,9 @@ export function createServer(options: ServerOptions): ServerInstance {
       return 'lost';
     }
     try {
-      const ours = serializeDoc(docName);
+      const ours = isPersistenceExcludedDoc(docName)
+        ? (hocuspocus.documents.get(docName)?.getText('source').toString() ?? null)
+        : serializeDoc(docName);
       if (ours === null) {
         log.warn(
           { docName, context },
@@ -3414,11 +4779,15 @@ export function createServer(options: ServerOptions): ServerInstance {
 
   async function destroy(): Promise<void> {
     if (inflightDestroy) return inflightDestroy;
+    retirementStarted = true;
 
     inflightDestroy = (async () => {
       const t0 = Date.now();
       const phaseErrors: Array<{ phase: string; error: string }> = [];
-      const preludeDeadline = Date.now() + Math.min(destroyTimeoutMs, DEFAULT_SIGTERM_GRACE_MS / 5);
+      const releaseState = { phaseErrors, authorityGateReached: false };
+      watcherReleaseState = releaseState;
+      const graceShareMs = Math.min(destroyTimeoutMs, DEFAULT_SIGTERM_GRACE_MS / 5);
+      const preludeDeadline = Date.now() + graceShareMs;
       const preludeRemaining = () => Math.max(1, preludeDeadline - Date.now());
       const joinPrelude = async <T>(operation: Promise<T>, phase: string): Promise<T> => {
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -3445,7 +4814,34 @@ export function createServer(options: ServerOptions): ServerInstance {
         phaseErrors.push({ phase: 'mutation-drain', error: String(err) });
         log.error({ err }, '[server] shutdown mutation drain failed');
       }
+      vanishClock.clearTimeout(vanishRecheckTimer);
+      vanishRecheckTimer = null;
+      supersedeBranchSwitchFollowUps();
+      for (const entry of vanishedDocuments.all()) {
+        persistence.discardDeferredStore(entry.docName, { kind: 'shutdown' });
+        rescueUnflushedEditsBeforeTeardown(
+          entry.docName,
+          getStorageBranch() ?? 'main',
+          'delete',
+          true,
+        );
+        recordVanishOutcome('shutdown');
+        durabilityState.releaseStores(entry.docName);
+      }
+      vanishedDocuments.clear();
+      durabilityState.endAllRenameCarries();
+      reportedUnreadableReturns.clear();
+      overdueFaults.clear();
       documentAdmissionClosed = true;
+      disposeBufferedRemovalScopes();
+      for (const removals of activeRemovals.values()) {
+        for (const removal of removals) {
+          removal.namespaceAllowed = false;
+          removal.residentAllowed = false;
+        }
+      }
+      activeRemovals.clear();
+      residentOccurrences = new WeakMap();
 
       try {
         await joinPrelude(closeIndexRegeneration(), 'generated-index');
@@ -3537,44 +4933,44 @@ export function createServer(options: ServerOptions): ServerInstance {
       }
 
       const documentCount = hocuspocus.documents.size;
+      const releaseWatcher = async (
+        release: { unsubscribe(): Promise<void> } | null,
+        watched: 'head' | 'content',
+      ): Promise<void> => {
+        if (release === null) return;
+        try {
+          await release.unsubscribe();
+        } catch (err) {
+          recordWatcherReleaseFailure(watched, err);
+        }
+      };
 
       try {
         try {
-          try {
-            if (inPlaceRescanTimer) {
-              clearTimeout(inPlaceRescanTimer);
-              inPlaceRescanTimer = null;
-            }
-            if (shadowWarmupTimer) {
-              clearTimeout(shadowWarmupTimer);
-              shadowWarmupTimer = null;
-            }
-            if (headWatcher) {
-              await headWatcher.unsubscribe();
-              headWatcher = null;
-            }
-            if (watcher) {
-              await watcher.unsubscribe();
-              watcher = null;
-            }
-            for (const { docName, cleanup } of configFileWatcherCleanups) {
-              try {
-                await cleanup();
-              } catch (cfgErr) {
-                log.warn(
-                  { err: cfgErr, docName },
-                  `[server] failed to stop config-file-watcher for ${docName}`,
-                );
-              }
-            }
-            configFileWatcherCleanups.length = 0;
-          } catch (err) {
-            phaseErrors.push({
-              phase: 'watcher-unsubscribe',
-              error: err instanceof Error ? err.message : String(err),
-            });
-            log.error({ err }, '[server] shutdown phase-1 watcher unsubscribe failed');
+          if (inPlaceRescanTimer) {
+            clearTimeout(inPlaceRescanTimer);
+            inPlaceRescanTimer = null;
           }
+          if (shadowWarmupTimer) {
+            clearTimeout(shadowWarmupTimer);
+            shadowWarmupTimer = null;
+          }
+          await releaseWatcher(headWatcher, 'head');
+          headWatcher = null;
+          await releaseWatcher(watcher, 'content');
+          watcher = null;
+          for (const { docName, cleanup } of configFileWatcherCleanups) {
+            try {
+              await cleanup();
+            } catch (cfgErr) {
+              log.warn(
+                { err: cfgErr, docName },
+                `[server] failed to stop config-file-watcher for ${docName}`,
+              );
+            }
+          }
+          configFileWatcherCleanups.length = 0;
+          configFileWatcherResyncs.clear();
 
           try {
             cc1Broadcaster?.destroy();
@@ -3632,7 +5028,29 @@ export function createServer(options: ServerOptions): ServerInstance {
             log.error({ err }, '[server] shutdown phase-3 flush failed');
           }
 
-          void derivedDocumentIndex.close();
+          let derivedIndexCloseTimeoutId: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              derivedDocumentIndex.close(),
+              new Promise<never>((_, reject) => {
+                derivedIndexCloseTimeoutId = setTimeout(
+                  () =>
+                    reject(
+                      new Error(`derived index close did not settle within ${graceShareMs}ms`),
+                    ),
+                  graceShareMs,
+                );
+              }),
+            ]);
+          } catch (err) {
+            phaseErrors.push({
+              phase: 'derived-index-close',
+              error: err instanceof Error ? err.message : String(err),
+            });
+            log.error({ err }, '[server] shutdown derived-index close failed');
+          } finally {
+            if (derivedIndexCloseTimeoutId !== undefined) clearTimeout(derivedIndexCloseTimeoutId);
+          }
 
           let l2TimeoutId: ReturnType<typeof setTimeout> | undefined;
           try {
@@ -3727,6 +5145,7 @@ export function createServer(options: ServerOptions): ServerInstance {
             log.error({ err: reason }, '[server] shutdown local-op subprocess drain failed');
           }
           const durationMs = Date.now() - t0;
+          releaseState.authorityGateReached = true;
           if (phaseErrors.length === 0) {
             authorityRetired = true;
             try {
@@ -3764,6 +5183,7 @@ export function createServer(options: ServerOptions): ServerInstance {
             error: err instanceof Error ? err.message : String(err),
           });
         }
+        if (watcherReleaseState === releaseState) watcherReleaseState = null;
       }
       if (authResult?.status === 'rejected') throw authResult.reason;
     })();
@@ -3995,7 +5415,7 @@ export function createServer(options: ServerOptions): ServerInstance {
       if (!absPath) continue;
       try {
         log.info({ docName: configDocName, path: absPath }, '[config-file-watcher] starting');
-        const cleanup = await startConfigFileWatcher(absPath, (content) => {
+        const takeInConfigChange = async (content: string): Promise<void> => {
           const document = hocuspocus.documents.get(configDocName);
           const alreadyApplied = isConfigEcho(
             configDocName,
@@ -4010,7 +5430,7 @@ export function createServer(options: ServerOptions): ServerInstance {
             },
             '[config-file-watcher] file changed',
           );
-          const outcome = applyExternalConfigChange(
+          const outcome = await applyExternalConfigChange(
             document ?? null,
             configDocName,
             content,
@@ -4024,8 +5444,17 @@ export function createServer(options: ServerOptions): ServerInstance {
           if (!alreadyApplied) {
             logConfigDiagnostics(configDocName);
           }
+        };
+        const cleanup = await startConfigFileWatcher(absPath, (content) => {
+          void takeInConfigChange(content).catch((err: unknown) => {
+            log.warn(
+              { err, docName: configDocName },
+              '[config-file-watcher] change handler failed',
+            );
+          });
         });
         configFileWatcherCleanups.push({ docName: configDocName, cleanup });
+        configFileWatcherResyncs.set(configDocName, cleanup.resync);
         log.info({ docName: configDocName, path: absPath }, '[config-file-watcher] started');
       } catch (err) {
         log.warn(
@@ -4047,11 +5476,11 @@ export function createServer(options: ServerOptions): ServerInstance {
           });
         }, 300);
       };
-      const reconcileManagedArtifactDisk = (absPath: string, content: string): void => {
+      const reconcileManagedArtifactDisk = async (absPath: string, content: string) => {
         const docName = managedArtifactDocNameForPath(absPath, persistence.managedArtifactCtx);
         if (!docName) return;
         const document = hocuspocus.documents.get(docName);
-        const outcome = applyExternalManagedArtifactChange(
+        const outcome = await applyExternalManagedArtifactChange(
           document ?? null,
           docName,
           content,
@@ -4134,7 +5563,7 @@ export function createServer(options: ServerOptions): ServerInstance {
               if (changedPath === okignorePath) {
                 try {
                   const document = hocuspocus.documents.get(CONFIG_DOC_NAME_OKIGNORE) ?? null;
-                  const outcome = applyExternalConfigChange(
+                  const outcome = await applyExternalConfigChange(
                     document,
                     CONFIG_DOC_NAME_OKIGNORE,
                     content,
@@ -4181,6 +5610,7 @@ export function createServer(options: ServerOptions): ServerInstance {
           });
       if (ignoreCleanup) {
         configFileWatcherCleanups.push({ docName: '__ignore-files__', cleanup: ignoreCleanup });
+        configFileWatcherResyncs.set(CONFIG_DOC_NAME_OKIGNORE, ignoreCleanup.resync);
         ignoreLog.info(
           { okignorePath, gitignorePath },
           '[ignore-watcher] multi-path watcher started',
@@ -4273,11 +5703,25 @@ export function createServer(options: ServerOptions): ServerInstance {
             }
           }, IN_PLACE_RESCAN_DEBOUNCE_MS);
         };
-        watcher = await withSpan('ok.boot.seed-walk', undefined, async () =>
-          startWatcher(canonicalContentDir, onDiskEvent, contentFilter, {
-            onRawBatch,
-            onRecoveryComplete: () => derivedDocumentIndex.recordInventoryReconciled(),
-          }),
+        await adoptWatcher(
+          () =>
+            withSpan('ok.boot.seed-walk', undefined, async () =>
+              startWatcher(canonicalContentDir, onDiskEvent, contentFilter, {
+                onRawBatch,
+                onRecoveryComplete: () => derivedDocumentIndex.recordInventoryReconciled(),
+                onRecoveryPassCompleted: (pass, whole) => settleVanishedDocuments(pass, whole),
+                nativeBackend: options.watcherBackend,
+                clock: options.watcherClock,
+                freshnessIntervalMs:
+                  options.freshnessIntervalMs === undefined
+                    ? FRESHNESS_BASE_INTERVAL_MS
+                    : options.freshnessIntervalMs,
+              }),
+            ),
+          (handle) => {
+            watcher = handle;
+          },
+          'content',
         );
         void resyncRecordedSkillCopies(projectDir, contentDir)
           .then((n) => {
@@ -4286,7 +5730,8 @@ export function createServer(options: ServerOptions): ServerInstance {
           .catch((err) => log.warn({ err }, '[in-place-skills] boot copy re-sync failed'));
         {
           const home = configHomedirOverride ?? homedir();
-          void resyncRecordedSkillCopies(home, home, scanGlobalInPlaceSkills(home))
+          void scanGlobalInPlaceSkillsAsync(home)
+            .then((inPlace) => resyncRecordedSkillCopies(home, home, inPlace))
             .then((n) => {
               if (n > 0) log.info({ refreshed: n }, '[in-place-skills] global boot copy re-sync');
             })
@@ -4372,360 +5817,286 @@ export function createServer(options: ServerOptions): ServerInstance {
       refreshStartupEmbeds();
     }
 
+    let releaseHeadBatchAdmission = () => {};
     try {
-      headWatcher = await startHeadWatcher(
-        projectDir,
-        async ({ trigger }) => {
-          log.info({ trigger }, `[batch] begin trigger=${trigger}`);
-          incrementBatch();
-          hocuspocus.flushPendingStores();
-          await persistence.flushPendingGitCommit();
+      await adoptWatcher(
+        () =>
+          startHeadWatcher(
+            projectDir,
+            async ({ trigger }) => {
+              log.info({ trigger }, `[batch] begin trigger=${trigger}`);
+              incrementBatch();
+              hocuspocus.flushPendingStores();
+              await persistence.flushPendingGitCommit();
 
-          setBatchInProgress(true);
+              holdBatch('head-watcher');
+              releaseHeadBatchAdmission();
+              releaseHeadBatchAdmission = durabilityState.holdWriteAdmission();
 
-          if (shadowRef.current) {
-            const currentBranch = getActiveBranch();
-            const newBranch = readProjectHeadState(projectDir).branch ?? currentBranch;
-            const docs: ParkableDoc[] = [];
-            let absentBaseParkSkips = 0;
-            for (const [docName, document] of hocuspocus.documents) {
-              if (isReservedForUserTree(docName)) continue;
-              let markdown: string | null = null;
-              document.transact(() => {
-                markdown = serializeDoc(docName);
-              }, PARK_SNAPSHOT_ORIGIN);
-              if (markdown === null) continue;
-              const diskSnapshot = getReconciledBase(docName);
-              if (diskSnapshot === undefined) {
-                absentBaseParkSkips++;
-                continue;
-              }
-              docs.push({ docName, markdown, diskSnapshot });
-            }
-            if (absentBaseParkSkips > 0) {
-              log.warn(
-                { count: absentBaseParkSkips, branch: currentBranch },
-                `[history] skipped parking ${absentBaseParkSkips} doc(s) with no reconciled base; their content was not parked to the shadow history`,
-              );
-            }
-            if (docs.length > 0) {
-              try {
-                const sha = await parkBranch(
-                  shadowRef.current,
-                  currentBranch,
-                  SERVICE_WRITER.id,
-                  docs,
-                  newBranch,
-                );
-                if (sha) {
-                  incrementPark();
-                  log.info(
-                    { count: docs.length, branch: currentBranch, sha: sha.slice(0, 8) },
-                    `[history] parked ${docs.length} docs on ${currentBranch} → ${sha.slice(0, 8)}`,
-                  );
-                }
-              } catch (e) {
-                log.error({ err: e }, '[shadow] park failed');
-              }
-            }
-          }
-        },
-        async (info) => {
-          const bufferedCount = eventBuffer.length;
-          const newBranch = info.newBranch ?? 'main';
-
-          log.info(
-            {
-              kind: info.batchKind,
-              headMoved: info.headMoved,
-              docs: bufferedCount,
-              timeout: !!info.timeout,
-            },
-            `[batch] end kind=${info.batchKind} headMoved=${info.headMoved} docs=${bufferedCount}${info.timeout ? ' timeout' : ''}`,
-          );
-
-          if (info.batchKind === 'within-branch') {
-            setBatchInProgress(false);
-            await drainEventBuffer();
-
-            if (info.headMoved && info.newHead) {
-              const changes = resolveUpstreamChanges(
-                projectDir,
-                resolve(contentDir),
-                info.oldHead,
-                info.newHead,
-              );
-              if (changes.size > 0) {
-                dropPendingDocs(changes.keys());
-                for (const [docName, author] of changes) {
-                  recordContributor(
-                    docName,
-                    gitAuthorWriterId(author.email),
-                    author.name,
-                    author.email,
-                    formatReconcileSubject(docName),
-                  );
-                }
-                await persistence.flushContributors();
-              }
-            }
-            await persistence.flushDeferredStores('within-branch');
-            try {
-              await conflicts.pruneMergeNativeAgainstGit();
-            } catch (err) {
-              log.warn({ err }, '[head-watcher] conflict prune against git failed');
-            }
-          } else {
-            incrementBranchSwitch();
-            eventBuffer.splice(0, eventBuffer.length);
-            let deferredStoresFlushed = false;
-            let branchTransition: DerivedDocumentIndexBranchTransition | undefined;
-            try {
-              switchReconciledBaseScope(newBranch);
-              conflicts.setBranch(newBranch);
-              hydrateStaleExternalWrites();
-              branchTransition = await derivedDocumentIndex.beginBranchSwitch(newBranch);
-
-              contentFilter.rebuildDirCount();
-
-              try {
-                let reseedSkipCount = 0;
-                basenameIndex.clear();
-                await seedBasenameIndex({
-                  contentDir,
-                  contentFilter,
-                  basenameIndex,
-                  onSkip: (reason, code, path) => {
-                    reseedSkipCount++;
-                    log.warn(
-                      { reason, code, path, branch: newBranch },
-                      `[basename-index] skipped entry during branch-switch reseed (${reason}${code ? ` ${code}` : ''})`,
-                    );
-                  },
-                });
-                if (reseedSkipCount > 0) {
-                  log.warn(
-                    { count: reseedSkipCount, branch: newBranch },
-                    `[basename-index] branch-switch reseed completed with ${reseedSkipCount} skipped entries — embeds under inaccessible subtrees will not resolve on this branch`,
-                  );
-                  if (!degraded.includes('basename-index-partial')) {
-                    degraded.push('basename-index-partial');
-                  }
-                }
-              } catch (err) {
-                log.error(
-                  { err, branch: newBranch },
-                  '[basename-index] branch-switch reseed failed',
-                );
-              }
-
-              for (const [docName, document] of hocuspocus.documents) {
-                if (isReservedForUserTree(docName)) continue;
-                try {
-                  const filePath = safeContentPath(docName, contentDir);
-                  if (!existsSync(filePath)) {
-                    rescueUnflushedEditsBeforeTeardown(docName, newBranch, 'branch-switch');
-
-                    const lifecycleMap = document.getMap('lifecycle');
-                    lifecycleMap.set('status', 'deleted-upstream');
-                    log.info(
-                      { docName, branch: newBranch },
-                      `[branch-switch] tombstone: ${docName} (not on ${newBranch})`,
-                    );
-                    continue;
-                  }
-
-                  if (canonicalContentPathIsRefused(filePath, realpathSync(filePath), contentDir)) {
-                    rescueUnflushedEditsBeforeTeardown(docName, newBranch, 'branch-switch');
-                    document.getMap('lifecycle').set('status', 'deleted-upstream');
-                    log.warn(
-                      { docName, branch: newBranch },
-                      `[branch-switch] tombstone: ${docName} resolves outside the content dir or into private state on ${newBranch}`,
-                    );
-                    continue;
-                  }
-                  const diskContent = readFileSync(filePath, 'utf-8');
-                  if (getReconciledBase(docName) === undefined) {
-                    const ours = serializeDoc(docName) ?? '';
-                    if (ours !== '' && ours !== diskContent) {
-                      rescueUnflushedEditsBeforeTeardown(docName, newBranch, 'branch-switch', true);
-                    }
-                  }
-                  applyToDoc(docName, diskContent);
-                  setReconciledBase(docName, diskContent);
-                  log.info({ docName }, `[branch-switch] reset: ${docName}`);
-                } catch (e) {
-                  log.error({ err: e, docName }, `[branch-switch] failed to reset ${docName}`);
-                }
-              }
-
-              log.info(
-                { branch: newBranch, docCount: hocuspocus.documents.size },
-                `[branch-switch] loaded branch ${newBranch} (${hocuspocus.documents.size} docs)`,
-              );
-              try {
-                await derivedDocumentIndex.settleBranchFromDisk(branchTransition);
-              } catch (err) {
-                derivedDocumentIndex.abortBranchSwitch(branchTransition);
-                log.error(
-                  { err, branch: newBranch },
-                  '[derived-index] branch-switch rebuild failed; relationship views may be stale',
-                );
-              }
-
-              if (shadowRef.current && info.batchKind === 'cross-branch') {
-                let restoredCount = 0;
-                for (const [docName] of hocuspocus.documents) {
+              if (shadowRef.current) {
+                const currentBranch = getActiveBranch();
+                const newBranch = readProjectHeadState(projectDir).branch ?? currentBranch;
+                const docs: ParkableDoc[] = [];
+                let absentBaseParkSkips = 0;
+                for (const [docName, document] of hocuspocus.documents) {
                   if (isReservedForUserTree(docName)) continue;
+                  let markdown: string | null = null;
+                  document.transact(() => {
+                    markdown = serializeDoc(docName);
+                  }, PARK_SNAPSHOT_ORIGIN);
+                  if (markdown === null) continue;
+                  const diskSnapshot = getReconciledBase(docName);
+                  if (diskSnapshot === undefined) {
+                    absentBaseParkSkips++;
+                    continue;
+                  }
+                  docs.push({ docName, markdown, diskSnapshot });
+                }
+                if (absentBaseParkSkips > 0) {
+                  log.warn(
+                    { count: absentBaseParkSkips, branch: currentBranch },
+                    `[history] skipped parking ${absentBaseParkSkips} doc(s) with no reconciled base; their content was not parked to the shadow history`,
+                  );
+                }
+                if (docs.length > 0) {
                   try {
-                    const parked = await readParkedState(
+                    const sha = await parkBranch(
                       shadowRef.current,
-                      newBranch,
+                      currentBranch,
                       SERVICE_WRITER.id,
-                      docName,
+                      docs,
+                      newBranch,
                     );
-                    if (!parked) continue;
-                    if (parked.markdown === parked.diskSnapshot) continue;
-
-                    const currentDisk = getReconciledBase(docName);
-                    if (!currentDisk) continue;
-
-                    const outcome = reconcile({
-                      docName,
-                      base: parked.diskSnapshot,
-                      ours: parked.markdown,
-                      theirs: currentDisk,
-                    });
-
-                    reportInsertDedupSkipped(docName, outcome, parked.markdown, currentDisk);
-
-                    switch (outcome.kind) {
-                      case 'merged':
-                      case 'clean':
-                        applyToDoc(docName, outcome.newContent);
-                        setReconciledBase(docName, outcome.newContent);
-                        restoredCount++;
-                        break;
-                      case 'conflicts': {
-                        applyToDoc(docName, outcome.newContent);
-                        setReconciledBase(docName, outcome.newContent);
-                        incrementConflict();
-                        restoredCount++;
-                        conflicts.raise({
-                          kind: 'reconcile',
-                          file: conflicts.fileOf(docName),
-                          reason: 'merged-with-markers',
-                          stages: {
-                            base: parked.diskSnapshot,
-                            ours: parked.markdown,
-                            theirs: currentDisk,
-                          },
-                        });
-                        break;
-                      }
-                      case 'noop':
-                        break;
-                      case 'refused':
-                        switch (outcome.reason) {
-                          case 'conflict-markers':
-                          case 'no-base':
-                          case 'too-large':
-                            log.warn(
-                              { docName, reason: outcome.reason, branch: newBranch },
-                              `[branch-switch] parked WIP not restored for ${docName} (reconcile refused: ${outcome.reason})`,
-                            );
-                            break;
-                          default: {
-                            const unhandled: never = outcome.reason;
-                            log.warn(
-                              { docName, reason: String(unhandled), branch: newBranch },
-                              `[branch-switch] parked WIP not restored for ${docName} (reconcile refused: ${String(unhandled)})`,
-                            );
-                            break;
-                          }
-                        }
-                        break;
+                    if (sha) {
+                      incrementPark();
+                      log.info(
+                        { count: docs.length, branch: currentBranch, sha: sha.slice(0, 8) },
+                        `[history] parked ${docs.length} docs on ${currentBranch} → ${sha.slice(0, 8)}`,
+                      );
                     }
                   } catch (e) {
-                    log.error(
-                      { err: e, docName },
-                      `[branch-switch] restore WIP failed for ${docName}`,
-                    );
+                    log.error({ err: e }, '[shadow] park failed');
                   }
                 }
-                if (restoredCount > 0) {
-                  log.info(
-                    { count: restoredCount, branch: newBranch },
-                    `[branch-switch] restored ${restoredCount} parked docs on ${newBranch}`,
-                  );
-                }
               }
+            },
+            async (info) => {
+              const bufferedCount = eventBuffer.length;
+              const newBranch = info.newBranch ?? 'main';
 
-              if (info.oldBranch?.startsWith('detached-') && shadowRef.current) {
-                try {
-                  const sg = shadowGit(shadowRef.current);
-                  const refs = (
-                    await sg.raw(
-                      'for-each-ref',
-                      `refs/wip/${info.oldBranch}/`,
-                      '--format=%(refname)',
-                    )
-                  ).trim();
-                  if (refs) {
-                    await shadowOpGateFor(shadowRef.current).withMutator(async () => {
-                      for (const ref of refs.split('\n')) {
-                        if (ref) {
-                          await sg.raw('update-ref', '-d', ref);
-                        }
-                      }
-                    });
-                    log.info(
-                      { context: info.oldBranch },
-                      `[branch-switch] cleaned up detached context ${info.oldBranch}`,
-                    );
-                  }
-                } catch (e) {
-                  log.error({ err: e }, '[branch-switch] detached cleanup failed');
-                }
-              }
-
-              setBatchInProgress(false);
-              await persistence.flushDeferredStores('discard-stale');
-              deferredStoresFlushed = true;
-              cc1Broadcaster?.emitBranchSwitched(newBranch);
-            } finally {
-              derivedDocumentIndex.abortBranchSwitch(branchTransition);
-              if (!deferredStoresFlushed) {
-                setBatchInProgress(false);
-                await persistence.flushDeferredStores('discard-stale');
-              }
-            }
-          }
-
-          if (info.headMoved && info.newHead && shadowRef.current && bufferedCount > 0) {
-            const contentRootForShadow = contentRoot ?? '.';
-            try {
-              const sha = await commitUpstreamImport(
-                shadowRef.current,
-                contentRootForShadow,
-                info.oldHead,
-                info.newHead,
-                newBranch,
-              );
-              incrementUpstreamImport();
               log.info(
                 {
-                  oldHead: info.oldHead?.slice(0, 8) ?? 'null',
-                  newHead: info.newHead.slice(0, 8),
-                  sha: sha.slice(0, 8),
+                  kind: info.batchKind,
+                  headMoved: info.headMoved,
+                  docs: bufferedCount,
+                  timeout: !!info.timeout,
                 },
-                `[history] upstream-import from ${info.oldHead?.slice(0, 8) ?? 'null'}..${info.newHead.slice(0, 8)} → ${sha.slice(0, 8)}`,
+                `[batch] end kind=${info.batchKind} headMoved=${info.headMoved} docs=${bufferedCount}${info.timeout ? ' timeout' : ''}`,
               );
-            } catch (e) {
-              log.error({ err: e }, '[shadow] upstream-import failed');
-            }
-          }
+
+              if (info.batchKind === 'within-branch') {
+                try {
+                  try {
+                    await drainEventBuffer();
+                  } finally {
+                    disposeBufferedRemovalScopes();
+                  }
+
+                  if (info.headMoved && info.newHead) {
+                    const changes = resolveUpstreamChanges(
+                      projectDir,
+                      resolve(contentDir),
+                      info.oldHead,
+                      info.newHead,
+                    );
+                    if (changes.size > 0) {
+                      dropPendingDocs(changes.keys());
+                      for (const [docName, author] of changes) {
+                        recordContributor(
+                          docName,
+                          gitAuthorWriterId(author.email),
+                          author.name,
+                          author.email,
+                          formatReconcileSubject(docName),
+                        );
+                      }
+                      await persistence.flushContributors();
+                    }
+                  }
+                } finally {
+                  try {
+                    if (releaseBatchHold('head-watcher')) await finishBatch();
+                  } finally {
+                    releaseHeadBatchAdmission();
+                  }
+                }
+                try {
+                  await conflicts.pruneMergeNativeAgainstGit();
+                } catch (err) {
+                  log.warn({ err }, '[head-watcher] conflict prune against git failed');
+                }
+              } else {
+                incrementBranchSwitch();
+                supersedeBranchSwitchFollowUps();
+                let batchReleased = false;
+                let switchPassFellShort = false;
+                let branchTransition: DerivedDocumentIndexBranchTransition | undefined;
+                try {
+                  switchReconciledBaseScope(newBranch);
+                  conflicts.setBranch(newBranch);
+                  hydrateStaleExternalWrites();
+                  branchTransition = await derivedDocumentIndex.beginBranchSwitch(newBranch);
+
+                  contentFilter.rebuildDirCount();
+
+                  try {
+                    let reseedSkipCount = 0;
+                    basenameIndex.clear();
+                    await seedBasenameIndex({
+                      contentDir,
+                      contentFilter,
+                      basenameIndex,
+                      onSkip: (reason, code, path) => {
+                        reseedSkipCount++;
+                        log.warn(
+                          { reason, code, path, branch: newBranch },
+                          `[basename-index] skipped entry during branch-switch reseed (${reason}${code ? ` ${code}` : ''})`,
+                        );
+                      },
+                    });
+                    if (reseedSkipCount > 0) {
+                      log.warn(
+                        { count: reseedSkipCount, branch: newBranch },
+                        `[basename-index] branch-switch reseed completed with ${reseedSkipCount} skipped entries — embeds under inaccessible subtrees will not resolve on this branch`,
+                      );
+                      if (!degraded.includes('basename-index-partial')) {
+                        degraded.push('basename-index-partial');
+                      }
+                    }
+                  } catch (err) {
+                    log.error(
+                      { err, branch: newBranch },
+                      '[basename-index] branch-switch reseed failed',
+                    );
+                  }
+
+                  try {
+                    await derivedDocumentIndex.settleBranchFromDisk(branchTransition);
+                  } catch (err) {
+                    derivedDocumentIndex.abortBranchSwitch(branchTransition);
+                    log.error(
+                      { err, branch: newBranch },
+                      '[derived-index] branch-switch rebuild failed; relationship views may be stale',
+                    );
+                  }
+
+                  try {
+                    await drainEventBuffer();
+                    const switchPass = await watcher?.recheck('full');
+                    if (switchPass && (switchPass.status !== 'completed' || switchPass.partial)) {
+                      switchPassFellShort = true;
+                      incrementBranchSwitchRecheckShortfalls();
+                      log.warn(
+                        {
+                          branch: newBranch,
+                          status: switchPass.status,
+                          partial: switchPass.partial === true,
+                        },
+                        `[branch-switch] the re-check after switching to ${newBranch} did not observe the whole tree; another one runs once the switch ends`,
+                      );
+                    }
+                    await drainEventBuffer();
+                  } finally {
+                    disposeBufferedRemovalScopes();
+                  }
+                  tombstoneResidentsResolvingIntoPrivateState(newBranch);
+                  log.info(
+                    { branch: newBranch, docCount: hocuspocus.documents.size },
+                    `[branch-switch] loaded branch ${newBranch} (${hocuspocus.documents.size} docs)`,
+                  );
+
+                  if (info.oldBranch?.startsWith('detached-') && shadowRef.current) {
+                    try {
+                      const sg = shadowGit(shadowRef.current);
+                      const refs = (
+                        await sg.raw(
+                          'for-each-ref',
+                          `refs/wip/${info.oldBranch}/`,
+                          '--format=%(refname)',
+                        )
+                      ).trim();
+                      if (refs) {
+                        await shadowOpGateFor(shadowRef.current).withMutator(async () => {
+                          for (const ref of refs.split('\n')) {
+                            if (ref) {
+                              await sg.raw('update-ref', '-d', ref);
+                            }
+                          }
+                        });
+                        log.info(
+                          { context: info.oldBranch },
+                          `[branch-switch] cleaned up detached context ${info.oldBranch}`,
+                        );
+                      }
+                    } catch (e) {
+                      log.error({ err: e }, '[branch-switch] detached cleanup failed');
+                    }
+                  }
+
+                  batchReleased = true;
+                  if (releaseBatchHold('head-watcher')) await finishBatch();
+                  cc1Broadcaster?.emitBranchSwitched(newBranch);
+                  if (switchPassFellShort) followUpBranchSwitchRecheck(newBranch);
+                } finally {
+                  try {
+                    derivedDocumentIndex.abortBranchSwitch(branchTransition);
+                    if (!batchReleased && releaseBatchHold('head-watcher')) await finishBatch();
+                  } finally {
+                    releaseHeadBatchAdmission();
+                  }
+                }
+              }
+
+              if (info.headMoved && info.newHead && shadowRef.current && bufferedCount > 0) {
+                const contentRootForShadow = contentRoot ?? '.';
+                try {
+                  const sha = await commitUpstreamImport(
+                    shadowRef.current,
+                    contentRootForShadow,
+                    info.oldHead,
+                    info.newHead,
+                    newBranch,
+                  );
+                  incrementUpstreamImport();
+                  log.info(
+                    {
+                      oldHead: info.oldHead?.slice(0, 8) ?? 'null',
+                      newHead: info.newHead.slice(0, 8),
+                      sha: sha.slice(0, 8),
+                    },
+                    `[history] upstream-import from ${info.oldHead?.slice(0, 8) ?? 'null'}..${info.newHead.slice(0, 8)} → ${sha.slice(0, 8)}`,
+                  );
+                } catch (e) {
+                  log.error({ err: e }, '[shadow] upstream-import failed');
+                }
+              }
+            },
+            {
+              nativeBackend: options.watcherBackend,
+              clock: options.watcherClock,
+              onGaveUp: () => {
+                if (!degraded.includes('head-watcher')) degraded.push('head-watcher');
+              },
+              onBack: () => {
+                const at = degraded.indexOf('head-watcher');
+                if (at !== -1) degraded.splice(at, 1);
+              },
+            },
+          ),
+        (handle) => {
+          headWatcher = handle;
         },
+        'head',
       );
     } catch (err) {
       log.error({ err }, '[server] HEAD watcher failed to start');
@@ -4785,7 +6156,7 @@ export function createServer(options: ServerOptions): ServerInstance {
         detectGhAccounts: options.detectGhAccounts,
         tokenStore: options.tokenStore,
         checkPushPermissionFn: options.checkPushPermissionFn,
-        setBatchInProgress: setBatchInProgressAndDrain,
+        setBatchInProgress: batchFlagFor('sync-engine'),
         onStateChange: (state) => {
           log.info({ state }, `[sync] state → ${state}`);
         },
@@ -4848,6 +6219,11 @@ export function createServer(options: ServerOptions): ServerInstance {
     () => {
       indexRegenerationReady = true;
       resolveReady();
+      setImmediate(() => {
+        const pruned = diskReceipts.pruneGone(receiptFileIsGone);
+        if (pruned > 0)
+          log.info({ pruned }, `[disk-receipts] dropped ${pruned} receipt(s) whose file is gone`);
+      }).unref();
       deferBootIndexSweep();
       deferShadowHousekeeping();
     },
@@ -4888,5 +6264,13 @@ export function createServer(options: ServerOptions): ServerInstance {
     resolveTrackedFile,
     acpRegistry,
     acpPermissions,
+    recheckDisk: () => {
+      if (!watcher) {
+        return Promise.reject(
+          new Error('the file watcher is not running, so there is nothing to re-check'),
+        );
+      }
+      return watcher.recheck();
+    },
   };
 }

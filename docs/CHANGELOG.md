@@ -1,5 +1,134 @@
 # @inkeep/open-knowledge-docs
 
+## 0.0.272
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.18
+
+## 0.0.271
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.17
+
+## 0.0.270
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.16
+
+## 0.0.269
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.15
+
+## 0.0.268
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.14
+
+## 0.0.267
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.13
+
+## 0.0.266
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.12
+
+## 0.0.265
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.11
+
+## 0.0.264
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.10
+
+## 0.0.263
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.9
+
+## 0.0.262
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.8
+
+## 0.0.261
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.7
+
+## 0.0.260
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.6
+
+## 0.0.259
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.5
+
+## 0.0.258
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.4
+
+## 0.0.257
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.3
+
+## 0.0.256
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.2
+
+## 0.0.255
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.86.1
+
+## 0.0.254
+
+### Patch Changes
+
+- Updated dependencies [0e927e2]
+  - @inkeep/open-knowledge-core@0.86.0
+
+## 0.0.253
+
+### Patch Changes
+
+- @inkeep/open-knowledge-core@0.85.0
+
+## 0.0.252
+
+### Patch Changes
+
+- Updated dependencies [8d6ab19]
+- Updated dependencies [8d6ab19]
+  - @inkeep/open-knowledge-core@0.84.0
+
 ## 0.0.251
 
 ### Patch Changes

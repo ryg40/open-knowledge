@@ -69,6 +69,8 @@ describe('tripwire reset symlink-escape', () => {
     symlinkSync(secretPath, docPath);
 
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir,
       projectDir: contentDir,
       gitEnabled: false,
@@ -109,6 +111,8 @@ describe('tripwire reset symlink-escape', () => {
     symlinkSync('.ok/local/principal.json', join(contentDir, `${docName}.md`));
 
     const persistence = createPersistenceExtension({
+      mergeHistory: null,
+      ingestDiskAtStore: null,
       contentDir,
       projectDir: contentDir,
       gitEnabled: false,

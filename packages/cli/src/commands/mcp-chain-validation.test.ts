@@ -190,6 +190,7 @@ describe.each(CHANNELS)('%s chain POSIX shell grammar (cross-platform)', (channe
       const fakeNpx = join(bin, 'npx');
       writeFileSync(fakeNpx, '#!/bin/sh\nexit 0\n');
       chmodSync(fakeNpx, 0o755);
+      writeFileSync(join(tmpHome, '.profile'), `PATH="${bin}:$PATH"\nexport PATH\n`);
       const chain = instrumentChain(channel, {
         restrictGlobToHome: true,
         bundleOverride: join(tmpHome, 'no-such-bundle.sh'),

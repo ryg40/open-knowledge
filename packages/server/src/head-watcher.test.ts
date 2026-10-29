@@ -97,6 +97,12 @@ describe('watchedGitFile', () => {
     expect(watchedGitFile('/x/.git/index.lock')).toBe('index.lock');
   });
 
+  test('recognizes watched files in Windows paths, as the native backend reports them', () => {
+    expect(watchedGitFile('C:\\work\\project\\.git\\HEAD')).toBe('HEAD');
+    expect(watchedGitFile('C:\\work\\project\\.git\\index')).toBe('index');
+    expect(watchedGitFile('C:\\work\\project\\.git\\config')).toBeNull();
+  });
+
   test('returns null for paths outside the watched set', () => {
     expect(watchedGitFile('/x/.git/config')).toBeNull();
     expect(watchedGitFile('/x/.git/objects/ab/cdef')).toBeNull();
@@ -157,10 +163,7 @@ describe('startHeadWatcher batch serialization', () => {
     git('branch second');
 
     let dispatch!: (rawPath: string) => void;
-    let releaseFirst!: () => void;
-    const firstCanSettle = new Promise<void>((resolve) => {
-      releaseFirst = resolve;
-    });
+    const { promise: firstCanSettle, resolve: releaseFirst } = Promise.withResolvers<void>();
     const branches: Array<string | null> = [];
     let activeCallbacks = 0;
     let maxActiveCallbacks = 0;

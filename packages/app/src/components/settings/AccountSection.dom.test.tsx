@@ -269,10 +269,7 @@ describe('AccountSection', () => {
 
   test('double-clicking Disconnect spawns only one relay signout', async () => {
     let signoutCalls = 0;
-    let releaseSignout: (() => void) | undefined;
-    const signoutGate = new Promise<void>((resolve) => {
-      releaseSignout = resolve;
-    });
+    const { promise: signoutGate, resolve: releaseSignout } = Promise.withResolvers<void>();
     let signedOut = false;
     renderSection(
       makeQueryTransport({
@@ -294,7 +291,7 @@ describe('AccountSection', () => {
 
     expect(signoutCalls).toBe(1);
 
-    releaseSignout?.();
+    releaseSignout();
     expect(await screen.findByText('Not connected')).toBeDefined();
   });
 
@@ -513,10 +510,7 @@ describe('AccountSection host-token prefill', () => {
 
   test('never seeds over a host the user has already typed', async () => {
     const user = userEvent.setup();
-    let release: (() => void) | undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: gate, resolve: release } = Promise.withResolvers<void>();
     syncStatusCalls = 0;
     globalThis.fetch = (async (url: string) => {
       if (String(url).includes('/api/sync/status')) {
@@ -533,7 +527,7 @@ describe('AccountSection host-token prefill', () => {
     renderSection(makeQueryTransport({ status: async () => CONNECTED }));
     await user.type(await screen.findByLabelText('Host'), 'git.mine.test');
 
-    release?.();
+    release();
     await waitFor(() => expect(syncStatusCalls).toBeGreaterThan(0));
     await act(async () => {
       await Promise.resolve();
@@ -575,6 +569,26 @@ describe('AccountSection host-token form', () => {
 
     await user.type(screen.getByLabelText('Access token'), 'glpat_secret');
     expect((submit as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  test('the confirmation names ok-beta auth signout on Beta', async () => {
+    const user = userEvent.setup();
+    (window as unknown as { okDesktop?: unknown }).okDesktop = { cliCommandName: 'ok-beta' };
+    try {
+      renderSection(
+        makeQueryTransport({ status: async () => CONNECTED }),
+        makeAuthTransport(async () => ({ ok: true, login: 'oauth2' })),
+      );
+      await user.type(await screen.findByLabelText('Host'), 'gitea.internal');
+      await user.type(screen.getByLabelText('Username'), 'oauth2');
+      await user.type(screen.getByLabelText('Access token'), 'glpat_secret');
+      await user.click(screen.getByTestId('settings-account-host-token-submit'));
+      expect((await screen.findByTestId('settings-account-host-token-success')).textContent).toBe(
+        'Token stored for oauth2 on gitea.internal. To remove it, run ok-beta auth signout --host gitea.internal.',
+      );
+    } finally {
+      (window as unknown as { okDesktop?: unknown }).okDesktop = undefined;
+    }
   });
 
   test('a successful submit sends trimmed values, confirms, and clears only the token', async () => {

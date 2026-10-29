@@ -55,8 +55,13 @@ import {
 } from '../bridge/structural-freshness.ts';
 import type { LinkStyle } from '../extensions/link-fidelity.ts';
 import { isValidSourceLiteralRaw } from '../extensions/source-literal-mark.ts';
-import { createRegistry } from '../registry/index.ts';
-import type { PropDef } from '../registry/types.ts';
+import { componentPropsBudgetError, createRegistry, jsxAttributeValue } from '../registry/index.ts';
+import type { PropDef, SerializeContext } from '../registry/types.ts';
+import {
+  type AuthoredJsxSourceReader,
+  createAuthoredJsxSourceReader,
+  plainJsxFlowElement,
+} from './jsx-authored-body.ts';
 import type {
   CommentBlockMdast,
   CommentMdast,
@@ -73,7 +78,7 @@ import {
   parseMdToMdast,
   serializeMd,
 } from './pipeline.ts';
-import { normalizeDocRelativeAssetUrl } from './resolve-image-url.ts';
+import { authoredImageUrl, normalizeDocRelativeAssetUrl } from './resolve-image-url.ts';
 import { emitMdxJsxTextFromNode } from './serialize-helpers.ts';
 import { flattenCellBlocks } from './table-cell-flatten.ts';
 import { toMarkdownHandlers } from './to-markdown-handlers.ts';
@@ -119,6 +124,9 @@ export class MarkdownManager {
   private serializeProcessor: Processor;
   private parseCtx: ParseContextHolder = { current: {} };
   private freshnessHolder: FreshnessCheckerHolder = { checker: undefined };
+  private authoredJsxSource: AuthoredJsxSourceReader = createAuthoredJsxSourceReader((sourceRaw) =>
+    this.schema.nodeFromJSON(this.parseWithFallback(sourceRaw)),
+  );
 
   constructor(options: MarkdownManagerOptions) {
     this.schema = getSchema(options.extensions);
@@ -131,6 +139,7 @@ export class MarkdownManager {
     const { nodeHandlers, markHandlers } = buildPmToMdastHandlers(
       this.schema,
       this.freshnessHolder,
+      this.authoredJsxSource,
     );
     this.pmNodeHandlers = nodeHandlers;
     this.pmMarkHandlers = markHandlers;
@@ -218,34 +227,7 @@ function destructureAttrs(
 
   for (const attr of attributes) {
     if (attr.type === 'mdxJsxExpressionAttribute') continue;
-
-    const name = attr.name;
-    const propDef = propMap.get(name);
-
-    if (attr.value === null || attr.value === undefined) {
-      result[name] = true;
-      continue;
-    }
-
-    if (typeof attr.value === 'string') {
-      if (propDef?.type === 'number') {
-        const num = Number(attr.value);
-        result[name] = Number.isNaN(num) ? attr.value : num;
-      } else if (propDef?.type === 'boolean') {
-        result[name] = attr.value === 'true';
-      } else {
-        result[name] = attr.value;
-      }
-      continue;
-    }
-
-    const exprValue = attr.value.value;
-    try {
-      const parsed = JSON.parse(exprValue);
-      result[name] = parsed;
-    } catch {
-      result[name] = exprValue;
-    }
+    result[attr.name] = jsxAttributeValue(attr.value, propMap.get(attr.name));
   }
 
   return result;
@@ -769,6 +751,14 @@ function buildMdastToPmHandlers(
       const name = node.name ?? '';
       const descriptor = registry.getOrWildcard(name);
       const structuredAttrs = destructureAttrs(node.attributes, descriptor.props);
+      const propsError = componentPropsBudgetError(structuredAttrs);
+      if (propsError && n.rawMdxFallback) {
+        const raw = rawFromData(node.data) ?? '';
+        return n.rawMdxFallback.createAndFill(
+          { reason: propsError },
+          raw ? schema.text(raw) : null,
+        );
+      }
       if (name === 'CommonMarkImage' && typeof structuredAttrs.src === 'string') {
         const origUrl = structuredAttrs.src;
         const normalized = normalizeDocRelativeAssetUrl(origUrl, parseCtx.current.sourcePath);
@@ -820,6 +810,9 @@ function buildMdastToPmHandlers(
           .join('');
         if (bodyText) {
           structuredAttrs.children = bodyText;
+        }
+        if (componentPropsBudgetError(structuredAttrs)) {
+          return n.jsxInline.createAndFill({}, raw ? [schema.text(raw)] : null);
         }
         return n.jsxInline.createAndFill({
           componentName: inlineName,
@@ -1143,6 +1136,7 @@ function buildMdastToPmHandlers(
 function buildPmToMdastHandlers(
   schema: Schema,
   freshness: FreshnessCheckerHolder,
+  authoredJsxSource: AuthoredJsxSourceReader,
 ): {
   nodeHandlers: FromProseMirrorOptions<string, string>['nodeHandlers'];
   markHandlers: FromProseMirrorOptions<string, string>['markHandlers'];
@@ -1330,7 +1324,7 @@ function buildPmToMdastHandlers(
     nodeHandlers.image = (pmNode: PmNode) => {
       const result: Image = {
         type: 'image' as const,
-        url: (pmNode.attrs.sourceUrl as string | null) ?? pmNode.attrs.src,
+        url: authoredImageUrl(pmNode.attrs.src, pmNode.attrs.sourceUrl),
         alt: pmNode.attrs.alt,
         title: pmNode.attrs.title,
       };
@@ -1404,18 +1398,18 @@ function buildPmToMdastHandlers(
         ? (pmNode.attrs.attributes as Array<MdxJsxAttribute | MdxJsxExpressionAttribute>)
         : [];
 
-      if (!effectiveDirty(pmNode, freshness.checker) && pmNode.attrs.sourceRaw) {
-        return {
-          type: 'mdxJsxFlowElement' as const,
-          name: componentName,
-          attributes: preservedAttrs,
-          children: [],
-          data: { sourceRaw: String(pmNode.attrs.sourceRaw) },
-        } as MdxJsxFlowElement;
-      }
+      const verbatim = (): MdxJsxFlowElement => ({
+        type: 'mdxJsxFlowElement',
+        name: componentName,
+        attributes: preservedAttrs,
+        children: [],
+        data: { sourceRaw: String(pmNode.attrs.sourceRaw) },
+      });
+
+      if (!effectiveDirty(pmNode, freshness.checker) && pmNode.attrs.sourceRaw) return verbatim();
 
       const meta = registry.getOrWildcard(componentName ?? '*');
-      return meta.serialize(pmNode, {
+      const serializeContext: SerializeContext = {
         all: (node) => state.all(node) as MdastNodes[],
         registry,
         serializeChildren: () => {
@@ -1425,7 +1419,16 @@ function buildPmToMdastHandlers(
               'mdast node and let the to-markdown handler render the body via state.containerFlow.',
           );
         },
-      });
+      };
+      const emitted = meta.serialize(pmNode, serializeContext);
+      const element = plainJsxFlowElement(emitted, componentName);
+      if (!element || hasDirtyDescendant(pmNode)) return emitted;
+      const authored = authoredJsxSource.read(pmNode, element, (node) =>
+        meta.serialize(node, serializeContext),
+      );
+      if (!authored) return element;
+      if (authored.kind === 'verbatim') return verbatim();
+      return { ...element, data: { ...element.data, sourceBody: authored.body } };
     };
   }
 

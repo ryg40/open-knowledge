@@ -1,5 +1,5 @@
 import { resolve as resolvePath } from 'node:path';
-import { isDetectedSkillInProject } from '@inkeep/open-knowledge-core';
+import { currentCliCommandName, isDetectedSkillInProject } from '@inkeep/open-knowledge-core';
 import { resolveProjectIdentity } from '@inkeep/open-knowledge-core/shadow-repo-layout';
 import { enumerateInstalledSkills } from '@inkeep/open-knowledge-core/skills-catalog';
 import { findEnclosingProjectRoot, resolveLockDir } from '@inkeep/open-knowledge-server';
@@ -65,7 +65,7 @@ export function skillsCommand(): Command {
       const state = inspectLock(lockDir, 'server');
       if (state.status !== 'alive') {
         process.stderr.write(
-          `${errorColor('Error:')} no running Open Knowledge server for this project. Start it with ${accent('ok start')} and retry.\n`,
+          `${errorColor('Error:')} no running Open Knowledge server for this project. Start it with ${accent(`${currentCliCommandName()} start`)} and retry.\n`,
         );
         process.exitCode = 1;
         return;
@@ -89,8 +89,14 @@ export function skillsCommand(): Command {
       }
       const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       if (!res.ok) {
-        const detail = (body.detail as string) ?? (body.title as string) ?? `HTTP ${res.status}`;
-        process.stderr.write(`${errorColor('Import failed:')} ${detail}\n`);
+        const title = typeof body.title === 'string' ? body.title : undefined;
+        const detail = typeof body.detail === 'string' ? body.detail : undefined;
+        const message = title
+          ? detail
+            ? `${title} (${detail})`
+            : title
+          : (detail ?? `HTTP ${res.status}`);
+        process.stderr.write(`${errorColor('Import failed:')} ${message}\n`);
         process.exitCode = 1;
         return;
       }

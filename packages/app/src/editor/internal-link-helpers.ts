@@ -8,8 +8,9 @@ import {
   classifyMarkdownHref,
   type DocLinkTarget,
 } from '@inkeep/open-knowledge-core/utils/link-targets';
-import { hashFromAssetPath, hashFromDocName } from '../lib/doc-hash';
+import { hashFromAssetPath, hashFromDocName, isSameHash } from '../lib/doc-hash';
 import { openExternalUrl } from '../lib/external-link';
+import { requestRepeatAnchorNavigation } from './anchor-navigation-event';
 import { dispatchAssetClick } from './asset-dispatch';
 import { isSafeNavigationUrl } from './safe-navigation-url';
 
@@ -36,13 +37,17 @@ export function openHashHrefInNewTab(href: string): void {
   if (href.startsWith('#') || isSafeNavigationUrl(href)) {
     window.open(href, '_blank', 'noopener,noreferrer');
   } else {
-    // eslint-disable-next-line no-console
     console.warn('[safe-nav] blocked non-safe scheme:', href);
   }
 }
 
 function navigateToInternalHashHref(resolved: Pick<DocLinkTarget, 'docName' | 'anchor'>): void {
-  window.location.assign(toInternalHashHref(resolved));
+  const href = toInternalHashHref(resolved);
+  if (resolved.anchor && isSameHash(window.location.hash, href)) {
+    requestRepeatAnchorNavigation();
+    return;
+  }
+  window.location.assign(href);
 }
 
 export function openInternalHashHrefInNewTab(
@@ -109,13 +114,7 @@ export function handleChipLinkClick(
 function navigateToAnchorHref(anchor: string, locationHash = window.location.hash): void {
   const currentDocName = getCurrentDocNameFromHash(locationHash);
   if (!currentDocName) return;
-
-  const element = document.getElementById(anchor);
-  if (element) {
-    element.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }
-
-  window.location.assign(hashFromDocName(currentDocName, anchor));
+  navigateToInternalHashHref({ docName: currentDocName, anchor });
 }
 
 export function navigateToMarkdownTarget(

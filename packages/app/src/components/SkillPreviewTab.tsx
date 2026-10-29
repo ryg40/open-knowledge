@@ -42,7 +42,6 @@ interface Props {
   name: string;
   subtitle: string;
   level?: SkillScope;
-  reserveRightGutter?: boolean;
   path?: string;
 }
 
@@ -75,15 +74,7 @@ export function BuiltinHeaderActions({ scope, name }: { scope: SkillScope; name:
   );
 }
 
-export function SkillPreviewTab({
-  flavor,
-  source,
-  name,
-  subtitle,
-  level,
-  reserveRightGutter,
-  path,
-}: Props) {
+export function SkillPreviewTab({ flavor, source, name, subtitle, level, path }: Props) {
   const selectedPath = path ?? SKILL_MD;
   const scopeLabels = useSkillScopeLabels();
   const openSkill = useOpenSkill();
@@ -264,7 +255,6 @@ export function SkillPreviewTab({
           <Trans>Open file</Trans>
         </Button>
       ) : null}
-      {}
       <SkillEditorActions scope={targetScope} name={name} showNewFile={false} />
     </div>
   ) : builtin ? (
@@ -330,7 +320,6 @@ export function SkillPreviewTab({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className={SKILL_INSTALL_MENU_WIDTH}>
-            {}
             {pluginInfo || foreign ? (
               <>
                 <DropdownMenuLabel className="font-normal text-muted-foreground text-xs leading-snug whitespace-normal">
@@ -384,7 +373,6 @@ export function SkillPreviewTab({
       onBundlePathClick={onBundlePathClick}
       headerActions={headerActions}
       headerLine={headerLine}
-      reserveRightGutter={reserveRightGutter}
       selectedPath={selectedPath}
       onPreviewMeta={(preview) => {
         const next = detected ? (preview.plugin ?? null) : null;

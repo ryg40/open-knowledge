@@ -21,6 +21,7 @@ let home: string;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'ok-validate-host-home-'));
+  vi.stubEnv('OK_CHANNEL', 'stable');
   vi.stubEnv('HOME', home);
   vi.stubEnv('USERPROFILE', home);
 });
@@ -86,6 +87,9 @@ describe('gitHubHostRejection', () => {
     const rejection = gitHubHostRejection('git.example.internal');
     expect(rejection).toContain('declare it in ~/.ok-beta/global.yml:\n');
     expect(rejection).not.toContain('~/.ok/');
+    expect(rejection).toContain(
+      '  ok-beta auth token --host git.example.internal --username <username>\n',
+    );
   });
 
   test('suggests a port-free hostname as the config key', () => {

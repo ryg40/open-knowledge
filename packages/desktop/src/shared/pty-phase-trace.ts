@@ -1,9 +1,13 @@
 type PtyPhase =
+  | 'utility-entry'
   | 'module-entry'
   | 'logger-import'
   | 'native-import'
   | 'listener-ready'
   | 'message-received'
+  | 'utility-data-received'
+  | 'main-data-relay'
+  | 'main-data-relay-skipped'
   | 'shell-resolution'
   | 'paths'
   | 'ipc-create'
@@ -35,6 +39,8 @@ interface PtyPhaseContext {
   backend?: 'bundled' | 'inbox' | 'posix';
   attempt?: number;
   currentSession?: boolean;
+  processUptimeMs?: number;
+  nodeStartMs?: number;
 }
 
 export interface PtyPhaseRecord extends PtyPhaseContext {
@@ -53,6 +59,18 @@ export interface PtyPhaseRecord extends PtyPhaseContext {
 
 export interface PtyPhaseTrace {
   mark(phase: PtyPhase, edge: PtyPhaseRecord['edge'], context?: PtyPhaseContext): void;
+}
+
+let utilityPtyPhaseTrace: PtyPhaseTrace | undefined;
+
+export function installUtilityPtyPhaseTrace(trace: PtyPhaseTrace | undefined): void {
+  utilityPtyPhaseTrace = trace;
+}
+
+export function takeUtilityPtyPhaseTrace(): PtyPhaseTrace | undefined {
+  const trace = utilityPtyPhaseTrace;
+  utilityPtyPhaseTrace = undefined;
+  return trace;
 }
 
 export function createPtyPhaseTrace(

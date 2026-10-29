@@ -7,20 +7,22 @@ import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { z } from 'zod';
 import { SUPPORTED_DOC_EXTENSIONS } from '../../constants/doc-extensions.ts';
 
-import { FRONTMATTER_TYPES, FrontmatterValueSchema } from '../../frontmatter/schema.ts';
+import { FRONTMATTER_TYPES, FrontmatterPatchSchema } from '../../frontmatter/schema.ts';
 import { ProblemTypeSchema } from './_envelope.ts';
 import {
+  agentContentField,
   agentIdentityFields,
   requiredSafeDocNameField,
   safeDocNameField,
   summaryField,
 } from './_shared.ts';
+import { agentWriteOutcomeWireFields } from './agent-write-outcome.ts';
 
 export const AgentWriteRequestSchema = z
   .object({
     docName: safeDocNameField,
     summary: summaryField,
-    content: z.string().optional(),
+    content: agentContentField.optional(),
     ...agentIdentityFields,
   })
   .loose() satisfies StandardSchemaV1;
@@ -30,7 +32,7 @@ export const AgentWriteMdRequestSchema = z
   .object({
     docName: safeDocNameField,
     summary: summaryField,
-    markdown: z.string(),
+    markdown: agentContentField,
     position: z.enum(['append', 'prepend', 'replace']).optional(),
     extension: z.enum(SUPPORTED_DOC_EXTENSIONS).optional(),
     ...agentIdentityFields,
@@ -43,7 +45,7 @@ export const AgentPatchRequestSchema = z
     docName: safeDocNameField,
     summary: summaryField,
     find: z.string().min(1),
-    replace: z.string(),
+    replace: agentContentField,
     offset: z.number().int().nonnegative().optional(),
     ...agentIdentityFields,
   })
@@ -106,6 +108,13 @@ export const OrphanHintSchema = z
   .loose() satisfies StandardSchemaV1;
 export type OrphanHint = z.infer<typeof OrphanHintSchema>;
 
+export const RECONCILE_MERGE_OUTCOMES = ['clean', 'merged', 'both-kept', 'kept-live'] as const;
+export type ReconcileMergeOutcome = (typeof RECONCILE_MERGE_OUTCOMES)[number];
+
+export function isReconcileMergeOutcome(value: unknown): value is ReconcileMergeOutcome {
+  return (RECONCILE_MERGE_OUTCOMES as readonly unknown[]).includes(value);
+}
+
 export const DiskEditReconciledWarningSchema = z
   .object({
     kind: z.literal('disk-edit-reconciled'),
@@ -113,6 +122,10 @@ export const DiskEditReconciledWarningSchema = z
     actualBytes: z.number().int().nonnegative(),
     byteDelta: z.number().int(),
     mergeOutcome: z.string().optional(),
+    duplicatedBlocks: z.number().int().nonnegative().optional(),
+    restoredDeletedHere: z.number().int().nonnegative().optional(),
+    restoredDeletedOutside: z.number().int().nonnegative().optional(),
+    nextStep: z.string().optional().meta({ deprecated: true }),
     hint: z.string().optional(),
   })
   .loose() satisfies StandardSchemaV1;
@@ -238,6 +251,7 @@ export type BrokenLinkSuppression = z.infer<typeof BrokenLinkSuppressionSchema>;
 
 export const AgentWriteSuccessSchema = z
   .object({
+    ...agentWriteOutcomeWireFields,
     timestamp: z.string().min(1),
     summary: SummaryResponseFieldSchema.optional(),
     warnings: AdvisoryWarningsSchema.optional(),
@@ -247,6 +261,7 @@ export type AgentWriteSuccess = z.infer<typeof AgentWriteSuccessSchema>;
 
 export const AgentWriteMdSuccessSchema = z
   .object({
+    ...agentWriteOutcomeWireFields,
     timestamp: z.string().min(1),
     subscriberCount: z.number().int().nonnegative(),
     systemSubscriberCount: z.number().int().nonnegative(),
@@ -261,6 +276,7 @@ export type AgentWriteMdSuccess = z.infer<typeof AgentWriteMdSuccessSchema>;
 
 export const AgentPatchSuccessSchema = z
   .object({
+    ...agentWriteOutcomeWireFields,
     timestamp: z.string().min(1),
     subscriberCount: z.number().int().nonnegative(),
     systemSubscriberCount: z.number().int().nonnegative(),
@@ -274,6 +290,7 @@ export type AgentPatchSuccess = z.infer<typeof AgentPatchSuccessSchema>;
 
 export const AgentUndoSuccessSchema = z
   .object({
+    ...agentWriteOutcomeWireFields,
     docName: z.string().min(1),
     scope: z.enum(['last', 'session', 'count']),
     undone: z.boolean(),
@@ -286,7 +303,7 @@ export const AGENT_WRITE_BATCH_MAX_DOCS = 100;
 export const AgentWriteBatchEntrySchema = z
   .object({
     docName: requiredSafeDocNameField,
-    markdown: z.string(),
+    markdown: agentContentField,
     position: z.enum(['append', 'prepend', 'replace']).optional(),
     extension: z.enum(SUPPORTED_DOC_EXTENSIONS).optional(),
     summary: summaryField,
@@ -316,6 +333,7 @@ export const AgentWriteBatchResultSchema = z.discriminatedUnion('status', [
     .object({
       status: z.literal('written'),
       docName: z.string().min(1),
+      ...agentWriteOutcomeWireFields,
       summary: SummaryResponseFieldSchema.optional(),
       warnings: AdvisoryWarningsSchema.optional(),
       brokenLinks: BrokenLinksSchema,
@@ -326,6 +344,7 @@ export const AgentWriteBatchResultSchema = z.discriminatedUnion('status', [
     .object({
       status: z.literal('error'),
       docName: z.string().min(1),
+      ...agentWriteOutcomeWireFields,
       error: BatchEntryErrorSchema,
     })
     .loose(),
@@ -345,7 +364,7 @@ export type AgentWriteBatchSuccess = z.infer<typeof AgentWriteBatchSuccessSchema
 export const FrontmatterPatchRequestSchema = z
   .object({
     docName: safeDocNameField,
-    patch: z.record(z.string(), z.union([FrontmatterValueSchema, z.null()])),
+    patch: FrontmatterPatchSchema,
     types: z.record(z.string(), z.enum(FRONTMATTER_TYPES)).optional(),
     summary: summaryField,
     ...agentIdentityFields,
@@ -355,6 +374,7 @@ export type FrontmatterPatchRequest = z.infer<typeof FrontmatterPatchRequestSche
 
 export const FrontmatterPatchSuccessSchema = z
   .object({
+    ...agentWriteOutcomeWireFields,
     timestamp: z.string().min(1),
     subscriberCount: z.number().int().nonnegative(),
     systemSubscriberCount: z.number().int().nonnegative(),

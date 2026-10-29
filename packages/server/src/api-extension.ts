@@ -1,3 +1,4 @@
+import { filesystemIdentity, statMtimeMs } from '@inkeep/open-knowledge-core/server';
 import { createAgentIntegrationsRoutes } from './http/agent-integrations-routes.ts';
 import { createAgentWriteRoutes } from './http/agent-write-routes.ts';
 import { createTestRoutes } from './http/test-routes.ts';
@@ -25,6 +26,7 @@ import {
   AGENTS_SKILLS_ROOT,
   AgentWriteBatchRequestSchema,
   AgentWriteBatchSuccessSchema,
+  type AgentWriteOutcomeFields,
   AgentWriteRequestSchema,
   AgentWriteSuccessSchema,
   asTargetNamespace,
@@ -35,7 +37,6 @@ import {
   createCodeFenceTracker,
   createWikiAssetResolver,
   DEFAULT_LINTER_CONFIG,
-  type DiskEditReconciledWarning,
   type DocumentListEntry,
   estimateSkillCost,
   type HeadingEntry,
@@ -64,12 +65,12 @@ import {
   stripFrontmatter,
   type ValidationDiagnostic,
 } from '@inkeep/open-knowledge-core';
-import { formatRenameSubject } from '@inkeep/open-knowledge-core/shadow-repo-layout';
 import {
   parseSkillDir,
   pluginRepositoryUrl,
   type SkillsLock,
 } from '@inkeep/open-knowledge-core/skills-catalog';
+import { ACP_DOCUMENT_WRITE_PATH } from './acp/document-write.ts';
 import {
   type AcpHarnessAvailability,
   createAcpHarnessAvailabilityProbe,
@@ -142,7 +143,7 @@ import { createSkillsInstallRoutes } from './http/skills-install-routes.ts';
 import { createSkillsListRoutes } from './http/skills-list-routes.ts';
 import { createSkillsRecoveryRoutes } from './http/skills-recovery-routes.ts';
 import { createSkillsTrackingRoutes } from './http/skills-tracking-routes.ts';
-import { findHubCandidates } from './hub-candidates.ts';
+import { findHubCandidates, findMissingDocCandidates } from './hub-candidates.ts';
 import { recordSkillInstall, removeSkillInstall } from './installed-skills-marker.ts';
 import { collectDocFiles } from './lint/audit.ts';
 import { composeAuditGeneration } from './lint/audit-generation.ts';
@@ -182,6 +183,13 @@ import {
   UNIDENTIFIED_WRITER_ID,
 } from './agent-id.ts';
 import {
+  type AgentWriteFlushOutcome,
+  heldSaveEndsOnlyByAPerson,
+  outcomeOfSavedWrite,
+  outcomeOfStoreFailure,
+  REFUSAL_OUTCOMES,
+} from './agent-write-outcome.ts';
+import {
   applyRenameMap,
   BacklinkIndexRequiredError,
   buildRenameMap,
@@ -201,6 +209,7 @@ import {
   isPersistenceExcludedDoc,
   isSystemDoc,
 } from './cc1-broadcast.ts';
+import type { RemovalLifecycleStatus } from './conflict-kinds.ts';
 import {
   isReservedProjectStatePath,
   listManagedDocNamesUnderFolder,
@@ -222,16 +231,33 @@ import {
   SUPPORTED_DOC_EXTENSIONS,
   stripDocExtension,
 } from './doc-extensions.ts';
+import type { DocNoticeLedger } from './doc-notices.ts';
 import {
+  assertNeverDeferredStoreWait,
+  type DeferredStoreDiscardCause,
   type DocumentDurabilityState,
+  editWasCarried,
+  type HeldSaveReason,
+  OK_DOC_MOVED,
   OK_DOC_REMOVED,
   OK_PATH_UNRESOLVABLE,
+  OK_SERVER_STOPPED,
+  OK_STORE_DISCARDED,
+  OK_STORE_HELD,
   OK_STORE_REFUSED,
+  OK_WRITE_DROPPED,
+  OK_WRITE_REPLACED,
   type StoreFailure,
+  type WriteDropCause,
+  type WrittenThrough,
+  writtenThroughOf,
 } from './document-durability-state.ts';
+import type { RefreshDocumentsFromDisk } from './document-refresh.ts';
 import {
+  buildReconcileWarning,
   type ReconcileBeforeWriteResult,
   reconcileDiskBeforeAgentWrite,
+  reviveFrozenResidentDoc,
 } from './external-change.ts';
 import { extractActorIdentity } from './extract-actor-identity.ts';
 import {
@@ -261,10 +287,13 @@ import {
   AGENT_SESSION_CAPACITY_TYPE,
   respondAgentSessionCapacity,
 } from './http/agent-session-capacity.ts';
+import { respondBothKept } from './http/agent-write-response.ts';
 import { type ApiRouteTable, createApiRequestPipeline } from './http/api-pipeline.ts';
 import { createAssetRoutes } from './http/asset-routes.ts';
 import { createCommentRoutes } from './http/comment-routes.ts';
 import { createConfigSystemRoutes } from './http/config-system-routes.ts';
+import { createDocNoticeRoutes } from './http/doc-notice-routes.ts';
+import { createDocumentRefreshRoutes } from './http/document-refresh-routes.ts';
 import { createDocumentRoutes } from './http/document-routes.ts';
 import {
   type ErrorExtensions,
@@ -349,6 +378,7 @@ import {
   type WikiRenameContext,
   wikiLinkRenameDestination,
 } from './managed-rename-rewrite.ts';
+import { createMergeHistoryRecorder, type MergeHistoryWriter } from './merge-history.ts';
 import {
   incrementAgentWriteCalls,
   incrementSummariesProvided,
@@ -357,11 +387,7 @@ import {
 import { isWithinDir, toPosix } from './path-utils.ts';
 import { assertProjectContentSubtree } from './project-content-scope.ts';
 import { isValidRelativeContentPath } from './relative-content-path.ts';
-import {
-  appendRenameLogEntry,
-  getOrLoadRenameLogIndex,
-  type RenameLogEntry,
-} from './rename-log.ts';
+import { followRenameRecords } from './rename-records.ts';
 import { ServerMutationShuttingDownError } from './server-content-policy.ts';
 import type { PairedWriteOrigin } from './server-observers.ts';
 import { createAssetService } from './services/assets.ts';
@@ -399,7 +425,7 @@ let _agentWriteGateFiredCounter: ReturnType<ReturnType<typeof getMeter>['createC
 function agentWriteGateFiredCounter(): ReturnType<ReturnType<typeof getMeter>['createCounter']> {
   _agentWriteGateFiredCounter ||= getMeter().createCounter('ok.agent_write.gate_fired_total', {
     description:
-      'Count of agent writes that ran the Site A content-divergence gate (denominator for the divergence rate). Bounded label: handler ∈ {agent-write-md, agent-write-batch, agent-patch, rollback}.',
+      'Count of agent writes that ran the Site A content-divergence gate (denominator for the divergence rate). Bounded label: handler ∈ {agent-write-md, acp-document-write, agent-write-batch, agent-patch, rollback}.',
   });
   return _agentWriteGateFiredCounter;
 }
@@ -414,13 +440,18 @@ function agentWriteContentDivergenceCounter(): ReturnType<
     'ok.agent_write.content_divergence_total',
     {
       description:
-        'Count of agent writes whose converged Y.Text diverged from the composed intent (numerator for the divergence rate). Bounded labels: handler ∈ {agent-write-md, agent-write-batch, agent-patch, rollback}, divergence_type.',
+        'Count of agent writes whose converged Y.Text diverged from the composed intent (numerator for the divergence rate). Bounded labels: handler ∈ {agent-write-md, acp-document-write, agent-write-batch, agent-patch, rollback}, divergence_type.',
     },
   );
   return _agentWriteContentDivergenceCounter;
 }
 
-type DivergenceHandler = 'agent-write-md' | 'agent-write-batch' | 'agent-patch' | 'rollback';
+type DivergenceHandler =
+  | 'agent-write-md'
+  | 'acp-document-write'
+  | 'agent-write-batch'
+  | 'agent-patch'
+  | 'rollback';
 
 function recordContentDivergenceGate(
   handler: DivergenceHandler,
@@ -1169,9 +1200,9 @@ function isCaseOnlySelfCollision(sourcePath: string, destinationPath: string): b
   if (!existsSync(sourcePath) || !existsSync(destinationPath)) return false;
 
   try {
-    const sourceStat = statSync(sourcePath);
-    const destinationStat = statSync(destinationPath);
-    return sourceStat.dev === destinationStat.dev && sourceStat.ino === destinationStat.ino;
+    const sourceStat = statSync(sourcePath, { bigint: true });
+    const destinationStat = statSync(destinationPath, { bigint: true });
+    return filesystemIdentity(sourceStat) === filesystemIdentity(destinationStat);
   } catch {
     return false;
   }
@@ -1186,10 +1217,11 @@ function createCaseOnlyRenameTempPath(sourcePath: string): string {
   throw new Error('Unable to allocate temporary path for case-only rename');
 }
 
-function writeFileIfContentDiffers(filePath: string, content: string): void {
+function writeFileIfContentDiffers(filePath: string, content: string): boolean {
   const current = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : null;
-  if (current === content) return;
+  if (current === content) return false;
   tracedWriteFileSync(filePath, content, 'utf-8');
+  return true;
 }
 
 function renamePathOnDisk(sourcePath: string, destinationPath: string): void {
@@ -1324,6 +1356,7 @@ interface ApiExtensionBaseOptions {
   resolveSyncCredentialConfig?: () => Promise<string[]>;
   conflicts: ConflictAuthority;
   setBatchInProgress?: (value: boolean) => void;
+  refreshDocumentsFromDisk: RefreshDocumentsFromDisk;
   localOpCliArgs?: string[];
   authStreamHeartbeatMs?: number;
   projectDir?: string;
@@ -1334,8 +1367,12 @@ interface ApiExtensionBaseOptions {
   getConfigDiagnostics?: () => ConfigDiagnosticsReport;
   resolveEmbed?: (basename: string, sourcePath: string) => string | null;
   getBridgeLossReporter?: () => BridgeDeriveLossReporter | undefined;
+  mergeHistoryWriter?: MergeHistoryWriter;
+  docNotices?: DocNoticeLedger;
   getPrincipal?: () => Principal | null;
   homeDirOverride?: string;
+  resetSettingsForTest?: () => void;
+  settleDiskEventsForTest?: () => Promise<void>;
   agentIntegrations?: AgentRegistryHostSeam;
   savedThemeLockTimeoutMs?: number;
   acpRegistry?: AcpRegistry;
@@ -1344,6 +1381,10 @@ interface ApiExtensionBaseOptions {
   contentFilter?: ContentFilter;
   installedAgentsProbe?: (scheme: InstalledAgentScheme) => Promise<boolean>;
   forceUnloadDocument?: (document: Document) => Promise<void>;
+  onNamespaceCreateAccepted?: (docName: string) => void;
+  captureNamespaceMove?: (docName: string) => () => void;
+  capturePublicationReceipt?: (document: Document, docName: string) => (() => void) | undefined;
+  onResidentAdopted?: (document: Document, docName: string) => void;
   ready?: Promise<void>;
   recentlyRemovedDocs?: RecentlyRemovedDocs;
   serializeDoc?: (docName: string) => string | null;
@@ -1406,10 +1447,55 @@ export interface CommentDocHooks {
 }
 
 function removedDocProblem(failure: StoreFailure) {
+  switch (failure.removal?.kind) {
+    case 'path-occupied':
+      return {
+        type: 'urn:ok:error:doc-removed' as const,
+        title:
+          'Edit applied in memory; disk write refused because the file now at this path is not loaded into the document.',
+        detail: `${failure.message}. Retrying will not help until the server reloads this document from disk, for example after Open Knowledge restarts; tell the user instead of retrying.`,
+      } satisfies BatchEntryError;
+    case 'renamed':
+      return {
+        type: 'urn:ok:error:doc-removed' as const,
+        title: 'Edit applied in memory; disk write refused because the document was renamed.',
+        detail: `${failure.message}. Retrying will not help: re-read the document at ${failure.removal.renamedTo} and re-apply your change there.`,
+      } satisfies BatchEntryError;
+    case 'deleted-outside':
+      return {
+        type: 'urn:ok:error:doc-removed' as const,
+        title:
+          'Edit not saved to disk: the document was deleted outside the app, and the edit went to its history.',
+        detail: `${failure.message}. Retrying will not help: the document is closed. Its history (the timeline) has the edit; tell the user the file was deleted, and do not re-create the document on your own.`,
+      } satisfies BatchEntryError;
+    case undefined:
+      return {
+        type: 'urn:ok:error:doc-removed' as const,
+        title:
+          'Edit applied in memory; disk write refused because the document is no longer on disk.',
+        detail: `${failure.message}. Retrying will not help: tell the user the file is no longer on disk.`,
+      } satisfies BatchEntryError;
+  }
+}
+
+function movedDocProblem(failure: StoreFailure) {
+  const movedTo = failure.removal?.kind === 'renamed' ? failure.removal.renamedTo : 'its new name';
   return {
-    type: 'urn:ok:error:doc-removed' as const,
-    title: 'Edit applied in memory; disk write refused because the document is no longer on disk.',
-    detail: `${failure.message}. Retrying will not help: re-create the document before writing this content again.`,
+    type: 'urn:ok:error:doc-moved' as const,
+    title: 'Edit kept: the document was moved outside the app, and the edit moved with it.',
+    detail: `${failure.message}. Do not repeat the edit: it is in ${movedTo}, which saves it under that name. Re-read ${movedTo} to confirm.`,
+  } satisfies BatchEntryError;
+}
+
+function stoppedServerProblem(failure: StoreFailure) {
+  const renamedTo = failure.removal?.kind === 'renamed' ? failure.removal.renamedTo : undefined;
+  return {
+    type: 'urn:ok:error:server-stopped' as const,
+    title: 'Edit not saved to disk: the server stopped before the edit reached disk.',
+    detail:
+      renamedTo === undefined
+        ? `${failure.message}. After OpenKnowledge restarts, the edit is in the document's history (the timeline); tell the user.`
+        : `${failure.message}. After OpenKnowledge restarts, re-read the document at ${renamedTo} to see whether it holds the edit, and re-apply the edit there if it is missing. Do not re-create the document under its old name.`,
   } satisfies BatchEntryError;
 }
 
@@ -1418,7 +1504,173 @@ function pathFaultProblem(failure: StoreFailure) {
     type: 'urn:ok:error:path-escape' as const,
     title:
       'Edit applied in memory; disk write refused because the document path could not be resolved.',
-    detail: `${failure.message}. Retrying will not help: the path has to be repaired on disk before this content can be written.`,
+    detail: `${failure.message}. Retrying will not help: tell the user the path has to be repaired on disk before this content can be written.`,
+  } satisfies BatchEntryError;
+}
+
+const DROPPED_WRITE_ADVICE: Readonly<Record<WriteDropCause, string>> = {
+  'legacy-name':
+    'Write the skill or template by its file path instead; that write is saved to the file.',
+  unresolvable:
+    'Retrying will not help until the path resolves again. Tell the user which document it is.',
+  'container-gone':
+    'OpenKnowledge does not re-create a skill folder that was deleted or moved. Tell the user which skill it is.',
+  'intake-landed':
+    'Re-read the document, which now holds the outside change, and re-apply the edit if it is still missing.',
+};
+
+function droppedWriteProblem(failure: StoreFailure) {
+  const advice =
+    failure.dropped === undefined
+      ? DROPPED_WRITE_ADVICE.unresolvable
+      : DROPPED_WRITE_ADVICE[failure.dropped];
+  return {
+    type: 'urn:ok:error:write-dropped' as const,
+    title: "Edit not saved: OpenKnowledge did not write this document's file.",
+    detail: `${failure.message}. The edit is only in the open document. ${advice}`,
+  } satisfies BatchEntryError;
+}
+
+function replacedWriteProblem(failure: StoreFailure) {
+  return {
+    type: 'urn:ok:error:write-replaced' as const,
+    title:
+      'Edit not saved: the file on disk replaced the document, and the edit went to its history.',
+    detail: `${failure.message}. OpenKnowledge had no agreed version of the file to merge the edit with, so it took the file in as it is and saved the document as it was, this edit included, to the document's history (the timeline). Re-read the document, and re-apply the edit if it is still needed.`,
+  } satisfies BatchEntryError;
+}
+
+function discardedStoreFailure(docName: string, cause: DeferredStoreDiscardCause): StoreFailure {
+  switch (cause.kind) {
+    case 'branch-switch':
+      return {
+        code: OK_STORE_DISCARDED,
+        message: `A Git branch switch discarded the pending save of ${docName}`,
+      };
+    case 'renamed-outside':
+      return {
+        code: OK_DOC_REMOVED,
+        message: `${docName} was moved outside the app to ${cause.to}, and its open document followed`,
+        removal: {
+          kind: 'renamed',
+          renamedTo: cause.to,
+          ...(cause.carry ? { carry: cause.carry } : {}),
+        },
+      };
+    case 'deleted-outside':
+      return {
+        code: OK_DOC_REMOVED,
+        message: `${docName} was deleted outside the app before the edit reached disk`,
+        removal: { kind: 'deleted-outside' },
+      };
+    case 'shutdown':
+      return {
+        code: OK_SERVER_STOPPED,
+        message: `The server stopped while the file of ${docName} was missing`,
+      };
+    default: {
+      const unhandled: never = cause;
+      throw new Error(`unhandled discard cause: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+function discardedStoreProblem(failure: StoreFailure) {
+  return {
+    type: 'urn:ok:error:branch-switched' as const,
+    title: 'Edit kept in the open document: the Git branch changed before it reached disk.',
+    detail: `${failure.message}. The edit stays in the open document, merged with the checked-out branch's version of the file, and is saved with the document's next save; do not repeat the edit. Re-read the document to confirm it.`,
+  } satisfies BatchEntryError;
+}
+
+type HeldSaveRetry = 'next-save' | 'next-edit' | 'conflict-resolved' | 'replaced-on-next-edit';
+
+const HELD_SAVE_RULES: Readonly<
+  Record<
+    HeldSaveReason,
+    { readonly retryWhen: HeldSaveRetry | undefined; readonly sentence: string }
+  >
+> = {
+  'pending-unreadable': {
+    retryWhen: 'next-save',
+    sentence:
+      'A later save writes it once the file can be read again: the next edit to this document, or the idle save within a few minutes.',
+  },
+  'pending-exhausted': {
+    retryWhen: 'next-save',
+    sentence:
+      'A later save writes it once the file stops changing: the next edit to this document, or the idle save within a few minutes.',
+  },
+  'pending-base-moved': {
+    retryWhen: 'next-save',
+    sentence:
+      'A later save writes it once the outside changes have been taken in: the next edit to this document, or the idle save within a few minutes.',
+  },
+  'pending-intake-failed': {
+    retryWhen: 'next-save',
+    sentence:
+      'A later save merges the outside change and writes it: the next edit to this document, or the idle save within a few minutes.',
+  },
+  'pending-intake-failed-no-base': {
+    retryWhen: 'next-save',
+    sentence:
+      'A later save merges the outside change and writes it: the next edit to this document, or the idle save within a few minutes.',
+  },
+  'pending-no-intake': {
+    retryWhen: 'next-edit',
+    sentence: 'The next edit to this document tries the save again.',
+  },
+  'pending-conflict': {
+    retryWhen: 'conflict-resolved',
+    sentence:
+      'It is saved once the user has dealt with the file in the OpenKnowledge app; tell the user which file it is.',
+  },
+  'pending-no-history-or-backup': {
+    retryWhen: 'next-save',
+    sentence:
+      'The file is not written over until its outside version is saved to the document history or the backup folder; a later save tries again: the next edit to this document, or the idle save within a few minutes.',
+  },
+  'pending-not-utf8': {
+    retryWhen: undefined,
+    sentence:
+      'OpenKnowledge does not write over it, and no save runs until someone saves the file as text again. Tell the user which file it is.',
+  },
+  'pending-unsettled': {
+    retryWhen: 'next-save',
+    sentence:
+      'The save was still running when the write stopped waiting for it, and it finishes on its own.',
+  },
+  'pending-rename': {
+    retryWhen: 'next-save',
+    sentence:
+      'The edit goes with the document to its new name, or to its history if the move cannot carry it. Do not repeat this write, and do not re-create the document under its old name: re-read it at its new name.',
+  },
+};
+
+const NO_BASE_HOLD_SENTENCE =
+  'This edit is in the document but is not saved to the file, and no save runs on its own: OpenKnowledge has no agreed version of the file to merge it with. Any further write to this document, yours included, replaces the document with the file on disk and moves this edit, that write and any typing since to the document history (timeline). Do not write to this document again; tell the user that its file changed outside OpenKnowledge.';
+
+function heldSaveDetail(failure: StoreFailure, reason: HeldSaveReason, noBase: boolean): string {
+  if (noBase) return `${failure.message}. ${NO_BASE_HOLD_SENTENCE}`;
+  const { sentence } = HELD_SAVE_RULES[reason];
+  if (reason === 'pending-rename') return `${failure.message}. ${sentence}`;
+  if (heldSaveEndsOnlyByAPerson(reason)) {
+    return `${failure.message}. The edit is kept in the document. ${sentence} Do not repeat this write.`;
+  }
+  return `${failure.message}. The edit is kept in the document. ${sentence} Do not repeat this write: re-read the document before editing it further.`;
+}
+
+function heldSaveProblem(failure: StoreFailure) {
+  const reason = failure.held?.reason ?? 'pending-unreadable';
+  const noBase = failure.held?.noBase === true;
+  const retryWhen = noBase ? 'replaced-on-next-edit' : HELD_SAVE_RULES[reason].retryWhen;
+  return {
+    type: 'urn:ok:error:save-held' as const,
+    title: 'Edit applied in memory; its save to disk is held.',
+    detail: heldSaveDetail(failure, reason, noBase),
+    reason,
+    ...(retryWhen === undefined ? {} : { retryWhen }),
+    ...(failure.held?.causeCode === undefined ? {} : { causeCode: failure.held.causeCode }),
   } satisfies BatchEntryError;
 }
 
@@ -1427,8 +1679,55 @@ function refusedStoreProblem(failure: StoreFailure) {
     type: 'urn:ok:error:store-refused' as const,
     title:
       'Edit applied in memory; disk write refused because the duplication baseline could not be read.',
-    detail: `${failure.message}. The edit is applied in collaborative state and the document file on disk was not updated; a copy of the edited document is preserved in the server's recovery buffer unless that buffer is unavailable or unwritable. Retry the write once the filesystem fault is repaired.`,
+    detail: `${failure.message}. The edit is applied in collaborative state and the document file on disk was not updated; a copy of the edited document is preserved in the server's recovery buffer unless that buffer is unavailable or unwritable. Do not repeat the write now: once the filesystem fault is repaired, re-read the document and repeat the edit only if it is missing.`,
   } satisfies BatchEntryError;
+}
+
+function storeFailureProblem(
+  failure: StoreFailure,
+): { status: HttpErrorStatus; problem: BatchEntryError } | undefined {
+  const fields = outcomeOfStoreFailure(failure);
+  const withOutcome = (status: HttpErrorStatus, problem: BatchEntryError) => ({
+    status,
+    problem: { ...problem, ...fields },
+  });
+  switch (failure.code) {
+    case OK_STORE_REFUSED:
+      return withOutcome(503, refusedStoreProblem(failure));
+    case OK_STORE_HELD:
+      return withOutcome(503, heldSaveProblem(failure));
+    case OK_DOC_REMOVED:
+      return withOutcome(409, removedDocProblem(failure));
+    case OK_STORE_DISCARDED:
+      return withOutcome(409, discardedStoreProblem(failure));
+    case OK_DOC_MOVED:
+      return withOutcome(409, movedDocProblem(failure));
+    case OK_SERVER_STOPPED:
+      return withOutcome(503, stoppedServerProblem(failure));
+    case OK_PATH_UNRESOLVABLE:
+      return withOutcome(400, pathFaultProblem(failure));
+    case OK_WRITE_REPLACED:
+      return withOutcome(409, replacedWriteProblem(failure));
+    case OK_WRITE_DROPPED:
+      return withOutcome(409, droppedWriteProblem(failure));
+    default:
+      return undefined;
+  }
+}
+
+function withoutOutcomeFields(problem: BatchEntryError): BatchEntryError {
+  const { outcome: _outcome, saved: _saved, nextStep: _nextStep, ...rest } = problem;
+  return rest;
+}
+
+function storeFailureEntryProblem(failure: StoreFailure): BatchEntryError {
+  const known = storeFailureProblem(failure);
+  if (known) return withoutOutcomeFields(known.problem);
+  return {
+    type: classifyUploadErrno({ code: failure.code } as NodeJS.ErrnoException),
+    title: 'Write applied in memory but failed to persist to disk.',
+    detail: `${failure.code ?? 'unknown error'}: ${failure.message}. The content was NOT saved and will be lost if the server restarts.`,
+  };
 }
 
 export function respondPersistenceFailure(
@@ -1436,19 +1735,14 @@ export function respondPersistenceFailure(
   failure: StoreFailure,
   handler: string,
 ): void {
-  if (failure.code === OK_STORE_REFUSED) {
-    const { type, title, detail } = refusedStoreProblem(failure);
-    errorResponse(res, 503, type, title, { handler, detail });
-    return;
-  }
-  if (failure.code === OK_DOC_REMOVED) {
-    const { type, title, detail } = removedDocProblem(failure);
-    errorResponse(res, 409, type, title, { handler, detail });
-    return;
-  }
-  if (failure.code === OK_PATH_UNRESOLVABLE) {
-    const { type, title, detail } = pathFaultProblem(failure);
-    errorResponse(res, 400, type, title, { handler, detail });
+  const known = storeFailureProblem(failure);
+  if (known) {
+    const { type, title, detail, ...extensions } = known.problem;
+    errorResponse(res, known.status, type, title, {
+      handler,
+      ...(detail === undefined ? {} : { detail }),
+      extensions,
+    });
     return;
   }
   const reason = classifyUploadErrno({ code: failure.code } as NodeJS.ErrnoException);
@@ -1457,7 +1751,7 @@ export function respondPersistenceFailure(
     uploadStatusFor(reason),
     reason,
     `Write applied in memory but failed to persist to disk (${failure.code ?? 'unknown error'}): ${failure.message}. The content was NOT saved and will be lost if the server restarts.`,
-    { handler },
+    { handler, extensions: { ...outcomeOfStoreFailure(failure) } },
   );
 }
 
@@ -1472,7 +1766,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
   async function dispatchMutation(operation: () => Promise<void>, pathname: string): Promise<void> {
     if (closingMutations)
       throw new ServerMutationShuttingDownError(pathname.startsWith('/api/local-op/'));
-    const task = operation();
+    const task = durabilityState.runWithinWriteWaitBudget(operation);
     pendingMutations.add(task);
     try {
       await task;
@@ -1528,12 +1822,14 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     getSyncEngine,
     conflicts,
     setBatchInProgress,
-    localOpCliArgs = ['open-knowledge'],
+    localOpCliArgs,
     authStreamHeartbeatMs,
     projectDir,
     getBridgeLossReporter,
     getPrincipal,
     homeDirOverride,
+    resetSettingsForTest,
+    settleDiskEventsForTest,
     agentIntegrations,
     savedThemeLockTimeoutMs,
     acpRegistry,
@@ -1542,6 +1838,10 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     contentFilter,
     installedAgentsProbe,
     forceUnloadDocument,
+    onNamespaceCreateAccepted,
+    captureNamespaceMove,
+    capturePublicationReceipt,
+    onResidentAdopted,
     ready,
     recentlyRemovedDocs,
     serializeDoc,
@@ -1560,6 +1860,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     githubReferenceFetch,
     getConfigDiagnostics,
   } = options;
+  const docNoticeLedger = options.docNotices;
   const declaredGitHubHosts =
     options.declaredGitHubHosts ?? readDeclaredGitHubHosts(homeDirOverride);
   const resolveSyncCredentialConfig =
@@ -1621,7 +1922,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     const index = getMutableFolderIndex();
     if (!index) return;
     try {
-      const folderStat = statSync(fullPath);
+      const folderStat = statSync(fullPath, { bigint: true });
       upsertFolderIndexEntryInIndex(index, contentDir, fullPath, folderStat, fullPath);
     } catch (err) {
       log.warn({ path: fullPath, err }, `folder index stat failed for ${fullPath}`);
@@ -1868,35 +2169,147 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     });
   }
 
-  type FlushOutcome =
-    | { kind: 'failure'; failure: StoreFailure }
-    | { kind: 'divergence' }
-    | { kind: 'stale-external-write' }
-    | null;
+  type FlushOutcome = AgentWriteFlushOutcome;
 
-  async function flushDiskAndDetectOutcome(docName: string): Promise<FlushOutcome> {
+  function heldUnsettled(docName: string, reason: HeldSaveReason, message: string): FlushOutcome {
+    return {
+      kind: 'failure',
+      failure: { code: OK_STORE_HELD, message: `${docName} ${message}`, held: { reason } },
+    };
+  }
+
+  async function answerForCarriedEdit(
+    docName: string,
+    failure: StoreFailure,
+    writtenThrough: WrittenThrough | undefined,
+  ): Promise<FlushOutcome> {
+    if (failure.code !== OK_DOC_REMOVED || failure.removal?.kind !== 'renamed') {
+      return { kind: 'failure', failure };
+    }
+    const answer = await durabilityState.awaitRenameCarry(docName, failure.removal.carry);
+    const renamedTo = failure.removal.renamedTo;
+    switch (answer.kind) {
+      case 'unsettled':
+        return heldUnsettled(
+          docName,
+          'pending-rename',
+          `was still being moved outside the app to ${renamedTo} when the write stopped waiting`,
+        );
+      case 'stopped':
+        return {
+          kind: 'failure',
+          failure: {
+            code: OK_SERVER_STOPPED,
+            message: `The server stopped while ${docName} was being moved outside the app to ${renamedTo}`,
+            removal: { kind: 'renamed', renamedTo },
+          },
+        };
+      case 'settled':
+        return {
+          kind: 'failure',
+          failure: editWasCarried(writtenThrough, answer.carried)
+            ? { ...failure, code: OK_DOC_MOVED }
+            : failure,
+        };
+      default: {
+        const unhandled: never = answer;
+        throw new Error(`unhandled rename carry answer: ${JSON.stringify(unhandled)}`);
+      }
+    }
+  }
+
+  function writtenThroughOfResident(docName: string): WrittenThrough | undefined {
+    const resident = hocuspocus.documents.get(docName);
+    return resident ? writtenThroughOf(resident) : undefined;
+  }
+
+  async function storeAgainAfterRunningStore(docName: string): Promise<void> {
+    const resident = hocuspocus.documents.get(docName);
+    if (resident === undefined) return;
+    await hocuspocus.storeDocumentHooks(
+      resident,
+      {
+        instance: hocuspocus,
+        clientsCount: resident.getConnectionsCount(),
+        document: resident,
+        documentName: docName,
+        lastContext: {},
+        lastTransactionOrigin: null,
+      },
+      true,
+    );
+  }
+
+  async function flushDiskAndDetectOutcome(
+    docName: string,
+    writtenThrough: WrittenThrough | undefined = writtenThroughOfResident(docName),
+  ): Promise<FlushOutcome> {
     const debounceId = `onStoreDocument-${docName}`;
     if (hocuspocus.debouncer.isDebounced(debounceId)) {
       durabilityState.markAgentWriteStore(docName);
       await hocuspocus.debouncer.executeNow(debounceId);
+    } else if (hocuspocus.debouncer.isCurrentlyExecuting(debounceId)) {
+      durabilityState.markAgentWriteStore(docName);
+      await storeAgainAfterRunningStore(docName);
     }
-    const failure = durabilityState.takeStoreFailure(docName);
-    if (failure) return { kind: 'failure', failure };
+    const deferredWaitStarted = Date.now();
+    const deferredWait = await durabilityState.awaitDeferredStoreOutcome(docName);
+    let failure: StoreFailure | undefined;
+    let unsettled = false;
+    switch (deferredWait?.kind) {
+      case undefined:
+      case 'completed':
+        break;
+      case 'discarded':
+        failure = discardedStoreFailure(docName, deferredWait.cause);
+        break;
+      case 'failed':
+        failure = durabilityState.takeStoreFailure(docName) ?? deferredWait.failure;
+        break;
+      case 'unsettled': {
+        unsettled = true;
+        const waitedMs = Date.now() - deferredWaitStarted;
+        console.warn(
+          JSON.stringify({
+            event: 'agent-write-deferred-store-unsettled',
+            'doc.name': docName,
+            waitedMs,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+        log.warn(
+          { docName, waitedMs },
+          '[agent-write] deferred store still pending after the wait; answering that the save is held',
+        );
+        break;
+      }
+      default:
+        assertNeverDeferredStoreWait(deferredWait);
+    }
+    failure ??= durabilityState.takeStoreFailure(docName) ?? undefined;
+    const atSave = durabilityState.readStoreIntake(docName, writtenThrough);
+    durabilityState.consumeAgentWriteStore(docName);
+    if (failure) return answerForCarriedEdit(docName, failure, writtenThrough);
     if (durabilityState.takeStaleExternalWriteFreeze(docName)) {
       return { kind: 'stale-external-write' };
     }
-    if (durabilityState.takeStoreDivergence(docName)) return { kind: 'divergence' };
-    return null;
-  }
-
-  function respondDiskDivergence(res: ServerResponse, handler: string): void {
-    errorResponse(
-      res,
-      409,
-      'urn:ok:error:disk-divergence',
-      'The document changed on disk after your edit was prepared; your edit was NOT applied, to avoid overwriting the newer on-disk content. Re-read the document and retry.',
-      { handler },
-    );
+    if (unsettled) {
+      return heldUnsettled(
+        docName,
+        'pending-unsettled',
+        'was still being saved when the write stopped waiting',
+      );
+    }
+    if (atSave === 'disk-replaced') {
+      return {
+        kind: 'failure',
+        failure: {
+          code: OK_WRITE_REPLACED,
+          message: `${docName} changed on disk, and its file replaced the document`,
+        },
+      };
+    }
+    return atSave === undefined ? null : { kind: 'taken-in', merge: atSave };
   }
 
   function staleExternalWriteProblem(docName: string) {
@@ -1912,6 +2325,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
           '/',
         ),
       resolutionOptions: RESOLUTION_OPTIONS,
+      ...REFUSAL_OUTCOMES['urn:ok:error:stale-external-write'],
     } satisfies BatchEntryError;
   }
 
@@ -1920,22 +2334,13 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     errorResponse(res, 409, type, title, { handler, detail, extensions });
   }
 
-  function buildReconcileWarning(
-    reconcile: ReconcileBeforeWriteResult,
-  ): DiskEditReconciledWarning | undefined {
-    if (!reconcile.reconciled) return undefined;
-    return {
-      kind: 'disk-edit-reconciled',
-      intendedBytes: reconcile.baseBytes,
-      actualBytes: reconcile.diskBytes,
-      byteDelta: reconcile.diskBytes - reconcile.baseBytes,
-      ...(reconcile.mergeOutcome ? { mergeOutcome: reconcile.mergeOutcome } : {}),
-      hint:
-        reconcile.mergeOutcome === 'merged'
-          ? 'An out-of-band edit was three-way merged into this document before your edit was applied on top; the merge may have interleaved content blocks. Re-read it (e.g. `exec("cat <path>")`) and review the combined result carefully before continuing.'
-          : 'An out-of-band edit was reconciled into this document before your edit was applied on top; the document now reflects that edit plus yours. Re-read it (e.g. `exec("cat <path>")`) to see the combined result before continuing.',
-    };
-  }
+  const mergeHistory = createMergeHistoryRecorder({
+    getShadow: () => shadowRef?.current,
+    contentRoot: contentRoot ?? '',
+    getBranch: () => getCurrentBranch?.() ?? null,
+    writeCheckpoint: options.mergeHistoryWriter,
+    notices: options.docNotices,
+  });
 
   /**
    * Content-scope exclusion for a docName, mirroring the file-watcher's markdown admission
@@ -1967,6 +2372,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
       fileExists: createLinkedFileExists(),
       folderExists: createLinkedFolderExists(),
       fileExcluded: createLinkedFileExcluded(),
+      imagePathExcluded: contentFilter?.isPathIgnored ?? null,
       resolveWikiFile: createLinkedWikiFileResolver(),
       resolveFileByBasename: createLinkedFileBasenameResolver(),
     };
@@ -2185,10 +2591,8 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     let pending = Promise.resolve();
     return async function runSerialized<T>(task: () => Promise<T>): Promise<T> {
       const waitFor = pending;
-      let release = () => {};
-      pending = new Promise<void>((resolve) => {
-        release = resolve;
-      });
+      const { promise, resolve: release } = Promise.withResolvers<void>();
+      pending = promise;
       await waitFor;
       try {
         return await task();
@@ -2270,7 +2674,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
 
   async function captureAndCloseDocuments(
     docNames: string[],
-    lifecycleStatus: 'deleted-upstream' | 'renamed',
+    lifecycleStatus: RemovalLifecycleStatus,
   ): Promise<Map<string, string>> {
     const liveContents = new Map<string, string>();
 
@@ -2305,6 +2709,20 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     return liveContents;
   }
 
+  function reviveFrozenResident(docName: string, content: string): void {
+    const document = hocuspocus.documents.get(docName);
+    const result = reviveFrozenResidentDoc(
+      durabilityState,
+      hocuspocus,
+      docName,
+      content,
+      options.resolveEmbed,
+      undefined,
+      getBridgeLossReporter?.(),
+    );
+    if (result === 'revived' && document) onResidentAdopted?.(document, docName);
+  }
+
   function syncRenamedDocsToDisk(
     renamed: RenamedDocMapping[],
     liveContents: ReadonlyMap<string, string>,
@@ -2325,6 +2743,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
 
       if (typeof finalContent === 'string') {
         registerWrite(filePath, contentHash(finalContent));
+        reviveFrozenResident(toDocName, finalContent);
       }
     }
   }
@@ -2364,12 +2783,20 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     return readFileSync(filePath, 'utf-8');
   }
 
-  function writeManagedRenameDocumentToDisk(docName: string, markdown: string): void {
+  function writeManagedRenameDocumentToDisk(
+    docName: string,
+    markdown: string,
+    document: Document | undefined,
+  ): void {
+    const publicationReceipt = document
+      ? capturePublicationReceipt?.(document, docName)
+      : undefined;
     const filePath = resolveContentEntryPath(contentDir, 'file', docName);
     tracedMkdirSync(dirname(filePath), { recursive: true });
-    writeFileIfContentDiffers(filePath, markdown);
+    const published = writeFileIfContentDiffers(filePath, markdown);
     registerWrite(filePath, contentHash(markdown));
     durabilityState.setReconciledBase(docName, markdown);
+    if (published) publicationReceipt?.();
 
     mutateFileIndex?.({ kind: 'update', path: filePath, docName, content: markdown });
   }
@@ -2497,7 +2924,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
         ? applyAssetRenamesToLoadedDocument(pending.docName, renamedAssets)
         : pending;
       if (rewritten.rewrites === 0) continue;
-      writeManagedRenameDocumentToDisk(pending.docName, rewritten.markdown);
+      writeManagedRenameDocumentToDisk(pending.docName, rewritten.markdown, document);
       derivedMutations.push({
         kind: 'link-rewrite',
         documentName: pending.docName,
@@ -2708,7 +3135,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
           span.setAttribute('rename.rewrite_candidates', pendingRewrites.length);
           assertRewriteTargetsNotConflicted(pendingRewrites.map((entry) => entry.docName));
 
-          reconcileDiskBeforeAgentWrite(
+          await reconcileDiskBeforeAgentWrite(
             durabilityState,
             hocuspocus,
             sourceDocName,
@@ -2716,6 +3143,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
             undefined,
             getBridgeLossReporter?.(),
             conflicts,
+            mergeHistory,
           );
           if (recentlyRemovedDocs && !isSystemDoc(sourceDocName) && !isConfigDoc(sourceDocName)) {
             recentlyRemovedDocs.setDeleted(sourceDocName);
@@ -2747,14 +3175,14 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
 
             forgetDocExtension(sourceDocName);
             mutateFileIndex?.({ kind: 'delete', path: sourcePath, docName: sourceDocName });
-            const destinationStat = statSync(destinationPath);
+            const destinationStat = statSync(destinationPath, { bigint: true });
             mutateFileIndex?.({
               kind: 'file-create',
               path: destinationPath,
               relativePath: toPath,
-              size: destinationStat.size,
-              modifiedTs: destinationStat.mtimeMs,
-              inode: destinationStat.ino,
+              size: Number(destinationStat.size),
+              modifiedTs: statMtimeMs(destinationStat),
+              inode: filesystemIdentity(destinationStat),
             });
 
             const rewriteResult = await applyPendingAssetReferenceRewrites(
@@ -2960,7 +3388,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
               throw error;
             }
             if (!existsSync(candidatePath)) continue;
-            reconcileDiskBeforeAgentWrite(
+            await reconcileDiskBeforeAgentWrite(
               durabilityState,
               hocuspocus,
               docName,
@@ -2968,6 +3396,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
               undefined,
               getBridgeLossReporter?.(),
               conflicts,
+              mergeHistory,
             );
             const content = readCurrentDocumentContent(docName);
             if (typeof content !== 'string') continue;
@@ -2996,7 +3425,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
               }
             }
 
-            reconcileDiskBeforeAgentWrite(
+            await reconcileDiskBeforeAgentWrite(
               durabilityState,
               hocuspocus,
               docName,
@@ -3004,6 +3433,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
               undefined,
               getBridgeLossReporter?.(),
               conflicts,
+              mergeHistory,
             );
             const content = readCurrentDocumentContent(docName);
             if (typeof content === 'string') {
@@ -3075,7 +3505,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
                   );
 
               if (rewritten.rewrites > 0) {
-                writeManagedRenameDocumentToDisk(docName, rewritten.markdown);
+                writeManagedRenameDocumentToDisk(docName, rewritten.markdown, document);
                 rewrittenDocs.push({ docName, rewrites: rewritten.rewrites });
               }
 
@@ -3104,6 +3534,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
 
             const rootSourcePath = resolveContentEntryPath(contentDir, kind, fromPath);
             const rootDestinationPath = resolveContentEntryPath(contentDir, kind, toPath);
+            const acceptedMoves = affectedDocs.map(({ to }) => captureNamespaceMove?.(to));
             const renamedWithGit = await renameTrackedPathInGit(
               projectDir,
               rootSourcePath,
@@ -3112,12 +3543,12 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
             if (!renamedWithGit) {
               renamePathOnDisk(rootSourcePath, rootDestinationPath);
             }
+            for (const acceptMove of acceptedMoves) acceptMove?.();
             if (kind === 'folder') {
               renameFolderIndexEntries(fromPath, toPath);
             }
 
             const liveContents = await captureAndCloseDocuments([...renameMap.keys()], 'renamed');
-
             if (
               process.env.NODE_ENV === 'test' &&
               process.env.OK_TEST_RENAME_FAULT === 'pre-append'
@@ -3125,70 +3556,29 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
               throw new Error('OK_TEST_RENAME_FAULT=pre-append');
             }
 
-            if (shadowRef?.current) {
-              const shadow = shadowRef.current;
-              const loggableAffectedDocs = affectedDocs.filter(
-                ({ from, to }) => stripDocExtension(from) !== stripDocExtension(to),
-              );
-              if (loggableAffectedDocs.length > 0) {
-                withSpanSync(
-                  'rename.appendLog',
-                  { attributes: { 'rename.kind': kind } },
-                  (span) => {
-                    const groupId = randomUUID();
-                    const at = new Date().toISOString();
-                    const branch = getCurrentBranch?.() ?? 'main';
-                    const renameLogIndex = getOrLoadRenameLogIndex(shadow.gitDir);
-                    const actorWriter = options?.actor
-                      ? {
-                          writerId: options.actor.writerId,
-                          displayName: options.actor.displayName,
-                        }
-                      : { writerId: SERVICE_WRITER.id, displayName: SERVICE_WRITER.name };
-                    let entriesAppended = 0;
-                    for (const { from, to } of loggableAffectedDocs) {
-                      const logEntry: RenameLogEntry = {
-                        v: 1,
-                        from,
-                        to,
-                        at,
-                        commitSha: '',
-                        branch,
-                        groupId,
-                        kind,
-                        actor: actorWriter,
-                      };
-                      appendRenameLogEntry(shadow.gitDir, logEntry, renameLogIndex, shadow);
-                      entriesAppended += 1;
-                      if (options?.actor) {
-                        recordContributor(
-                          to,
-                          options.actor.writerId,
-                          options.actor.displayName,
-                          options.actor.colorSeed,
-                          formatRenameSubject(from, to),
-                          options.actor.actorMetadata,
-                          undefined,
-                          [{ from, to }],
-                        );
-                      } else {
-                        recordContributor(
-                          to,
-                          SERVICE_WRITER.id,
-                          SERVICE_WRITER.name,
-                          SERVICE_WRITER.id,
-                          formatRenameSubject(from, to),
-                          undefined,
-                          undefined,
-                          [{ from, to }],
-                        );
-                      }
+            withSpanSync('rename.appendLog', { attributes: { 'rename.kind': kind } }, (span) => {
+              const actor = options?.actor;
+              const entriesAppended = followRenameRecords({
+                moves: affectedDocs,
+                kind,
+                branch: getCurrentBranch?.() ?? 'main',
+                writer: actor
+                  ? {
+                      writerId: actor.writerId,
+                      displayName: actor.displayName,
+                      colorSeed: actor.colorSeed,
+                      actor: actor.actorMetadata,
                     }
-                    span.setAttribute('rename.entries_appended', entriesAppended);
-                  },
-                );
-              }
-            }
+                  : {
+                      writerId: SERVICE_WRITER.id,
+                      displayName: SERVICE_WRITER.name,
+                      colorSeed: SERVICE_WRITER.id,
+                    },
+                shadow: shadowRef?.current,
+                notices: docNoticeLedger,
+              });
+              span.setAttribute('rename.entries_appended', entriesAppended);
+            });
 
             const explicitDestExt: string | null =
               kind === 'file' && isSupportedDocFile(toPath) ? extname(toPath) : null;
@@ -3525,7 +3915,10 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
             400,
             'urn:ok:error:reserved-doc-name',
             `'${docName}' is a reserved document name.`,
-            { handler: 'agent-write' },
+            {
+              handler: 'agent-write',
+              extensions: { ...REFUSAL_OUTCOMES['urn:ok:error:reserved-doc-name'] },
+            },
           );
           return;
         }
@@ -3537,7 +3930,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
           clientName,
         });
 
-        const agentWriteReconcile = reconcileDiskBeforeAgentWrite(
+        const agentWriteReconcile = await reconcileDiskBeforeAgentWrite(
           durabilityState,
           hocuspocus,
           docName,
@@ -3545,6 +3938,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
           options.resolveEmbed,
           getBridgeLossReporter?.(),
           conflicts,
+          mergeHistory,
         );
 
         const timestamp = new Date().toISOString();
@@ -3554,6 +3948,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
           summaryResponseFields(normalizedSummary);
 
         let disposeEffectCapture: (() => void) | undefined;
+        let writtenThrough: WrittenThrough | undefined;
         try {
           const icon = iconFromClientName(clientName);
           const color = AGENT_ICON_COLORS[icon] ?? colorFromSeed(colorSeed ?? agentId);
@@ -3598,6 +3993,8 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
               ...(changedBlocks !== undefined ? { changedBlocks } : {}),
             });
           }, session.origin);
+          writtenThrough = writtenThroughOf(session.dc.document);
+          durabilityState.markAgentWriteStore(docName);
           recordContributor(
             docName,
             agentId,
@@ -3614,13 +4011,9 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
           agentPresenceBroadcaster?.touchMode(agentId, 'idle');
         }
 
-        const flushOutcome = await flushDiskAndDetectOutcome(docName);
+        const flushOutcome = await flushDiskAndDetectOutcome(docName, writtenThrough);
         if (flushOutcome?.kind === 'failure') {
           respondPersistenceFailure(res, flushOutcome.failure, 'agent-write');
-          return;
-        }
-        if (flushOutcome?.kind === 'divergence') {
-          respondDiskDivergence(res, 'agent-write');
           return;
         }
         if (flushOutcome?.kind === 'stale-external-write') {
@@ -3631,15 +4024,21 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
         onAgentWrite?.();
 
         const agentWriteWarning = buildReconcileWarning(agentWriteReconcile);
+        const agentWriteBody = {
+          timestamp,
+          ...(summaryResponse ? { summary: summaryResponse } : {}),
+          ...(agentWriteWarning ? { warnings: [agentWriteWarning] } : {}),
+        };
+        const agentWriteOutcome = outcomeOfSavedWrite(agentWriteReconcile, flushOutcome);
+        if (agentWriteOutcome.outcome === 'both-kept') {
+          respondBothKept(res, 'agent-write', agentWriteBody, agentWriteOutcome);
+          return;
+        }
         successResponse(
           res,
           200,
           AgentWriteSuccessSchema,
-          {
-            timestamp,
-            ...(summaryResponse ? { summary: summaryResponse } : {}),
-            ...(agentWriteWarning ? { warnings: [agentWriteWarning] } : {}),
-          },
+          { ...agentWriteBody, ...agentWriteOutcome },
           { handler: 'agent-write' },
         );
       } catch (e) {
@@ -3687,12 +4086,14 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
 
         const timestamp = new Date().toISOString();
 
-        interface BatchErrorResult {
+        interface BatchErrorResult extends Partial<AgentWriteOutcomeFields> {
           status: 'error';
           docName: string;
           error: BatchEntryError;
         }
-        interface BatchWrittenResult extends WriteLinkAdvisoryProjection {
+        interface BatchWrittenResult
+          extends WriteLinkAdvisoryProjection,
+            Partial<AgentWriteOutcomeFields> {
           status: 'written';
           docName: string;
           summary?: SummaryResponse;
@@ -3706,10 +4107,12 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
           title: string,
           detail?: string,
           extensions?: Record<string, unknown>,
+          outcome?: AgentWriteOutcomeFields,
         ): BatchErrorResult => ({
           status: 'error',
           docName,
           error: { type, title, ...(detail !== undefined ? { detail } : {}), ...extensions },
+          ...outcome,
         });
 
         const classifyEntryFailure = (docName: string, e: unknown): BatchErrorResult => {
@@ -3721,6 +4124,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
               CONCURRENT_OVERWRITE_REFUSED_TITLE,
               CONCURRENT_OVERWRITE_REFUSED_DETAIL_WITH_POSITIONS,
               { retryAfterSeconds: CONCURRENT_OVERWRITE_RETRY_AFTER_SECONDS },
+              REFUSAL_OUTCOMES['urn:ok:error:concurrent-overwrite-refused'],
             );
           }
           if (e instanceof DocInConflictError) {
@@ -3741,6 +4145,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
                 detail,
                 ...envelope,
               },
+              ...REFUSAL_OUTCOMES['urn:ok:error:doc-in-conflict'],
             };
           }
           if (e instanceof FrontmatterMalformedError) {
@@ -3750,6 +4155,8 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
               'urn:ok:error:frontmatter-malformed',
               'Frontmatter YAML is malformed.',
               frontmatterRefusalDetail(e),
+              undefined,
+              REFUSAL_OUTCOMES['urn:ok:error:frontmatter-malformed'],
             );
           }
           if (e instanceof AgentSessionCapacityError) {
@@ -3759,6 +4166,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
               AGENT_SESSION_CAPACITY_TITLE,
               AGENT_SESSION_CAPACITY_DETAIL,
               AGENT_SESSION_CAPACITY_EXTENSIONS,
+              REFUSAL_OUTCOMES['urn:ok:error:too-many-agent-sessions'],
             );
           }
           log.error(
@@ -3775,13 +4183,16 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
         interface PendingEntry {
           index: number;
           docName: string;
-          session: Awaited<ReturnType<typeof sessionManager.getSession>>;
+          reconcile: ReconcileBeforeWriteResult;
           summaryResponse?: SummaryResponse;
           warnings: AdvisoryWarning[];
+          diverged: boolean;
         }
 
         const results: (BatchResult | undefined)[] = new Array(body.docs.length);
         const pending: PendingEntry[] = [];
+        const writtenThroughByDoc = new Map<string, WrittenThrough>();
+        const writtenSourceByDoc = new Map<string, string>();
 
         try {
           const icon = iconFromClientName(clientName);
@@ -3805,6 +4216,9 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
                   resolvedDocName,
                   'urn:ok:error:reserved-doc-name',
                   `'${resolvedDocName}' is a reserved document name.`,
+                  undefined,
+                  undefined,
+                  REFUSAL_OUTCOMES['urn:ok:error:reserved-doc-name'],
                 );
                 continue;
               }
@@ -3826,7 +4240,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
                   clientName,
                 });
 
-                const reconcile = reconcileDiskBeforeAgentWrite(
+                const reconcile = await reconcileDiskBeforeAgentWrite(
                   durabilityState,
                   hocuspocus,
                   resolvedDocName,
@@ -3834,6 +4248,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
                   options.resolveEmbed,
                   getBridgeLossReporter?.(),
                   conflicts,
+                  mergeHistory,
                 );
 
                 const entryEmbedResolver = options.resolveEmbed
@@ -3880,6 +4295,12 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
                       ...(changedBlocks !== undefined ? { changedBlocks } : {}),
                     });
                   }, session.origin);
+                  writtenThroughByDoc.set(resolvedDocName, writtenThroughOf(session.dc.document));
+                  writtenSourceByDoc.set(
+                    resolvedDocName,
+                    session.dc.document.getText('source').toString(),
+                  );
+                  durabilityState.markAgentWriteStore(resolvedDocName);
                 } finally {
                   disposeEntryEffectCapture();
                 }
@@ -3907,9 +4328,10 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
                 pending.push({
                   index: i,
                   docName: resolvedDocName,
-                  session,
+                  reconcile,
                   summaryResponse,
                   warnings,
+                  diverged: writeDivergence !== undefined,
                 });
               } catch (e) {
                 results[i] = classifyEntryFailure(resolvedDocName, e);
@@ -3917,34 +4339,21 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
             }
 
             const flushErrors = new Map<string, BatchErrorResult['error'] | undefined>();
+            const flushOutcomes = new Map<string, FlushOutcome>();
             for (const p of pending) {
               if (flushErrors.has(p.docName)) continue;
-              const flushOutcome = await flushDiskAndDetectOutcome(p.docName);
+              const flushOutcome = await flushDiskAndDetectOutcome(
+                p.docName,
+                writtenThroughByDoc.get(p.docName),
+              );
+              flushOutcomes.set(p.docName, flushOutcome);
               if (flushOutcome?.kind === 'failure') {
-                if (flushOutcome.failure.code === OK_DOC_REMOVED) {
-                  flushErrors.set(p.docName, removedDocProblem(flushOutcome.failure));
-                } else if (flushOutcome.failure.code === OK_PATH_UNRESOLVABLE) {
-                  flushErrors.set(p.docName, pathFaultProblem(flushOutcome.failure));
-                } else if (flushOutcome.failure.code === OK_STORE_REFUSED) {
-                  flushErrors.set(p.docName, refusedStoreProblem(flushOutcome.failure));
-                } else {
-                  const reason = classifyUploadErrno({
-                    code: flushOutcome.failure.code,
-                  } as NodeJS.ErrnoException);
-                  flushErrors.set(p.docName, {
-                    type: reason,
-                    title: 'Write applied in memory but failed to persist to disk.',
-                    detail: `${flushOutcome.failure.code ?? 'unknown error'}: ${flushOutcome.failure.message}. The content was NOT saved and will be lost if the server restarts.`,
-                  });
-                }
-              } else if (flushOutcome?.kind === 'divergence') {
-                flushErrors.set(p.docName, {
-                  type: 'urn:ok:error:disk-divergence',
-                  title:
-                    'The document changed on disk after your edit was prepared; your edit was NOT applied. Re-read the document and retry.',
-                });
+                flushErrors.set(p.docName, storeFailureEntryProblem(flushOutcome.failure));
               } else if (flushOutcome?.kind === 'stale-external-write') {
-                flushErrors.set(p.docName, staleExternalWriteProblem(p.docName));
+                flushErrors.set(
+                  p.docName,
+                  withoutOutcomeFields(staleExternalWriteProblem(p.docName)),
+                );
               } else {
                 flushErrors.set(p.docName, undefined);
               }
@@ -3957,11 +4366,22 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
             let lastWrittenDoc: string | undefined;
             for (const p of pending) {
               const flushError = flushErrors.get(p.docName);
+              const flushOutcome = flushOutcomes.get(p.docName) ?? null;
               if (flushError !== undefined) {
-                results[p.index] = { status: 'error', docName: p.docName, error: flushError };
+                results[p.index] = {
+                  status: 'error',
+                  docName: p.docName,
+                  error: flushError,
+                  ...(flushOutcome?.kind === 'failure'
+                    ? outcomeOfStoreFailure(flushOutcome.failure)
+                    : REFUSAL_OUTCOMES['urn:ok:error:stale-external-write']),
+                };
                 continue;
               }
-              const writtenSource = p.session.dc.document.getText('source').toString();
+              const writtenSource =
+                hocuspocus.documents.get(p.docName)?.getText('source').toString() ??
+                writtenSourceByDoc.get(p.docName) ??
+                '';
               registerWrittenDocInFileIndex(p.docName, writtenSource);
               const linkAdvisory = linkAdvisor(
                 writtenSource,
@@ -3972,6 +4392,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
               results[p.index] = {
                 status: 'written',
                 docName: p.docName,
+                ...outcomeOfSavedWrite(p.reconcile, flushOutcome, p.diverged),
                 ...(p.summaryResponse ? { summary: p.summaryResponse } : {}),
                 ...(warnings.length > 0 ? { warnings } : {}),
                 ...linkAdvisory.links,
@@ -4074,7 +4495,10 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
       ? (docName) => recentlyRemovedDocs.delete(docName)
       : undefined,
     mutateFileIndexCreate: mutateFileIndex
-      ? ({ path, docName, content }) => mutateFileIndex({ kind: 'create', path, docName, content })
+      ? ({ path, docName, content }) => {
+          onNamespaceCreateAccepted?.(docName);
+          mutateFileIndex({ kind: 'create', path, docName, content });
+        }
       : undefined,
     recordDerivedDocumentBestEffort,
     recordDerivedMutationsBestEffort,
@@ -4175,7 +4599,10 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
       });
       return null;
     }
-    return { folderRel, resolvedContentDir };
+    return {
+      folderRel: relative(resolvedContentDir, candidateAbs).split(sep).join('/'),
+      resolvedContentDir,
+    };
   }
 
   function checkSkillDocConflictGate(
@@ -5028,8 +5455,8 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     agentPresenceBroadcaster,
     buildAgentActor,
     flushDiskAndDetectOutcome,
+    markAgentWriteStore: (docName) => durabilityState.markAgentWriteStore(docName),
     respondPersistenceFailure,
-    respondDiskDivergence,
     respondStaleExternalWrite,
     flushDocToDisk,
     log,
@@ -5060,9 +5487,9 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     extractAgentIdentity,
     sessionManager,
     flushDiskAndDetectOutcome,
+    markAgentWriteStore: (docName) => durabilityState.markAgentWriteStore(docName),
     respondStaleExternalWrite,
     respondPersistenceFailure,
-    respondDiskDivergence,
     attributeOkArtifactWrite,
     okArtifactKey,
     commitOkArtifactWrite,
@@ -5109,9 +5536,9 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     extractAgentIdentity,
     sessionManager,
     flushDiskAndDetectOutcome,
+    markAgentWriteStore: (docName) => durabilityState.markAgentWriteStore(docName),
     respondStaleExternalWrite,
     respondPersistenceFailure,
-    respondDiskDivergence,
     okArtifactKey,
     resolveSkillsRoot,
     extractActorIdentityFromQuery,
@@ -5186,6 +5613,11 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     commentService,
     getPrincipal,
     signalChannel,
+  });
+  const docNoticeRoutes = createDocNoticeRoutes({
+    docNotices: options.docNotices ?? null,
+    getBranch: () => getCurrentBranch?.() ?? 'main',
+    checkLocalOpSecurity,
   });
   const syncRoutes = createSyncRoutes({
     projectDir,
@@ -5293,11 +5725,12 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     attributeOkArtifactWrite,
     scheduleOkArtifactFlush,
     flushDiskAndDetectOutcome,
+    markAgentWriteStore: (docName) => durabilityState.markAgentWriteStore(docName),
     respondPersistenceFailure,
-    respondDiskDivergence,
     respondStaleExternalWrite,
     registerWrittenDocInFileIndex,
     captureAndCloseDocuments,
+    captureNamespaceMove,
     renameTrackedPathInGit,
     renamePathOnDisk,
     splitContentPath,
@@ -5313,6 +5746,9 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     agentIntegrations,
   });
   const handoffInstallRoutes = createHandoffInstallRoutes({ checkLocalOpSecurity });
+  const documentRefreshRoutes = createDocumentRefreshRoutes({
+    refreshDocumentsFromDisk: options.refreshDocumentsFromDisk,
+  });
   const skillsInstallRoutes = createSkillsInstallRoutes({
     resolveSkillsRoot,
     validateSkillName,
@@ -5324,7 +5760,6 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     flushDiskAndDetectOutcome,
     respondStaleExternalWrite,
     respondPersistenceFailure,
-    respondDiskDivergence,
     skillInstallOps,
     skillPlacementOps,
     signalChannel,
@@ -5377,6 +5812,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     resolveAlias,
     extractAgentIdentity,
     docNameExistsWithAnySupportedExtension,
+    findMissingDocCandidates: (docName) => findMissingDocCandidates(docName, getFileIndex()),
     contentDir,
     summaryResponseFields,
     sessionManager,
@@ -5384,13 +5820,13 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     hocuspocus,
     options,
     getBridgeLossReporter,
+    mergeHistory,
     agentPresenceBroadcaster,
     recordContentDivergenceGate,
     buildAgentActor,
     countNormalizedSummary,
     flushDiskAndDetectOutcome,
     respondPersistenceFailure,
-    respondDiskDivergence,
     flushDocToDisk,
     agentFocusBroadcaster,
     onAgentWrite,
@@ -5401,6 +5837,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     computeLintViolations,
     log,
     flushDocToGit,
+    flushGitCommit,
     commitOkArtifactWrite,
     isSafeDocName,
     shadowRef,
@@ -5413,6 +5850,10 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     renameAttributionCounter,
   });
   const testRoutes = createTestRoutes({
+    agentPresence: agentPresenceBroadcaster,
+    resetSettingsForTest,
+    settleDiskEvents: settleDiskEventsForTest,
+    recentlyRemovedDocs,
     conflicts,
     durabilityState,
     resolveAlias,
@@ -5425,7 +5866,10 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     contentFilter,
     bumpSkillsCatalogGen,
     signalChannel,
-    flushGitCommit,
+    flushGitCommit: async () => {
+      await okArtifactFlushChain;
+      await flushGitCommit?.();
+    },
     rescanFiles,
   });
   const nativeGroups = [
@@ -5442,6 +5886,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     linkGraphRoutes,
     metricsRoutes,
     documentRoutes,
+    documentRefreshRoutes,
     configSystemRoutes,
     lintRoutes,
     lintWriteRoutes,
@@ -5453,6 +5898,7 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
     workspaceToolsRoutes,
     commentRoutes,
     syncRoutes,
+    docNoticeRoutes,
     shareRoutes,
     gitRoutes,
     localOpRoutes,
@@ -5515,8 +5961,16 @@ export function createApiExtension(options: ApiExtensionOptions): Extension & {
       throw new Error(`MCP_LOCAL_API_PATHS has no handler for ${path}`);
     }
   }
+  const inProcessOnlyRoutes: ReadonlyMap<
+    string,
+    (req: IncomingMessage, res: ServerResponse) => Promise<void> | void
+  > = new Map([[ACP_DOCUMENT_WRITE_PATH, agentWriteRoutes.acpDocumentWrite]]);
   const localApi = createLocalApiDispatch({
     resolve: (pathname) => {
+      const inProcessOnly = inProcessOnlyRoutes.get(pathname);
+      if (inProcessOnly !== undefined) {
+        return (req, res) => dispatchMutation(async () => inProcessOnly(req, res), pathname);
+      }
       if (!MCP_LOCAL_API_PATHS.has(pathname)) return undefined;
       const legacy = routes[pathname];
       if (legacy !== undefined) {

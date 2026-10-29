@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import {
   lstatSync,
   mkdirSync,
@@ -15,7 +16,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Hocuspocus } from '@hocuspocus/server';
 import { LOCAL_DIR } from '@inkeep/open-knowledge-core';
+import { filesystemIdentity } from '@inkeep/open-knowledge-core/server';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { streamShowAllEntries, walkContentDirForShowAll } from '../api-extension.ts';
 import { makeCaptureRes, makeSyntheticReq } from '../composition-rig.test-helper.ts';
 import { createTestConflictAuthority } from '../conflict-authority.test-helper.ts';
 import type { ConflictAuthority } from '../conflict-authority.ts';
@@ -181,13 +184,104 @@ describe('/api/documents?showAll single-flight walk', () => {
   });
 });
 
+describe('/api/documents?showAll answers from disk before the boot ready gate settles', () => {
+  function makeStreamingRes() {
+    const emitter = new EventEmitter();
+    const captured = { status: 0, headers: {} as Record<string, unknown>, body: '' };
+    const res = Object.assign(emitter, {
+      headersSent: false,
+      writableEnded: false,
+      destroyed: false,
+      statusCode: 0,
+      writeHead(status: number, headers?: Record<string, unknown>) {
+        captured.status = status;
+        Object.assign(captured.headers, headers);
+        res.headersSent = true;
+        return res;
+      },
+      setHeader(key: string, value: unknown) {
+        captured.headers[key.toLowerCase()] = value;
+      },
+      getHeader(key: string) {
+        return captured.headers[key.toLowerCase()];
+      },
+      write(chunk: string) {
+        captured.body += chunk;
+        return true;
+      },
+      end(chunk?: string) {
+        if (chunk !== undefined) captured.body += chunk;
+        if (captured.status === 0) captured.status = res.statusCode;
+        res.writableEnded = true;
+      },
+    });
+    return { res: res as unknown as ServerResponse, captured };
+  }
+
+  function listRootWhileBootIsPending(accept: string | undefined) {
+    writeFileSync(join(projectDir, 'alpha.md'), '# Alpha\n');
+    mkdirSync(join(projectDir, 'folder'));
+    writeFileSync(join(projectDir, 'folder', 'beta.md'), '# Beta\n');
+    const resolved = buildGroup(
+      createTestConflictAuthority(projectDir),
+      new Hocuspocus({ quiet: true }),
+      {
+        ready: new Promise<void>(() => {}),
+        contentFilter: createContentFilter({ projectDir, contentDir: projectDir }),
+        getShowAllMaxEntries: () => 10_000,
+        streamShowAllEntries,
+        walkContentDirForShowAll,
+      },
+    ).table.resolve('/api/documents');
+    if (!resolved?.dispatch) throw new Error('no dispatch for /api/documents');
+    const req = makeSyntheticReq({ url: '/api/documents?showAll=true&dir=&depth=1' });
+    if (accept) req.headers.accept = accept;
+    const { res, captured } = makeStreamingRes();
+    const settled = Promise.race([
+      resolved.dispatch(req, res).then(() => 'answered' as const),
+      new Promise<'parked'>((resolve) => setTimeout(() => resolve('parked'), 2_000)),
+    ]);
+    return { settled, captured };
+  }
+
+  test('the JSON listing does not wait on boot', async () => {
+    const { settled, captured } = listRootWhileBootIsPending(undefined);
+    expect(await settled).toBe('answered');
+    expect(captured.status).toBe(200);
+    const body = JSON.parse(captured.body) as {
+      documents: Array<{ kind: string; docName?: string; path?: string }>;
+    };
+    expect(body.documents.map((entry) => entry.docName ?? entry.path).sort()).toEqual([
+      'alpha',
+      'folder',
+    ]);
+  });
+
+  test('the NDJSON listing does not wait on boot', async () => {
+    const { settled, captured } = listRootWhileBootIsPending('application/x-ndjson');
+    expect(await settled).toBe('answered');
+    expect(captured.status).toBe(200);
+    const lines = captured.body
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { type?: string; docName?: string; path?: string });
+    expect(lines.at(-1)).toMatchObject({ type: 'complete', count: 2 });
+    expect(
+      lines
+        .slice(0, -1)
+        .map((entry) => entry.docName ?? entry.path)
+        .sort(),
+    ).toEqual(['alpha', 'folder']);
+  });
+});
+
 test.each(['repeatable', 'single-pass'] as const)(
   'regular group members and true symlinks survive both listing traversals of a %s inventory',
   async (shape) => {
     const rich = {
       kind: 'file' as const,
       canonicalPath: join(projectDir, 'outside/atlas.csv'),
-      inode: 41,
+      inode: '0:41',
       size: 5,
       modified: '2026-01-01T00:00:00.000Z',
       aliases: ['linked-atlas.csv', 'linked-beacon.csv'],
@@ -212,7 +306,7 @@ test.each(['repeatable', 'single-pass'] as const)(
           size: 0,
           modified: '2026-01-01T00:00:00.000Z',
           canonicalPath: join(projectDir, 'canonical'),
-          inode: 42,
+          inode: '0:42',
         },
       ],
     ]);
@@ -292,11 +386,13 @@ test('a folder alias lists a contained legacy file alias', async () => {
   const mirror = join(projectDir, 'mirror');
   symlinkSync(canonicalDir, mirror);
   const targetStat = statSync(target);
+  const targetStatIdentity = filesystemIdentity(statSync(target, { bigint: true }));
   const folderStat = statSync(canonicalDir);
+  const folderStatIdentity = filesystemIdentity(statSync(canonicalDir, { bigint: true }));
   const entry: FileIndexEntry = {
     kind: 'file',
     canonicalPath: target,
-    inode: targetStat.ino,
+    inode: targetStatIdentity,
     size: targetStat.size,
     modified: targetStat.mtime.toISOString(),
     aliases: ['canonical/y.csv'],
@@ -309,7 +405,7 @@ test('a folder alias lists a contained legacy file alias', async () => {
         size: 0,
         modified: folderStat.mtime.toISOString(),
         canonicalPath: canonicalDir,
-        inode: folderStat.ino,
+        inode: folderStatIdentity,
       },
     ],
   ]);
@@ -408,13 +504,14 @@ test('a public recovery creation preserves its literal folder alias and one list
       symlinkSync(real, linked);
       writeFileSync(join(linked, 'created.csv'), 'public,bytes\n');
       const stat = statSync(created);
+      const statIdentity = filesystemIdentity(statSync(created, { bigint: true }));
       watcher.mutateFileIndex({
         kind: 'file-create',
         path: created,
         relativePath: 'linked.mdx/created.csv',
         size: stat.size,
         modifiedTs: stat.mtimeMs,
-        inode: Number(stat.ino),
+        inode: statIdentity,
       });
       creations++;
       expect(

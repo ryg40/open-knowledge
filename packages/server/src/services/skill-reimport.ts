@@ -19,6 +19,8 @@ import {
   applySkillBundleFileDelete,
   applySkillBundleFileWrite,
   applySkillWrite,
+  skillMutationErrorStatus,
+  validateSkillMutationPath,
 } from '../content/skills-write.ts';
 import type { extractActorIdentity } from '../extract-actor-identity.ts';
 import { mutateSkillsLock } from '../skills-lock-store.ts';
@@ -66,6 +68,19 @@ export interface SkillReimportDeps {
   signalFiles: () => void;
 }
 
+export type RecordedFolderUpdate =
+  | { readonly kind: 'set'; readonly subpath: string }
+  | { readonly kind: 'clear' };
+
+function withRecordedFolder(
+  entry: SkillLockEntry,
+  folder: RecordedFolderUpdate | undefined,
+): SkillLockEntry {
+  if (folder === undefined) return entry;
+  const { subpath: _replaced, ...rest } = entry;
+  return folder.kind === 'set' ? { ...rest, subpath: folder.subpath } : rest;
+}
+
 export interface SkillReimportService {
   runSkillReimport(params: {
     acquiredDir: string;
@@ -74,27 +89,42 @@ export interface SkillReimportService {
     entry: SkillLockEntry;
     lockPath: string;
     ref?: string;
+    folder?: RecordedFolderUpdate;
     actor: ActorIdentity;
     dryRun?: boolean;
   }): Promise<SkillReimportOutcome>;
 }
 
+interface ReimportPickOptions {
+  recordedSkill?: string;
+  localName: string;
+  frontmatterNameOf: (dir: string) => string | undefined;
+}
+
 export function pickReimportDir<T extends { name: string; dir: string }>(
   dirs: readonly T[],
-  opts: {
-    recordedSkill?: string;
-    localName: string;
-    frontmatterNameOf: (dir: string) => string | undefined;
-  },
+  opts: ReimportPickOptions,
 ): T | undefined {
+  return reimportCandidates(dirs, opts)[0];
+}
+
+export function reimportCandidates<T extends { name: string; dir: string }>(
+  dirs: readonly T[],
+  opts: ReimportPickOptions,
+): T[] {
   const { recordedSkill, localName, frontmatterNameOf } = opts;
-  return (
-    (recordedSkill ? dirs.find((d) => d.name === recordedSkill) : undefined) ??
-    dirs.find((d) => d.name === localName) ??
-    dirs.find((d) => frontmatterNameOf(d.dir) === localName) ??
-    dirs.find((d) => d.name === RENAMED_PACK_SKILLS[recordedSkill ?? localName]) ??
-    (dirs.length === 1 ? dirs[0] : undefined)
-  );
+  const renamed = RENAMED_PACK_SKILLS[recordedSkill ?? localName];
+  const rules: Array<(d: T) => boolean> = [
+    (d) => recordedSkill !== undefined && recordedSkill !== '' && d.name === recordedSkill,
+    (d) => d.name === localName,
+    (d) => frontmatterNameOf(d.dir) === localName,
+    (d) => renamed !== undefined && d.name === renamed,
+  ];
+  for (const rule of rules) {
+    const matches = dirs.filter(rule);
+    if (matches.length > 0) return matches;
+  }
+  return dirs.length === 1 ? [...dirs] : [];
 }
 
 export function planReimportDiff(input: {
@@ -144,7 +174,7 @@ export function groupReimportNamesBySource(
 export function createSkillReimportService(deps: SkillReimportDeps): SkillReimportService {
   return {
     async runSkillReimport(params) {
-      const { acquiredDir, name, scope, entry, lockPath, ref, actor } = params;
+      const { acquiredDir, name, scope, entry, lockPath, ref, folder, actor } = params;
       const reimportBase = scope === 'global' ? deps.skillsHome : deps.contentDir;
       const {
         root: skillsRoot,
@@ -212,6 +242,33 @@ export function createSkillReimportService(deps: SkillReimportDeps): SkillReimpo
       const skillBody = acquiredDoc.body;
       const acquiredPack = packMarkerOf(acquiredDoc.frontmatter);
 
+      const skillDir = resolve(skillsRoot, name);
+      for (const relPath of [
+        'SKILL.md',
+        ...acquired.files.map((f) => f.relPath),
+        ...removedUpstream,
+      ]) {
+        const pathCheck = validateSkillMutationPath(
+          reimportBase,
+          skillDir,
+          resolve(skillDir, relPath),
+        );
+        if (!pathCheck.ok) {
+          const status = skillMutationErrorStatus(pathCheck.error.code);
+          return {
+            ok: false,
+            status,
+            urn:
+              status === 500
+                ? 'urn:ok:error:internal-server-error'
+                : 'urn:ok:error:invalid-request',
+            title: pathCheck.error.message,
+            detail: `${relPath}: ${pathCheck.error.code}`,
+            cause: pathCheck.error.cause ?? new Error(pathCheck.error.message),
+          };
+        }
+      }
+
       if (params.dryRun) {
         let gitTracked: boolean | undefined;
         if (scope === 'project' && deps.projectDir) {
@@ -247,6 +304,7 @@ export function createSkillReimportService(deps: SkillReimportDeps): SkillReimpo
         }
       }
       const wr = applySkillWrite({
+        boundary: reimportBase,
         skillsRoot,
         name,
         body: skillBody,
@@ -257,18 +315,21 @@ export function createSkillReimportService(deps: SkillReimportDeps): SkillReimpo
         },
       });
       if (!wr.ok) {
+        const status = skillMutationErrorStatus(wr.error.code);
         return {
           ok: false,
-          status: 400,
-          urn: 'urn:ok:error:invalid-request',
-          title: 'Failed to write skill.',
+          status,
+          urn:
+            status === 500 ? 'urn:ok:error:internal-server-error' : 'urn:ok:error:invalid-request',
+          title: wr.error.message,
           detail: wr.error.code,
-          cause: new Error(wr.error.message),
+          cause: wr.error.cause ?? new Error(wr.error.message),
         };
       }
       const warnings = [...wr.warnings];
       for (const f of acquired.files) {
         const br = applySkillBundleFileWrite({
+          boundary: reimportBase,
           skillsRoot,
           name,
           relPath: f.relPath,
@@ -288,7 +349,12 @@ export function createSkillReimportService(deps: SkillReimportDeps): SkillReimpo
         }
       }
       for (const relPath of removedUpstream) {
-        const deleted = applySkillBundleFileDelete({ skillsRoot, name, relPath });
+        const deleted = applySkillBundleFileDelete({
+          boundary: reimportBase,
+          skillsRoot,
+          name,
+          relPath,
+        });
         if (!deleted.ok) {
           return {
             ok: false,
@@ -317,7 +383,7 @@ export function createSkillReimportService(deps: SkillReimportDeps): SkillReimpo
           : undefined;
       await mutateSkillsLock(lockPath, (current: SkillsLock) =>
         upsertLockEntry(current, name, {
-          ...(current.skills[name] ?? entry),
+          ...withRecordedFolder(current.skills[name] ?? entry, folder),
           contentHash: acquired.contentHash,
           files: acquired.files.map((file) => file.relPath),
           ...(reimportLocalHash !== undefined ? { localHash: reimportLocalHash } : {}),

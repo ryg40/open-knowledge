@@ -190,7 +190,7 @@ function DeviceFlowPanel({ onSuccess, startFlow }: DeviceFlowPanelProps) {
           </span>
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span className="flex items-center gap-1.5">
-              <span className="size-1.5 rounded-full bg-amber-500 animate-pulse" />
+              <span className="size-1.5 rounded-full bg-warning animate-pulse" />
               <Trans>Waiting for authorization</Trans>
             </span>
             <span>
@@ -268,7 +268,6 @@ function PatBody({
     <div className="flex flex-col gap-3">
       {showGhOption ? (
         <>
-          {}
           <Button type="button" onClick={onGhSignIn}>
             <Trans>Continue in browser</Trans>
           </Button>
@@ -297,7 +296,6 @@ function PatBody({
         <Trans>Create a token on {host}</Trans>
         <ArrowUpRight className="inline size-3.5" aria-hidden />
       </a>
-      {}
       <p className="text-xs text-muted-foreground">
         <Trans>The token needs the repo and read:user scopes.</Trans>
       </p>
@@ -312,7 +310,6 @@ function PatBody({
         }}
       />
       {error && <p className="text-1sm text-destructive">{error}</p>}
-      {}
       {!showGhOption && (
         <div className="mt-1 rounded-md border border-border/60 bg-muted/40 p-3 text-sm text-muted-foreground">
           <p>

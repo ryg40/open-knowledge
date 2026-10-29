@@ -10,10 +10,12 @@ import {
   base16ToYaml,
   parseBase16Scheme,
 } from '@inkeep/open-knowledge-core/theme/base16';
+import type { MessageDescriptor } from '@lingui/core';
+import { msg } from '@lingui/core/macro';
 import { useLingui } from '@lingui/react/macro';
 import { ArrowUpRight } from 'lucide-react';
 import { useTheme } from 'next-themes';
-import { type ClipboardEvent, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { type ClipboardEvent, type Ref, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { FieldError } from '@/components/ui/field';
@@ -40,7 +42,13 @@ import { ThemePreviewCanvas } from './ThemePreviewCanvas';
 
 const SCHEMES_URL = 'https://github.com/tinted-theming/schemes';
 
-export function CustomThemeEditor({ userBinding }: { userBinding: ConfigBinding }) {
+export function CustomThemeEditor({
+  userBinding,
+  headingRef,
+}: {
+  userBinding: ConfigBinding;
+  headingRef?: Ref<HTMLHeadingElement>;
+}) {
   const { t } = useLingui();
   const {
     themes,
@@ -320,7 +328,12 @@ export function CustomThemeEditor({ userBinding }: { userBinding: ConfigBinding 
     >
       <div className="flex items-start justify-between gap-2">
         <div>
-          <h3 id="settings-custom-theme-title" className="font-medium text-sm">
+          <h3
+            ref={headingRef}
+            id="settings-custom-theme-title"
+            tabIndex={-1}
+            className="scroll-mt-6 font-medium text-sm"
+          >
             {isEditingSavedTheme ? t`Editing ${scheme.name}` : t`Custom theme`}
           </h3>
           <p className="text-1sm text-muted-foreground">
@@ -366,7 +379,6 @@ export function CustomThemeEditor({ userBinding }: { userBinding: ConfigBinding 
         </div>
       </div>
 
-      {}
       <ThemePreviewCanvas scheme={scheme} highlightSlot={hoveredSlot} className="w-full" />
 
       <ColorWorkbench
@@ -429,7 +441,7 @@ export function CustomThemeEditor({ userBinding }: { userBinding: ConfigBinding 
               rel="noopener noreferrer"
               onClick={(e) => dispatchExternalLinkClick(e, SCHEMES_URL)}
               onAuxClick={(e) => dispatchExternalLinkClick(e, SCHEMES_URL)}
-              className="inline-flex items-center gap-0.5 underline-offset-2 hover:text-foreground hover:underline"
+              className="inline-flex items-center gap-0.5 text-primary underline-offset-2 hover:underline"
             >
               {t`Browse hundreds of themes`}
               <ArrowUpRight aria-hidden className="size-3" />
@@ -584,19 +596,19 @@ function ColorWorkbench({
   );
 }
 
-type Translate = ReturnType<typeof useLingui>['t'];
+type Translate = (message: MessageDescriptor) => string;
 
-function describeParseError(error: Base16ParseError, t: Translate): string {
+function describeParseError(error: Base16ParseError, translate: Translate): string {
   switch (error.kind) {
     case 'unparseable':
       return error.line === undefined
-        ? t`That doesn’t parse as YAML or JSON.`
-        : t`That doesn’t parse as YAML or JSON — check line ${error.line}.`;
+        ? translate(msg`That doesn’t parse as YAML or JSON.`)
+        : translate(msg`That doesn’t parse as YAML or JSON — check line ${error.line}.`);
     case 'not-a-scheme':
-      return t`That parsed, but it isn’t a base16 theme.`;
+      return translate(msg`That parsed, but it isn’t a base16 theme.`);
     case 'missing-slots':
-      return t`Missing ${error.slots.length} slot(s): ${error.slots.join(', ')}`;
+      return translate(msg`Missing ${error.slots.length} slot(s): ${error.slots.join(', ')}`);
     case 'bad-hex':
-      return t`Not a hex color: ${error.slots.join(', ')}`;
+      return translate(msg`Not a hex color: ${error.slots.join(', ')}`);
   }
 }

@@ -1,5 +1,3 @@
-// oxlint-disable ok/no-raw-html-interactive-element -- pre-rule backlog — file uses raw <button>/<input>/<textarea> awaiting shadcn migration; tracked at https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-html-interactive-element
-
 // oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — physical margin/padding/inset utilities predate the rule; drain by swapping ml/mr → ms/me, pl/pr → ps/pe, left/right → start/end, then deleting this line. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-physical-direction-utility
 
 import { receivesProjectIntegrationWrite } from '@inkeep/open-knowledge-core/constants/editors';
@@ -324,7 +322,7 @@ function ConsentDialogForm({ payload, store, toast, detectionGraceMs }: ConsentD
           {payload.warnings.length > 0 ? (
             <div
               role="alert"
-              className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+              className="rounded-md border border-warning/40 px-3 py-2 text-sm text-foreground"
             >
               {payload.warnings.map((w) => (
                 <p key={w.kind} className="mb-1 last:mb-0">
@@ -337,7 +335,6 @@ function ConsentDialogForm({ payload, store, toast, detectionGraceMs }: ConsentD
           <form id={formId} onSubmit={onSubmit} data-testid="consent-form" className="space-y-6">
             {contentDirSafe ? <ProbePreview probe={probe} /> : null}
 
-            {}
             <ProjectAiToolsField
               detectedEditors={detectedEditors}
               checked={connectEditors}

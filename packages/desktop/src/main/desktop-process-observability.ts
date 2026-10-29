@@ -1,3 +1,5 @@
+import type { SystemMemorySample } from './system-memory-sample.ts';
+
 export const DESKTOP_PROCESS_SAMPLE_INTERVAL_MS = 60_000;
 export const MAX_DESKTOP_PROCESS_SAMPLE_ROWS = 12;
 export const MAX_DESKTOP_WINDOW_SAMPLE_ROWS = 8;
@@ -30,7 +32,14 @@ interface ObservedWebContents {
   isLoading(): boolean;
 }
 
-type WindowLifecycleEvent = 'closed' | 'show' | 'hide' | 'minimize' | 'restore';
+type WindowLifecycleEvent =
+  | 'closed'
+  | 'show'
+  | 'hide'
+  | 'minimize'
+  | 'restore'
+  | 'unresponsive'
+  | 'responsive';
 
 export interface ObservedBrowserWindow {
   readonly id: number;
@@ -64,6 +73,7 @@ interface WindowSample {
 
 interface DesktopProcessSample {
   capturedAt: string;
+  systemMemory?: SystemMemorySample;
   processCount: number;
   processesTruncated: number;
   processes: ProcessSample[];
@@ -93,6 +103,7 @@ export interface DesktopProcessObservabilityDeps<IntervalHandle> {
   now(): Date;
   getAppMetrics(): readonly ProcessMetricLike[];
   getAllWindows(): readonly ObservedBrowserWindow[];
+  readSystemMemory?(): SystemMemorySample | null;
   logger: DesktopProcessLogger;
   setInterval(callback: () => void, ms: number): IntervalHandle;
   clearInterval(handle: IntervalHandle): void;
@@ -213,6 +224,18 @@ export function createDesktopProcessObservability<IntervalHandle>(
     return details;
   };
 
+  const readSystemMemory = (): SystemMemorySample | null => {
+    try {
+      return deps.readSystemMemory?.() ?? null;
+    } catch (err) {
+      deps.logger.warn(
+        { event: 'desktop-process-observability.system-memory-failed', err },
+        'desktop system memory read failed',
+      );
+      return null;
+    }
+  };
+
   const capture = (): DesktopProcessSample | null => {
     try {
       const processes = deps
@@ -230,8 +253,10 @@ export function createDesktopProcessObservability<IntervalHandle>(
             (left.windowId ?? Number.MAX_SAFE_INTEGER) -
             (right.windowId ?? Number.MAX_SAFE_INTEGER),
         );
+      const systemMemory = readSystemMemory();
       return {
         capturedAt: deps.now().toISOString(),
+        ...(systemMemory === null ? {} : { systemMemory }),
         processCount: processes.length,
         processesTruncated: Math.max(0, processes.length - MAX_DESKTOP_PROCESS_SAMPLE_ROWS),
         processes: processes.slice(0, MAX_DESKTOP_PROCESS_SAMPLE_ROWS),
@@ -248,7 +273,9 @@ export function createDesktopProcessObservability<IntervalHandle>(
     }
   };
 
-  const sample = (trigger: 'startup' | 'interval' | 'renderer-ready'): void => {
+  const sample = (
+    trigger: 'startup' | 'interval' | 'renderer-ready' | 'renderer-unresponsive',
+  ): void => {
     const captured = capture();
     if (captured === null) return;
     lastSample = captured;
@@ -260,7 +287,15 @@ export function createDesktopProcessObservability<IntervalHandle>(
 
   const lifecycle = (
     window: ObservedBrowserWindow,
-    action: 'created' | 'shown' | 'hidden' | 'minimized' | 'restored' | 'closed',
+    action:
+      | 'created'
+      | 'shown'
+      | 'hidden'
+      | 'minimized'
+      | 'restored'
+      | 'closed'
+      | 'unresponsive'
+      | 'responsive',
     identity: WindowIdentity,
   ): void => {
     const details = inspectTrackedWindow(window, identity);
@@ -276,7 +311,7 @@ export function createDesktopProcessObservability<IntervalHandle>(
         'desktop live-window count failed',
       );
     }
-    deps.logger.info(
+    deps.logger[action === 'unresponsive' ? 'warn' : 'info'](
       {
         event: 'desktop-process-observability.window-lifecycle',
         action,
@@ -309,6 +344,11 @@ export function createDesktopProcessObservability<IntervalHandle>(
       window.on('minimize', () => lifecycle(window, 'minimized', identity));
       window.on('restore', () => lifecycle(window, 'restored', identity));
       window.on('closed', () => lifecycle(window, 'closed', identity));
+      window.on('unresponsive', () => {
+        lifecycle(window, 'unresponsive', identity);
+        sample('renderer-unresponsive');
+      });
+      window.on('responsive', () => lifecycle(window, 'responsive', identity));
     },
     snapshotForCrash(affectedRenderer) {
       const now = deps.now();

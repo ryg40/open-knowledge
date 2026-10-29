@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 // oxlint-disable ok/no-physical-direction-utility -- pre-rule backlog — physical margin/padding/inset utilities predate the rule; drain by swapping ml/mr → ms/me, pl/pr → ps/pe, left/right → start/end, then deleting this line. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-physical-direction-utility
 
 import { deriveAgentPosture } from '@inkeep/open-knowledge-core/acp/agent-posture';
@@ -163,10 +164,13 @@ import {
   getAgentThreadClient,
   ThreadContextWindowError,
   ThreadResumeError,
+  ThreadRetryError,
   useAgentThread,
   useAgentThreadModel,
 } from '@/lib/acp/thread-client';
 import {
+  flushStagedThreadDraft,
+  flushStagedThreadDraftContent,
   registerThreadDraftReader,
   subscribeStagedThreadDraft,
   subscribeStagedThreadDraftContent,
@@ -196,6 +200,7 @@ import {
   type ToolOutputMode,
   toolOutputMode,
 } from '@/lib/acp/tool-output-format';
+import { useBugReport } from '@/lib/bug-report-capture';
 import { docNameFromHash, filePathToDocName, hashFromDocName } from '@/lib/doc-hash';
 import { dispatchExternalLinkClick } from '@/lib/external-link';
 import { isOverlayLayerOpen } from '@/lib/overlay-layers';
@@ -272,6 +277,10 @@ function isAgentExitedError(err: unknown): boolean {
   return err instanceof Error && 'code' in err && err.code === 'agent-exited';
 }
 
+function isRetryFailureShownInThread(err: unknown): boolean {
+  return err instanceof ThreadRetryError && err.code === 'spawn-failed';
+}
+
 const RETRYABLE_FAILURE_REASONS: ReadonlySet<ThreadFailureDetail['reason']> = new Set([
   'connect',
   'session-setup',
@@ -300,9 +309,9 @@ function highlightStderr(machineDetail: string): ReactNode {
   return lines.map((line, i) => {
     const key = `${i}:${line.slice(0, 32)}`;
     const cls = STDERR_ERROR_PATTERN.test(line)
-      ? 'text-red-600 dark:text-red-400'
+      ? 'text-destructive'
       : STDERR_WARN_PATTERN.test(line)
-        ? 'text-amber-700 dark:text-amber-400'
+        ? 'text-warning'
         : '';
     return (
       <span key={key} className={cls}>
@@ -592,14 +601,15 @@ export function ThreadView({
 
   useEffect(() => {
     const stopStaging = subscribeStagedThreadDraft(info.threadId, (text) => {
-      composerRef.current?.appendText(text);
+      return composerRef.current?.appendText(text) ?? false;
     });
     const stopStagingContent = subscribeStagedThreadDraftContent(info.threadId, (content) => {
-      composerRef.current?.setDoc(content.doc);
-      if (content.attachments.length > 0) {
+      const accepted = composerRef.current?.setDoc(content.doc) ?? false;
+      if (accepted && content.attachments.length > 0) {
         attachmentsRef.current = [...attachmentsRef.current, ...content.attachments];
         setPendingAttachments(attachmentsRef.current);
       }
+      return accepted;
     });
     return () => {
       stopStagingContent();
@@ -670,6 +680,9 @@ export function ThreadView({
   const terminalCli = useHarnessTerminalCli(info.agent.id);
   const terminalAvailable = terminalLaunchAvailable();
   const [retryPending, setRetryPending] = useState(false);
+  const [retryFailure, setRetryFailure] = useState<string | null>(null);
+  const retryAttemptRef = useRef(0);
+  const leftFailedSinceRetryRef = useRef(false);
   const [revertedPositions, setRevertedPositions] = useState<ReadonlySet<number>>(new Set());
   const canQueue = !archived && turnActive;
   const pageList = useOptionalPageList();
@@ -762,7 +775,10 @@ export function ThreadView({
   }, [lastSeq]);
 
   useEffect(() => {
-    if (!canRetry) setRetryPending(false);
+    if (canRetry) return;
+    leftFailedSinceRetryRef.current = true;
+    setRetryPending(false);
+    setRetryFailure(null);
   }, [canRetry]);
 
   useEffect(() => {
@@ -924,7 +940,11 @@ export function ThreadView({
   const retryThread = (): void => {
     const stranded =
       awaitingSignIn && model !== null ? strandedMessageBeforeSignIn(model.items) : null;
+    retryAttemptRef.current += 1;
+    const attempt = retryAttemptRef.current;
+    leftFailedSinceRetryRef.current = false;
     setRetryPending(true);
+    setRetryFailure(null);
     void client
       .retryThread(info.threadId)
       .then((next) => {
@@ -933,7 +953,9 @@ export function ThreadView({
         void sendText(stranded.text, stranded.text, stranded.attachments);
       })
       .catch((err: unknown) => {
-        toast.error(t`Couldn't start ${agentName}: ${errorText(err)}`);
+        if (isRetryFailureShownInThread(err)) return;
+        if (attempt !== retryAttemptRef.current || leftFailedSinceRetryRef.current) return;
+        setRetryFailure(errorText(err));
       })
       .finally(() => setRetryPending(false));
   };
@@ -1173,8 +1195,7 @@ export function ThreadView({
           preview={imagePreview}
           onOpenChange={(open) => !open && setImagePreview(null)}
         />
-        {/* biome-ignore lint/a11y/noStaticElementInteractions: drop-target — keyboard/AT users have the + picker button in the composer; drop is a pointer-only affordance. */}
-        <div
+        <div // oxlint-disable-line jsx-a11y/no-static-element-interactions -- drop-target — keyboard/AT users have the + picker button in the composer; drop is a pointer-only affordance.
           className="relative flex min-h-0 flex-1 flex-col text-gray-800 dark:text-gray-200"
           data-agent-thread-root=""
           onDragEnter={(event) => {
@@ -1214,7 +1235,6 @@ export function ThreadView({
           <DocPathResolverReadyContext value={resolverReady}>
             <ReferenceRulesContext value={referenceRules}>
               <ThreadHeader info={info} followFile={followFile} onToggleFollow={toggleFollow} />
-              {}
               <AgentNoticeAnnouncer
                 notices={agentNotices}
                 agentName={agentName}
@@ -1416,7 +1436,7 @@ export function ThreadView({
                 !cancelPending &&
                 !cancelStalled ? (
                   <div
-                    className="flex items-center gap-2 border-amber-500/30 border-t bg-amber-500/5 px-3 py-1.5 text-amber-700 text-xs dark:text-amber-400"
+                    className="flex items-center gap-2 border-warning/30 border-t bg-warning/5 px-3 py-1.5 text-warning text-xs"
                     data-testid="agent-thread-stalled"
                   >
                     <span className="flex-1">
@@ -1442,7 +1462,7 @@ export function ThreadView({
               ) : null}
               {cancelStalled && turnActive ? (
                 <div
-                  className="flex items-center gap-2 border-amber-500/30 border-t bg-amber-500/5 px-3 py-1.5 text-amber-700 text-xs dark:text-amber-400"
+                  className="flex items-center gap-2 border-warning/30 border-t bg-warning/5 px-3 py-1.5 text-warning text-xs"
                   data-testid="agent-thread-cancel-stalled"
                 >
                   <span className="flex-1">
@@ -1494,9 +1514,12 @@ export function ThreadView({
               >
                 {crashAnnouncement}
               </span>
+              {retryFailure !== null && canRetry && !retryPending ? (
+                <RetryFailedNotice key={retryFailure} agentName={agentName} detail={retryFailure} />
+              ) : null}
               {resumeFailureMessage !== '' && !newChatOfferInTranscript ? (
                 <div
-                  className="flex items-center gap-2 border-amber-500/30 border-t bg-amber-500/5 px-3 py-1.5 text-amber-700 text-xs dark:text-amber-400"
+                  className="flex items-center gap-2 border-warning/30 border-t bg-warning/5 px-3 py-1.5 text-warning text-xs"
                   data-testid="agent-thread-resume-failed"
                 >
                   <span className="flex-1">{resumeFailureMessage}</span>
@@ -1522,6 +1545,10 @@ export function ThreadView({
                 hasStartedWork={threadHasUserMessage({ items })}
                 onNewChat={startFreshThread}
                 composerRef={composerRef}
+                onComposerReady={() => {
+                  flushStagedThreadDraft(info.threadId);
+                  flushStagedThreadDraftContent(info.threadId);
+                }}
                 mentionRecency={mentionRecency}
                 onSubmit={submit}
                 canPrompt={canPrompt}
@@ -1564,12 +1591,14 @@ function PermissionPostureBadge({ info }: { info: ThreadInfo }): ReactNode {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        {/* biome-ignore lint/a11y/noNoninteractiveTabindex: a status indicator whose detail lives in its tooltip must be focusable or keyboard users can never surface it — same rationale as the tooltip-on-disabled-button span wrapper. */}
-        <span tabIndex={0} role="img" aria-label={label} className={focusRing}>
-          <span
-            className="inline-flex shrink-0 text-amber-500 dark:text-amber-400"
-            data-testid="agent-thread-posture"
-          >
+        <span
+          // oxlint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- a status indicator whose detail lives in its tooltip must be focusable or keyboard users can never surface it — same rationale as the tooltip-on-disabled-button span wrapper.
+          tabIndex={0}
+          role="img"
+          aria-label={label}
+          className={focusRing}
+        >
+          <span className="inline-flex shrink-0 text-warning" data-testid="agent-thread-posture">
             <ShieldAlert className="size-3.5" aria-hidden="true" />
           </span>
         </span>
@@ -1787,6 +1816,7 @@ function AgentSettingsPopover({
           <DropdownMenuContent
             align="end"
             className="w-60"
+            data-bug-report-launcher=""
             data-testid="agent-thread-settings-popover"
           >
             <DropdownMenuLabel className="font-normal text-muted-foreground">
@@ -1880,9 +1910,12 @@ function AgentSettingsPopover({
           ) : null}
         </AgentSettingsTrigger>
       </DropdownMenuTrigger>
-      {}
-      <DropdownMenuContent align="end" className="w-60" data-testid="agent-thread-settings-popover">
-        {}
+      <DropdownMenuContent
+        align="end"
+        className="w-60"
+        data-bug-report-launcher=""
+        data-testid="agent-thread-settings-popover"
+      >
         {info.archived === true ? (
           <DropdownMenuLabel
             className="font-normal text-muted-foreground"
@@ -1918,7 +1951,7 @@ function AgentSettingsPopover({
                 const code = err instanceof ThreadContextWindowError ? err.code : null;
                 if (code === 'spawn-failed') {
                   toast.error(
-                    t`${info.agent.name} couldn't restart on that context window. Use Retry to bring it back.`,
+                    t`${info.agent.name} couldn't restart on that context window. Use Try again to bring it back.`,
                   );
                   return;
                 }
@@ -2129,9 +2162,7 @@ function ConfigSelectSub({
           {selectOptionSummary(agentId, option)}
         </span>
       </DropdownMenuSubTrigger>
-      {}
       <DropdownMenuSubContent className="max-h-[min(22rem,var(--radix-dropdown-menu-content-available-height))] max-w-72 overscroll-contain">
-        {}
         <DropdownMenuLabel>{option.name}</DropdownMenuLabel>
         <DropdownMenuRadioGroup value={option.currentValue} onValueChange={onSelect}>
           {flat.map((entry) => (
@@ -2166,7 +2197,6 @@ function ConfigRadioItem({
       className="items-start"
       data-testid={`agent-thread-config-option-${entry.value}`}
     >
-      {}
       <div className="flex min-w-0 flex-col">
         <span className="truncate">{entry.name}</span>
         {entry.description ? (
@@ -2500,10 +2530,10 @@ function AgentNoticeCard({
   return (
     <div
       role="note"
-      className="rounded-md border border-amber-500/40 bg-amber-500/5 px-2 py-1.5 text-xs"
+      className="rounded-md border border-warning/40 px-2 py-1.5 text-xs"
       data-testid="agent-thread-agent-notice"
     >
-      <p className="flex items-center gap-1.5 font-medium text-amber-700 dark:text-amber-400">
+      <p className="flex items-center gap-1.5 font-medium text-warning">
         <TriangleAlert aria-hidden="true" className="size-3.5 shrink-0" />
         {t`Warning`}
       </p>
@@ -2677,7 +2707,6 @@ function ThreadAuthPrompt({
       data-testid="agent-thread-notice"
     >
       <RegisteredAgentIcon agentId={agent.id} iconUrl={agent.iconUrl} className="size-12" />
-      {}
       <div className="sr-only" role="status" aria-live="polite">
         {signingIn ? t`Signing in to ${agentName}` : ''}
       </div>
@@ -2713,7 +2742,6 @@ function ThreadAuthPrompt({
               {authPending === method.id ? (
                 <Spinner className="size-3.5" aria-hidden="true" />
               ) : null}
-              {}
               {signInMethods.length === 1 ? t`Sign in with ${method.name}` : method.name}
             </Button>
           ))}
@@ -2758,7 +2786,7 @@ function ThreadAuthPrompt({
                   {t`Retrying…`}
                 </>
               ) : (
-                t`Retry`
+                t`Try again`
               )}
             </Button>
           ) : null}
@@ -2783,6 +2811,50 @@ function ThreadAuthPrompt({
           data-testid="agent-thread-notice-details"
         >
           {machineDetail}
+        </pre>
+      ) : null}
+    </div>
+  );
+}
+
+function RetryFailedNotice({
+  agentName,
+  detail,
+}: {
+  agentName: string;
+  detail: string;
+}): ReactNode {
+  const { t } = useLingui();
+  const [showDetail, setShowDetail] = useState(false);
+  return (
+    <div
+      className="flex flex-col gap-1 border-destructive/30 border-t bg-destructive/5 px-3 py-1.5 text-destructive text-xs"
+      data-testid="agent-thread-retry-failed"
+    >
+      <div className="flex items-center gap-2">
+        <span className="flex-1" role="alert" data-testid="agent-thread-retry-failed-headline">
+          {t`Couldn't restart ${agentName}.`}
+        </span>
+        {detail !== '' ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-auto shrink-0 p-0 text-[11px] underline hover:bg-transparent"
+            onClick={() => setShowDetail((open) => !open)}
+            aria-expanded={showDetail}
+            data-testid="agent-thread-retry-failed-details-toggle"
+          >
+            {showDetail ? t`Hide details` : t`Show details`}
+          </Button>
+        ) : null}
+      </div>
+      {showDetail && detail !== '' ? (
+        <pre
+          className="overflow-x-auto whitespace-pre-wrap font-mono text-[10px] opacity-70"
+          data-testid="agent-thread-retry-failed-details"
+        >
+          {detail}
         </pre>
       ) : null}
     </div>
@@ -2847,8 +2919,8 @@ function ThreadNotice({
       className={cn(
         'rounded-md border px-2 py-1.5 text-xs',
         item.tone === 'error'
-          ? 'border-red-500/30 bg-red-500/5 text-red-600 dark:text-red-400'
-          : 'border-amber-500/30 bg-amber-500/5 text-amber-700 dark:text-amber-400',
+          ? 'border-destructive/30 bg-destructive/5 text-destructive'
+          : 'border-warning/30 bg-warning/5 text-warning',
       )}
       data-testid="agent-thread-notice"
       data-notice-attempts={item.attempts}
@@ -2931,7 +3003,7 @@ function ThreadNotice({
                     {t`Retrying…`}
                   </>
                 ) : (
-                  t`Retry`
+                  t`Try again`
                 )}
               </Button>
             </div>
@@ -2996,7 +3068,6 @@ function MessageBubble({
         className="w-full wrap-break-word text-sm text-foreground"
         data-testid="agent-thread-agent-message"
       >
-        {}
         <AgentMarkdown text={item.text} />
       </div>
     );
@@ -3031,7 +3102,6 @@ function MessageBubble({
           />
         ) : (
           <>
-            {}
             <AgentMarkdown text={item.text} />
             {attachments !== undefined && attachments.length > 0 ? (
               <UserMessageAttachments attachments={attachments} />
@@ -3428,7 +3498,6 @@ function ToolCallCard({
           {display.preview}
         </span>
       )}
-      {}
       <span className="ml-auto flex shrink-0 items-center gap-1.5">
         <PermissionRefusalMark permission={permission} status={call.status} />
         <ToolStatusIndicator
@@ -3653,8 +3722,8 @@ function InlineDiff({
               key={index}
               className={cn(
                 'px-2',
-                row.type === 'add' && 'bg-green-500/10 text-green-700 dark:text-green-400',
-                row.type === 'del' && 'bg-red-500/10 text-red-700 dark:text-red-400',
+                row.type === 'add' && 'bg-success/10 text-success',
+                row.type === 'del' && 'bg-destructive/10 text-destructive',
                 row.type === 'ctx' && 'text-muted-foreground',
               )}
             >
@@ -3753,7 +3822,7 @@ function ShellCommandBlock({ id, command }: { id: string; command: string }): Re
         id={id}
         dir="ltr"
         translate="no"
-        // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard-focusable scroll container — a long command scrolls inside this bounded box, and Safari leaves overflow:auto elements out of the tab order.
+        // oxlint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- keyboard-focusable scroll container — a long command scrolls inside this bounded box, and Safari leaves overflow:auto elements out of the tab order.
         tabIndex={0}
         className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/50 px-2 py-1 text-start font-mono text-[11px] leading-relaxed"
       >
@@ -3768,7 +3837,7 @@ function ShellCommandBlock({ id, command }: { id: string; command: string }): Re
         </code>
       </pre>
       {concealed ? (
-        <p className="mt-1 text-amber-700 text-xs dark:text-amber-400">
+        <p className="mt-1 text-warning text-xs">
           {t`This command contains hidden characters that can make it look different from what runs. They are shown here as ⟨U+…⟩.`}
         </p>
       ) : null}
@@ -4020,10 +4089,7 @@ function RuntimeConsentPrompt({
           className="flex items-center gap-1.5 rounded-md border border-border/60 bg-muted/20 px-2.5 py-2 text-muted-foreground text-xs"
           data-testid="agent-thread-runtime-consent"
         >
-          <Check
-            className="size-3.5 shrink-0 text-green-600 dark:text-green-400"
-            aria-hidden="true"
-          />
+          <Check className="size-3.5 shrink-0 text-success" aria-hidden="true" />
           <span>{t`Installed ${item.displayName} ${item.version}`}</span>
         </div>
       );
@@ -4048,7 +4114,6 @@ function RuntimeConsentPrompt({
           <Spinner className="size-3.5 shrink-0" aria-hidden="true" />
           <span id={downloadLabelId}>{t`Downloading ${item.displayName} ${item.version}…`}</span>
         </div>
-        {}
         <Progress
           value={pct}
           indeterminateFillPercent={40}
@@ -4067,7 +4132,7 @@ function RuntimeConsentPrompt({
 
   return (
     <div
-      className="rounded-md border border-blue-500/40 bg-blue-500/5 px-2.5 py-2 text-sm"
+      className="rounded-md border border-info/40 px-2.5 py-2 text-sm"
       data-testid="agent-thread-runtime-consent"
     >
       <div className="mb-1 flex items-center gap-1.5 font-medium">
@@ -4130,10 +4195,7 @@ function PiBridgeOutcomeRow({
     >
       <div className="flex items-start gap-1.5">
         {ready ? (
-          <Check
-            className="mt-px size-3.5 shrink-0 text-green-600 dark:text-green-400"
-            aria-hidden="true"
-          />
+          <Check className="mt-px size-3.5 shrink-0 text-success" aria-hidden="true" />
         ) : null}
         <span>
           {outcome.state === 'ready'
@@ -4202,7 +4264,7 @@ function PiBridgeConsentPrompt({
   const otherExtensions = prompt.otherExtensions.join(', ');
   return (
     <div
-      className="rounded-md border border-blue-500/40 bg-blue-500/5 px-2.5 py-2 text-sm"
+      className="rounded-md border border-info/40 px-2.5 py-2 text-sm"
       data-testid="agent-thread-pi-bridge"
     >
       <div className="mb-1 flex items-center gap-1.5 font-medium">
@@ -4279,7 +4341,11 @@ function ContextUsageRing({
   const radius = 6;
   const circumference = 2 * Math.PI * radius;
   const tone =
-    percent >= 90 ? 'text-red-500' : percent >= 75 ? 'text-amber-500' : 'text-muted-foreground/60';
+    percent >= 90
+      ? 'text-destructive'
+      : percent >= 75
+        ? 'text-warning'
+        : 'text-muted-foreground/60';
   const left = 100 - percent;
   const usedLabel = formatCompactTokens(used);
   const sizeLabel = formatCompactTokens(size);
@@ -4313,7 +4379,6 @@ function ContextUsageRing({
         </svg>
       </TooltipTrigger>
       <TooltipContent side="top">
-        {}
         <div className="flex flex-col items-center gap-0.5 text-center">
           <span className="text-background/60">{t`Context window:`}</span>
           <span>{t`${percent}% used (${left}% left)`}</span>
@@ -4329,6 +4394,7 @@ function ThreadComposer({
   hasStartedWork,
   onNewChat,
   composerRef,
+  onComposerReady,
   mentionRecency,
   onSubmit,
   canPrompt,
@@ -4357,6 +4423,7 @@ function ThreadComposer({
   hasStartedWork: boolean;
   onNewChat: () => void;
   composerRef: RefObject<ComposerMentionInputHandle | null>;
+  onComposerReady: () => void;
   mentionRecency: MentionRecency;
   onSubmit: () => void;
   canPrompt: boolean;
@@ -4385,7 +4452,7 @@ function ThreadComposer({
   onIngestAllFiles: (files: readonly File[]) => Promise<void>;
   onRemovePendingAttachment: (index: number) => void;
 }): ReactNode {
-  const [reportOpen, setReportOpen] = useState(false);
+  const bugReport = useBugReport();
   const canReportProblem = typeof window !== 'undefined' && window.okDesktop != null;
   const { t, i18n } = useLingui();
   const agentName = agentDisplayName(info.agent.name);
@@ -4450,9 +4517,7 @@ function ThreadComposer({
         {queue.length > 0 && !archived ? (
           <QueuedMessageList threadId={info.threadId} queue={queue} turnActive={turnActive} />
         ) : null}
-        {}
-        {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-only affordance — pressing the card's whitespace focuses the composer input; keyboard/AT users reach it via Tab. See focus-composer-on-card-pointer.ts. */}
-        <div
+        <div // oxlint-disable-line jsx-a11y/no-static-element-interactions -- pointer-only affordance — pressing the card's whitespace focuses the composer input; keyboard/AT users reach it via Tab. See focus-composer-on-card-pointer.ts.
           onMouseDown={(event) => focusComposerInputOnCardPointer(event, composerRef)}
           onPaste={(event) => {
             const files = collectImageFiles(event.clipboardData);
@@ -4466,8 +4531,6 @@ function ThreadComposer({
           }}
           className="relative cursor-text rounded-lg border border-input bg-transparent transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 dark:bg-input/30"
         >
-          {}
-          {}
           {hasQueuedComments ? (
             <ComposerContextChips className="px-3 pt-2 pb-1">
               <QueuedCommentsChip
@@ -4488,6 +4551,7 @@ function ThreadComposer({
           <div className="relative">
             <ComposerMentionInput
               ref={composerRef}
+              onReady={onComposerReady}
               ariaLabel={t`Message ${agentName}`}
               ariaDescribedBy={placeholderRotating ? composerHintId : undefined}
               onEmptyChange={setIsEmpty}
@@ -4519,7 +4583,6 @@ function ThreadComposer({
               />
             ) : null}
           </div>
-          {}
           <div className="flex items-center gap-0.5 px-1.5 pt-1 pb-1.5">
             <ComposerAddMenu
               composerRef={composerRef}
@@ -4554,22 +4617,22 @@ function ThreadComposer({
               info={info}
               hasStartedWork={hasStartedWork}
               onNewChat={onNewChat}
-              {...(canReportProblem ? { onReportProblem: () => setReportOpen(true) } : {})}
+              {...(canReportProblem
+                ? { onReportProblem: () => bugReport.start({ launcherBorne: true }) }
+                : {})}
               triggerRef={settingsTriggerRef}
             />
             {canReportProblem ? (
               <ReportBugDialog
-                open={reportOpen}
-                onOpenChange={setReportOpen}
+                capture={bugReport.capture}
+                onClose={bugReport.close}
                 agentChat={{ threadId: info.threadId }}
-                launcherBorne
               />
             ) : null}
             <div className="ml-auto flex items-center gap-1.5">
               {usagePercent !== null && usage?.used !== undefined && usage?.size !== undefined ? (
                 <ContextUsageRing used={usage.used} size={usage.size} percent={usagePercent} />
               ) : null}
-              {}
               {turnActive && (cancelPending || !hasSendableContent) ? (
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -4589,12 +4652,10 @@ function ThreadComposer({
                       )}
                     </Button>
                   </TooltipTrigger>
-                  {}
                   <TooltipContent side="top">{t`Stop (Esc)`}</TooltipContent>
                 </Tooltip>
               ) : canQueue ? (
                 <>
-                  {}
                   {!isEmpty ? (
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -4616,7 +4677,6 @@ function ThreadComposer({
                   ) : null}
                   <Tooltip>
                     <TooltipTrigger asChild>{sendButton}</TooltipTrigger>
-                    {}
                     <TooltipContent side="top">{t`Queues behind the running turn`}</TooltipContent>
                   </Tooltip>
                 </>
@@ -4773,7 +4833,6 @@ function QueuedMessageRow({
       </span>
       {held ? (
         <>
-          {}
           <span className="shrink-0 font-medium text-[10px] text-muted-foreground/70 uppercase tracking-wide">
             {t`Held`}
           </span>
@@ -4837,8 +4896,7 @@ function QueuedMessageRow({
 function ChatPanelDropOverlay({ onDismiss }: { onDismiss: () => void }): ReactNode {
   const { t } = useLingui();
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: transient drop overlay — keyboard/AT users never see it (drag-only surface), and click-to-dismiss is a safety escape for a stuck overlay.
-    // biome-ignore lint/a11y/useKeyWithClickEvents: same reason — the overlay is drag-only, never keyboard-reachable, so a keyboard handler would be dead code.
+    // oxlint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events -- transient drop overlay — keyboard/AT users never see it (drag-only surface), and click-to-dismiss is a safety escape for a stuck overlay.
     <div
       className="pointer-events-auto absolute inset-0 z-20 flex items-center justify-center bg-background/85 backdrop-blur-sm"
       onClick={onDismiss}

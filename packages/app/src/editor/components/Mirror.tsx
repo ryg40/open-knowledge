@@ -1,10 +1,11 @@
 import { Trans } from '@lingui/react/macro';
 import { Copy, Link2, Link2Off } from 'lucide-react';
+import { authoredText } from '../utils/authored-text.ts';
 import { useMirrorSource } from './use-mirror-source.ts';
 
 interface MirrorProps {
-  src?: string;
-  anchor?: string;
+  src?: unknown;
+  name?: unknown;
 }
 
 function StatusFrame(props: { tone: 'placeholder' | 'error'; children: React.ReactNode }) {
@@ -27,16 +28,16 @@ function StatusFrame(props: { tone: 'placeholder' | 'error'; children: React.Rea
 }
 
 export function Mirror(props: MirrorProps) {
-  const src = props.src ?? '';
-  const anchor = props.anchor ?? '';
-  const status = useMirrorSource(src, anchor);
+  const src = authoredText(props.src);
+  const name = authoredText(props.name);
+  const status = useMirrorSource(src, name);
 
   if (status.kind === 'empty-props') {
     return (
       <StatusFrame tone="placeholder">
         <Trans>
           <span className="font-medium">Mirror — pick a source.</span> Set <code>src</code> +{' '}
-          <code>anchor</code> via the property panel to point at a <code>{'<MirrorSource>'}</code>{' '}
+          <code>name</code> via the property panel to point at a <code>{'<MirrorSource>'}</code>{' '}
           elsewhere.
         </Trans>
       </StatusFrame>
@@ -44,7 +45,7 @@ export function Mirror(props: MirrorProps) {
   }
 
   if (status.kind === 'loading') {
-    const mirrorRef = src && anchor ? `${src}#${anchor}` : '';
+    const mirrorRef = src && name ? `${src}#${name}` : '';
     return (
       <StatusFrame tone="placeholder">
         <Trans>
@@ -76,12 +77,12 @@ export function Mirror(props: MirrorProps) {
     );
   }
 
-  if (status.kind === 'anchor-not-found') {
-    const mirrorSourceTag = `<MirrorSource id="${anchor}">`;
+  if (status.kind === 'name-not-found') {
+    const mirrorSourceTag = `<MirrorSource name="${name}">`;
     return (
       <StatusFrame tone="error">
         <Trans>
-          <span className="font-medium">Mirror anchor not found.</span> No{' '}
+          <span className="font-medium">Mirror name not found.</span> No{' '}
           <code>{mirrorSourceTag}</code> exists in <code>{src}</code>.
         </Trans>
       </StatusFrame>
@@ -92,9 +93,8 @@ export function Mirror(props: MirrorProps) {
     <div
       className='ok-mirror-resolved relative -mx-3 prose-no-margin rounded-md border border-dashed border-transparent px-3 py-2 transition-colors [.jsx-component-wrapper:hover_&]:border-border/40 [.jsx-component-wrapper[data-selected="true"]_&]:border-border/40'
       data-mirror-src={src}
-      data-mirror-anchor={anchor}
+      data-mirror-name={name}
     >
-      {}
       <div
         className='ok-mirror-badge pointer-events-none absolute -top-2.5 left-2 flex items-center gap-1 rounded-md bg-background px-1.5 text-xs text-muted-foreground opacity-0 transition-opacity [.jsx-component-wrapper:hover_&]:opacity-100 [.jsx-component-wrapper[data-selected="true"]_&]:opacity-100'
         aria-hidden="true"
@@ -106,8 +106,10 @@ export function Mirror(props: MirrorProps) {
           </Trans>
         </span>
       </div>
-      {/* biome-ignore lint/security/noDangerouslySetInnerHtml: shared sanitization pipeline gates URL schemes + element-level passthrough — see `mdast-to-html.ts`. */}
-      <div dangerouslySetInnerHTML={{ __html: status.html }} />
+      <div
+        // oxlint-disable-next-line react/no-danger -- shared sanitization pipeline gates URL schemes + element-level passthrough — see `mdast-to-html.ts`.
+        dangerouslySetInnerHTML={{ __html: status.html }}
+      />
     </div>
   );
 }

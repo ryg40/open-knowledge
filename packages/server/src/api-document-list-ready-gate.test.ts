@@ -45,10 +45,7 @@ describe('handleDocumentList ready gating', () => {
       writeFileSync(join(tmp, 'notes.md'), '# Notes\n', 'utf-8');
 
       const fileIndex = new Map<string, FileIndexEntry>();
-      let resolveReady!: () => void;
-      const ready = new Promise<void>((res) => {
-        resolveReady = res;
-      });
+      const { promise: ready, resolve: resolveReady } = Promise.withResolvers<void>();
 
       const hocuspocus = new Hocuspocus({ quiet: true });
       const ext = createApiExtension({
@@ -80,7 +77,7 @@ describe('handleDocumentList ready gating', () => {
         size: 7,
         modified: new Date().toISOString(),
         canonicalPath: join(tmp, 'log.md'),
-        inode: 0,
+        inode: '',
         aliases: [],
         kind: 'markdown',
       });
@@ -88,7 +85,7 @@ describe('handleDocumentList ready gating', () => {
         size: 9,
         modified: new Date().toISOString(),
         canonicalPath: join(tmp, 'notes.md'),
-        inode: 0,
+        inode: '',
         aliases: [],
         kind: 'markdown',
       });
@@ -122,7 +119,7 @@ describe('handleDocumentList ready gating', () => {
             size: 9,
             modified: now,
             canonicalPath: join(tmp, 'notes/page.md'),
-            inode: 0,
+            inode: '',
             aliases: [],
             kind: 'markdown',
           },
@@ -133,7 +130,7 @@ describe('handleDocumentList ready gating', () => {
             size: 64,
             modified: now,
             canonicalPath: join(tmp, 'data/example.csv'),
-            inode: 1,
+            inode: '0:1',
             aliases: [],
             kind: 'file',
           },
@@ -204,7 +201,7 @@ describe('handleDocumentList ready gating', () => {
             size: 4,
             modified: new Date().toISOString(),
             canonicalPath: join(tmp, 'only.md'),
-            inode: 0,
+            inode: '',
             aliases: [],
             kind: 'markdown',
           },

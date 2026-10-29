@@ -1,4 +1,5 @@
 import {
+  BRACKETED_PASTE_ENABLE_MARKER,
   isWindowsShellFamily,
   isWindowsShellLaunchFailureReason,
   type TerminalLaunchCommand,
@@ -17,6 +18,7 @@ import type {
   TerminalShellNoticeReason,
 } from '../shared/bridge-contract.ts';
 import type { SendableWebContents } from '../shared/ipc-send.ts';
+import type { PtyPhaseTrace } from '../shared/pty-phase-trace.ts';
 import type {
   PtyCreateMessage,
   PtyHostIncomingMessage,
@@ -53,6 +55,7 @@ export interface TerminalManagerDeps {
   recordShellExit?: (info: { crashed: boolean }) => void;
   recordTerminalSession?: () => void;
   recordConcurrentSessions?: (info: { count: number }) => void;
+  phaseTrace?: PtyPhaseTrace;
 }
 
 interface TerminalCreateRequest {
@@ -82,6 +85,8 @@ interface SessionState {
   pendingCreate: PtyCreateMessage | null;
   outbound: string;
   replay: string;
+  bracketedPaste: boolean;
+  modeScanTail: string;
   flushToken: TimerToken | null;
   staleToken: TimerToken | null;
   pendingBytes: number;
@@ -89,6 +94,7 @@ interface SessionState {
   killRequested: boolean;
   commandRan: boolean;
   sawOutput: boolean;
+  relayTraced: boolean;
   spawnedAt: number | null;
   customLabel: string | null;
   ordinal: number | null;
@@ -134,6 +140,29 @@ export const DEFAULT_PTY_COLS = 80;
 export const DEFAULT_PTY_ROWS = 24;
 const MAX_PTY_DIMENSION = 1000;
 
+const ESC = '\u001b';
+const MODE_SCAN_CARRY_MAX_CHARS = 256;
+const PRIVATE_MODE_OR_RESET_RE = new RegExp(`${ESC}(?:\\[\\?([0-9;]*)([hl])|c)`, 'g');
+const UNTERMINATED_ESCAPE_RE = new RegExp(`^${ESC}(?:\\[[0-?]*[ -/]*)?$`);
+
+function trackBracketedPaste(session: SessionState, data: string): void {
+  const scanned = session.modeScanTail + data;
+  for (const match of scanned.matchAll(PRIVATE_MODE_OR_RESET_RE)) {
+    if (match[2] === undefined) {
+      session.bracketedPaste = false;
+    } else if ((match[1] ?? '').split(';').includes('2004')) {
+      session.bracketedPaste = match[2] === 'h';
+    }
+  }
+  const pending = scanned.slice(scanned.lastIndexOf(ESC));
+  session.modeScanTail =
+    scanned.includes(ESC) &&
+    pending.length <= MODE_SCAN_CARRY_MAX_CHARS &&
+    UNTERMINATED_ESCAPE_RE.test(pending)
+      ? pending
+      : '';
+}
+
 export function clampPtyDimension(value: unknown, fallback: number): number {
   return typeof value === 'number' &&
     Number.isInteger(value) &&
@@ -172,6 +201,7 @@ export function createTerminalManager(deps: TerminalManagerDeps): TerminalManage
   const shutdownMs = deps.shutdownMs ?? DEFAULT_SHUTDOWN_MS;
   const handles = new Map<number, PtyWindowHandle>();
   const pendingShutdowns = new Set<Promise<void>>();
+  const tracedUtilityData = new Set<string>();
   let announcedShutdown: AppShutdownCause | null = null;
 
   function safeKillUtility(handle: PtyWindowHandle): void {
@@ -245,12 +275,35 @@ export function createTerminalManager(deps: TerminalManagerDeps): TerminalManage
     deps.sendNotice?.(handle.webContents, payload);
   }
 
-  function deliver(handle: PtyWindowHandle, ptyId: string, session: SessionState): void {
-    if (handle.webContents.isDestroyed?.()) return;
+  function deliver(
+    windowId: number,
+    handle: PtyWindowHandle,
+    ptyId: string,
+    session: SessionState,
+  ): void {
     if (session.outbound.length === 0) return;
+    const traceRelay = !session.relayTraced;
+    session.relayTraced = true;
+    if (handle.webContents.isDestroyed?.()) {
+      if (traceRelay) {
+        deps.phaseTrace?.mark('main-data-relay-skipped', 'point', { windowId, ptyId });
+      }
+      return;
+    }
     const chunk = session.outbound;
     session.outbound = '';
-    pushData(handle, ptyId, chunk);
+    if (traceRelay) {
+      deps.phaseTrace?.mark('main-data-relay', 'begin', { windowId, ptyId });
+      let returned = false;
+      try {
+        pushData(handle, ptyId, chunk);
+        returned = true;
+      } finally {
+        deps.phaseTrace?.mark('main-data-relay', 'end', { windowId, ptyId, ok: returned });
+      }
+    } else {
+      pushData(handle, ptyId, chunk);
+    }
     session.pendingBytes += chunk.length;
     if (!session.paused && !session.killRequested && session.pendingBytes > highWater) {
       handle.utility.postMessage({ type: 'pause', ptyId });
@@ -263,7 +316,7 @@ export function createTerminalManager(deps: TerminalManagerDeps): TerminalManage
     const session = handle?.sessions.get(ptyId);
     if (!handle || !session) return;
     session.flushToken = null;
-    deliver(handle, ptyId, session);
+    deliver(windowId, handle, ptyId, session);
   }
 
   function scheduleFlush(windowId: number, ptyId: string, session: SessionState): void {
@@ -344,6 +397,18 @@ export function createTerminalManager(deps: TerminalManagerDeps): TerminalManage
       return;
     }
     const session = handle.sessions.get(message.ptyId);
+    if (
+      message.type === 'data' &&
+      deps.phaseTrace !== undefined &&
+      !tracedUtilityData.has(message.ptyId)
+    ) {
+      tracedUtilityData.add(message.ptyId);
+      deps.phaseTrace.mark('utility-data-received', 'point', {
+        windowId,
+        ptyId: message.ptyId,
+        currentSession: session !== undefined,
+      });
+    }
     if (!session) return;
 
     switch (message.type) {
@@ -351,6 +416,7 @@ export function createTerminalManager(deps: TerminalManagerDeps): TerminalManage
         session.sawOutput = true;
         session.outbound += message.data;
         session.replay += message.data;
+        trackBracketedPaste(session, message.data);
         if (session.replay.length > replayCap) {
           session.replay = session.replay.slice(session.replay.length - replayCap);
         }
@@ -360,7 +426,7 @@ export function createTerminalManager(deps: TerminalManagerDeps): TerminalManage
         const { ptyId } = message;
         const exitCode = message.exitCode ?? -1;
         clearSessionTimers(session);
-        deliver(handle, ptyId, session);
+        deliver(windowId, handle, ptyId, session);
         maybeRecordSession(session);
         handle.sessions.delete(ptyId);
         deps.recordShellExit?.({ crashed: false });
@@ -552,12 +618,15 @@ export function createTerminalManager(deps: TerminalManagerDeps): TerminalManage
         },
         outbound: '',
         replay: '',
+        bracketedPaste: false,
+        modeScanTail: '',
         flushToken: null,
         pendingBytes: 0,
         paused: false,
         killRequested: false,
         commandRan: false,
         sawOutput: false,
+        relayTraced: false,
         spawnedAt: null,
         customLabel: null,
         ordinal: null,
@@ -738,7 +807,9 @@ export function createTerminalManager(deps: TerminalManagerDeps): TerminalManage
       handle.webContents = req.webContents;
       return {
         ok: true,
-        replay: session.replay,
+        replay: session.bracketedPaste
+          ? `${BRACKETED_PASTE_ENABLE_MARKER}${session.replay}`
+          : session.replay,
         ...(session.shellFamily === null ? {} : { shellFamily: session.shellFamily }),
         ...(session.shellNoticeReason === null
           ? {}

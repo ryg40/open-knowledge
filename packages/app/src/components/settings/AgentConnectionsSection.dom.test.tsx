@@ -1216,13 +1216,14 @@ describe('AgentConnectionsSection — connection status and action', () => {
   test('Not connected shows only when the row is on', async () => {
     renderSection(async () => result(snapshotWith([])));
     const onRow = await waitFor(() => terminalRow('claude'));
-    expect(within(onRow).getByText('Not connected')).toBeTruthy();
+    await within(onRow).findByText('Not connected');
 
     cleanup();
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ 'terminal:claude': false }));
     reloadEnabledAgentsFromStorage();
     renderSection(async () => result(snapshotWith([])));
     const offRow = await waitFor(() => terminalRow('claude'));
+    await within(desktopRow('claude-code')).findByText('Not connected');
     expect(within(offRow).queryByText('Not connected')).toBeNull();
     expect(within(offRow).getByRole('switch')).toBeTruthy();
   });
@@ -1243,10 +1244,13 @@ describe('AgentConnectionsSection — connection status and action', () => {
     terminalLaunchValue = { installedClis: {} };
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ 'terminal:hermes': false }));
     reloadEnabledAgentsFromStorage();
-    renderSection(async () => result(snapshotWith([])));
+    const detection = Promise.withResolvers<ApplyAgentConnectionsResult>();
+    renderSection(() => detection.promise);
 
     const row = await screen.findByTestId('configure-agents-terminal-row-hermes');
-    expect(within(row).getByText('Not installed')).toBeTruthy();
+    expect(within(row).queryByText('Not installed')).toBeNull();
+    detection.resolve(result(snapshotWith([])));
+    expect(await within(row).findByText('Not installed')).toBeTruthy();
     expect(
       screen.getByTestId('configure-agents-terminal-hermes').getAttribute('data-disabled'),
     ).toBe('');
@@ -1704,7 +1708,7 @@ describe('AgentConnectionsSection — degraded install-state read', () => {
     renderSection(async () => result(null, false));
 
     await screen.findByText(READ_FAILED_NOTICE);
-    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
 
     expect(screen.getByText('In app')).toBeTruthy();
     expect(screen.getByText('Terminal')).toBeTruthy();
@@ -1723,7 +1727,7 @@ describe('AgentConnectionsSection — degraded install-state read', () => {
     );
 
     await screen.findByText(READ_FAILED_NOTICE);
-    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
   });
 
   test('a host that answered nothing counts as a failed read, keys or no keys', async () => {
@@ -1761,7 +1765,7 @@ describe('AgentConnectionsSection — degraded install-state read', () => {
       expect(within(section).queryByRole('button', { name: label })).toBeNull();
     }
     expect(screen.getByTestId('configure-agents-terminal-claude')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
   });
 
   test('a host that read fine but cannot apply changes shows no notice', async () => {
@@ -1784,10 +1788,10 @@ describe('AgentConnectionsSection — degraded install-state read', () => {
     renderSection(async () => result(null, false));
     await screen.findByText(READ_FAILED_NOTICE);
 
-    const retry = screen.getByRole('button', { name: 'Retry' });
+    const retry = screen.getByRole('button', { name: 'Try again' });
     retry.focus();
     fireEvent.click(retry);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry' })).toBe(retry));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBe(retry));
     expect(document.activeElement).toBe(retry);
   });
 
@@ -1811,7 +1815,7 @@ describe('AgentConnectionsSection — degraded install-state read', () => {
   test('the action button carries the description itself, not a wrapper', async () => {
     renderSection(async () => result(snapshotWith(diskSatisfierIds('claude'))));
     const row = await waitFor(() => terminalRow('claude'));
-    const status = within(row).getByText('Connected');
+    const status = await within(row).findByText('Connected');
     const manage = within(row).getByRole('button', { name: /^Manage/ });
     expect(manage.getAttribute('aria-describedby')).toBe(status.parentElement?.id ?? status.id);
   });
@@ -1823,7 +1827,7 @@ describe('AgentConnectionsSection — degraded install-state read', () => {
     renderSection(async () => result(snapshotWith([])));
 
     const row = await screen.findByTestId('configure-agents-terminal-row-hermes');
-    const hint = within(row).getByText('Not installed');
+    const hint = await within(row).findByText('Not installed');
     expect(hint.id).toBeTruthy();
     const described =
       screen.getByTestId('configure-agents-terminal-hermes').getAttribute('aria-describedby') ?? '';
@@ -1852,7 +1856,7 @@ describe('AgentConnectionsSection — degraded install-state read', () => {
     await screen.findByText(READ_FAILED_NOTICE);
     expect(within(terminalRow('claude')).queryByText('Connected')).toBeNull();
 
-    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(within(terminalRow('claude')).getByText('Connected')).toBeTruthy());
     expect(screen.queryByText(READ_FAILED_NOTICE)).toBeNull();
   });

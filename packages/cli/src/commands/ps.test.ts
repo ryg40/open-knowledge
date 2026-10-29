@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { extractOkBinaryPath } from '../utils/process-scan.ts';
 import type { LockState } from './lock-state.ts';
 import { isDesktopCommand, renderTable, runPs, startedCell } from './ps.ts';
@@ -44,6 +44,7 @@ function makeDeadServer(overrides?: {
       startedAt: overrides?.startedAt ?? '2026-05-01T00:00:00.000Z',
       worktreeRoot: overrides?.worktreeRoot ?? '/tmp/old-project',
     },
+    text: '',
   };
 }
 
@@ -74,6 +75,7 @@ const missingLock: LockState = {
 const corruptLock: LockState = {
   status: 'corrupt',
   lockPath: '/tmp/notes/.ok/server.lock',
+  text: '{',
 };
 
 describe('startedCell', () => {
@@ -495,6 +497,74 @@ describe('PORTS column', () => {
   });
 });
 
+describe('a lock whose pid now belongs to another process', () => {
+  const reusedPidLock: LockState = {
+    status: 'reused-pid',
+    lockPath: '/tmp/restarted/.ok/local/server.lock',
+    lock: {
+      pid: 55555,
+      hostname: 'test-host',
+      port: 5173,
+      startedAt: '2026-05-01T00:00:00.000Z',
+      worktreeRoot: '/tmp/restarted',
+      capabilities: ['http', 'ws', 'ui'],
+    },
+    text: '',
+  };
+
+  test('json reports it stale with no command, usage, binary or ui attributed to that process', async () => {
+    const lines: string[] = [];
+    await runPs({
+      discover: async () => ['/tmp/restarted/.ok/local'],
+      inspect: () => reusedPidLock,
+      resolveCommand: () => ELECTRON_UTILITY_COMMAND,
+      resolveUsage: () => ({ cpuPercent: 9.9, memPercent: 8.8 }),
+      json: true,
+      log: (msg) => lines.push(msg),
+    });
+
+    expect(JSON.parse(lines.join('\n'))).toEqual([
+      expect.objectContaining({
+        directory: '/tmp/restarted',
+        lockPath: '/tmp/restarted/.ok/local/server.lock',
+        displayStatus: 'stale',
+        command: null,
+        binary: null,
+        isDesktop: false,
+        ui: null,
+        server: expect.objectContaining({ status: 'reused-pid', pid: 55555, usage: null }),
+      }),
+    ]);
+  });
+
+  test('the table hides it by default and lists it as stale with all', async () => {
+    const hidden: string[] = [];
+    await runPs({
+      discover: async () => ['/tmp/restarted/.ok/local'],
+      inspect: () => reusedPidLock,
+      resolveCommand: () => ELECTRON_UTILITY_COMMAND,
+      resolveUsage: () => null,
+      log: (msg) => hidden.push(msg),
+    });
+    const shown: string[] = [];
+    await runPs({
+      discover: async () => ['/tmp/restarted/.ok/local'],
+      inspect: () => reusedPidLock,
+      resolveCommand: () => ELECTRON_UTILITY_COMMAND,
+      resolveUsage: () => null,
+      all: true,
+      log: (msg) => shown.push(msg),
+    });
+
+    expect(hidden.join('\n')).toBe('No open-knowledge servers found.');
+    const row = shown.join('\n').split('\n')[1] ?? '';
+    expect(row).toContain('/tmp/restarted');
+    expect(row).toContain('stale');
+    expect(row).toContain('55555');
+    expect(row).not.toContain('desktop');
+  });
+});
+
 describe('server lock missing/corrupt discards entry', () => {
   test('missing server lock: entry discarded', async () => {
     const lines: string[] = [];
@@ -578,5 +648,29 @@ describe('extractOkBinaryPath', () => {
 
   test('ignores package specifier in npm exec parent command', () => {
     expect(extractOkBinaryPath('npm exec @inkeep/open-knowledge mcp HOME=/Users/mike')).toBeNull();
+  });
+});
+
+describe('renderTable stop hint names the running channel CLI', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  test.each([
+    ['stable', 'ok'],
+    ['beta', 'ok-beta'],
+  ])('%s: the footer names %s stop', (channel, command) => {
+    vi.stubEnv('OK_CHANNEL', channel);
+    const output = renderTable([
+      {
+        directory: '/tmp/notes',
+        server: { port: 5173, status: 'alive' as const, pid: 12345, startedAt: null, usage: null },
+        ui: null,
+        hostname: 'test-host',
+        lockPath: '/tmp/notes/.ok/server.lock',
+        binary: null,
+        command: null,
+        isDesktop: false,
+      },
+    ]);
+    expect(output).toContain(`To stop a server: ${command} stop <port|pid|directory|all>`);
   });
 });

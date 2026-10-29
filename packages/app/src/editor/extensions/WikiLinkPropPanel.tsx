@@ -1,3 +1,4 @@
+// oxlint-disable ok/no-raw-error-toast -- pre-rule backlog: toasts here show raw error text; delete this line once the file maps each failure to written copy. See https://github.com/inkeep/open-knowledge/blob/main/lint-plugins/ok-rules/README.md#no-raw-error-toast
 import {
   getWikiLinkText,
   normalizeNullableString,
@@ -157,7 +158,7 @@ function EditWikiLinkDialog({
             <div>
               <label className="mb-1.5 block text-sm font-medium" htmlFor={targetId}>
                 <Trans>
-                  Page <span className="text-red-500">*</span>
+                  Page <span className="text-destructive">*</span>
                 </Trans>
               </label>
               <LinkPathSuggestionInput
@@ -208,7 +209,6 @@ function EditWikiLinkDialog({
                 placeholder={t`heading-slug`}
                 onKeyDown={handleKeyDown}
               />
-              {}
               {showHeadings && (
                 <div
                   id={headingListId}
@@ -439,7 +439,7 @@ export function WikiLinkPropPanel({ editor, getPos, onClose, onNavigate }: WikiL
     stateLabel = {
       icon: <CircleAlert className="size-3.5 shrink-0" aria-hidden="true" />,
       text: t`Page not found`,
-      className: 'text-red-700 dark:text-red-300',
+      className: 'text-destructive',
     };
   } else if (isResolved) {
     stateLabel = {

@@ -1,5 +1,10 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 import { okVitestBase } from '../../test-support/vitest.base';
+
+const serverAuthorityRegistrySetup = fileURLToPath(
+  new URL('../../test-support/server-authority-registry.setup.ts', import.meta.url),
+);
 
 /**
  * Vitest config for packages/cli (unit + integration tier).
@@ -14,6 +19,14 @@ export default defineConfig({
   ...okVitestBase,
   test: {
     ...okVitestBase.test,
+    setupFiles: [
+      ...okVitestBase.test.setupFiles,
+      fileURLToPath(new URL('./tests/support/zod-compile.test-helper.ts', import.meta.url)),
+      serverAuthorityRegistrySetup,
+      fileURLToPath(
+        new URL('./tests/support/windows-process-start-reader.test-helper.ts', import.meta.url),
+      ),
+    ],
     exclude: [...okVitestBase.test.exclude, '.ok-skill-publish-*'],
   },
 });

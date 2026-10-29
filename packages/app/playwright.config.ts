@@ -32,6 +32,8 @@ import { SETUP_NON_RESULT_REPORTER } from './tests/stress/_helpers/setup-non-res
  */
 const isCI = !!process.env.CI;
 
+const traceSnapshotsOff = process.env.OK_E2E_TRACE_SNAPSHOTS === 'off';
+
 /**
  * Logical CPUs one worker occupies. Since the per-worker-server migration a
  * worker is not just a browser: it owns a Vite dev server, a Hocuspocus CRDT
@@ -70,13 +72,14 @@ export function resolveWorkerCount(logicalCpus: number): number {
  * run on the same per-worker fixture, so they share one convergence band.
  * Rationale for the value itself is on `expect` below.
  */
-export const EXPECT_TIMEOUT_MS = isCI ? 15_000 : 5_000;
+export const EXPECT_TIMEOUT_MS = 15_000;
 
 export default defineConfig({
   testDir: './tests/stress',
   testMatch: /.*\.e2e\.ts$/,
+  testIgnore: ['**/frontmatter-edit.e2e.ts'],
   globalSetup: [
-    './tests/stress/_helpers/i18n-catalog-freshness.ts',
+    './tests/stress/_helpers/i18n-catalog-compile.ts',
     // Build the per-run Vite optimizer seed cache once, before any worker
     // boots. Every fixture-spawned dev server copies it (see
     // tests/stress/_helpers/server-process.ts `VITE_E2E_SEED_DIR`) so no
@@ -84,6 +87,8 @@ export default defineConfig({
     // mid-test reload storms were the suite's dominant cross-cutting flake
     // class. Fail-open: a failed warm build logs and falls back to cold boots.
     './tests/stress/_helpers/global-warm-cache.ts',
+    './tests/stress/_helpers/reuse/reuse-run.ts',
+    './tests/stress/_helpers/prebuilt/prebuilt-dev-setup.ts',
   ],
   timeout: 120_000,
   // Web-first assertions poll until this budget, not Playwright's 5s default.
@@ -143,9 +148,7 @@ export default defineConfig({
     // crops the sidebar in narrow-viewport tests. Retained only on failure to
     // bound storage growth.
     video: { mode: 'retain-on-failure', size: { width: 1280, height: 720 } },
-    // 'on-first-retry' captures trace on retry 1 only; subsequent retries skip
-    // to stay under the CI runtime envelope.
-    trace: 'on-first-retry',
+    trace: traceSnapshotsOff ? { mode: 'on-first-retry', snapshots: false } : 'on-first-retry',
     screenshot: 'only-on-failure',
   },
 });

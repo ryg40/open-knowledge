@@ -11,9 +11,9 @@ const MAX_BODY_BYTES = 1_048_576;
 
 const REQUEST_BODY_TIMEOUT_MS = 30_000;
 
-function readRequestBody(req: IncomingMessage): Promise<Buffer> {
+function readRequestBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
   return readBoundedJsonBody(req, {
-    maxBytes: MAX_BODY_BYTES,
+    maxBytes,
     timeoutMs: REQUEST_BODY_TIMEOUT_MS,
   });
 }
@@ -111,6 +111,7 @@ export interface WithValidationOptions {
   skipBodyParse?: boolean;
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
   preBodyGate?: (req: IncomingMessage, res: ServerResponse) => boolean;
+  maxBodyBytes?: number;
 }
 
 export function validateBody<T>(
@@ -123,12 +124,19 @@ export function validateBody<T>(
   if (parseResult.success) {
     return { ok: true, value: parseResult.data };
   }
-  const detail = parseResult.error.issues
+  const contentControlAdmission = parseResult.error.issues.some(
+    (issue) => issue.code === 'custom' && issue.params?.contentControlAdmission === true,
+  );
+  const issues = parseResult.error.issues
     .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
     .join('; ');
+  const detail = contentControlAdmission
+    ? `${issues} Offsets count the full submitted field after caller composition, including any frontmatter.`
+    : issues;
   errorResponse(res, 400, 'urn:ok:error:invalid-request', 'Request body is invalid.', {
     handler: options.handler,
     detail,
+    ...(contentControlAdmission ? { extensions: { contentControlAdmission: true } } : {}),
   });
   return { ok: false };
 }
@@ -175,7 +183,7 @@ export function withValidation<T>(
 
     let raw: Buffer;
     try {
-      raw = await readRequestBody(req);
+      raw = await readRequestBody(req, options.maxBodyBytes ?? MAX_BODY_BYTES);
     } catch (err) {
       if (err instanceof UnsupportedMediaTypeError) {
         respondUnsupportedMediaType(res, options.handler);

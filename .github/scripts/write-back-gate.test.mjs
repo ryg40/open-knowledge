@@ -2,11 +2,16 @@ import { describe, expect, test } from 'vitest';
 import {
   classifyAttachment,
   compareVersions,
+  composeEmailSubject,
   composeReply,
+  contactEmailOrigin,
   evaluateFanIn,
   highestVersion,
+  isInternalContactEmail,
   isOriginRepliableFrom,
+  parseContactEmail,
   partitionAttachments,
+  planIssueClose,
 } from './write-back-gate.mjs';
 
 const GH_ISSUE = 'https://github.com/inkeep/open-knowledge/issues/769';
@@ -253,6 +258,79 @@ describe('fan-in gate', () => {
   });
 });
 
+describe('issue close decision', () => {
+  const carrier = (identifier, stateType) => ({ identifier, stateType });
+
+  test('an open issue closes when the canonical shipped and its synced ticket is a duplicate', () => {
+    expect(
+      planIssueClose({
+        issueState: 'open',
+        carriers: [carrier('PRD-8204', 'completed'), carrier('PRD-8646', 'duplicate')],
+      }),
+    ).toEqual({ close: true, reason: null, open: [] });
+  });
+
+  test('a canceled carrier is resolved, like the canceled descendant the fan-in gate passes over', () => {
+    expect(
+      planIssueClose({
+        issueState: 'open',
+        carriers: [carrier('PRD-1', 'completed'), carrier('PRD-2', 'canceled')],
+      }).close,
+    ).toBe(true);
+  });
+
+  test('any carrier still carrying work keeps the issue open and is named', () => {
+    expect(
+      planIssueClose({
+        issueState: 'open',
+        carriers: [
+          carrier('PRD-3', 'triage'),
+          carrier('PRD-1', 'completed'),
+          carrier('PRD-2', 'started'),
+        ],
+      }),
+    ).toEqual({ close: false, reason: 'open-carrier', open: ['PRD-2', 'PRD-3'] });
+  });
+
+  test('a carrier whose state could not be read keeps the issue open', () => {
+    expect(
+      planIssueClose({
+        issueState: 'open',
+        carriers: [carrier('PRD-1', 'completed'), { identifier: undefined, stateType: undefined }],
+      }),
+    ).toMatchObject({ close: false, reason: 'open-carrier', open: ['an unreadable ticket'] });
+  });
+
+  test('an issue that is already closed is never closed again, whatever its carriers say', () => {
+    expect(
+      planIssueClose({ issueState: 'closed', carriers: [carrier('PRD-1', 'completed')] }),
+    ).toMatchObject({ close: false, reason: 'already-closed' });
+  });
+
+  test('anything but an open issue, such as a pull request, is never closed', () => {
+    expect(
+      planIssueClose({ issueState: 'pull-request', carriers: [carrier('PRD-1', 'completed')] }),
+    ).toMatchObject({ close: false, reason: 'not-an-open-issue' });
+  });
+
+  test('no carrier at all is a lookup that missed, not permission to close', () => {
+    expect(planIssueClose({ issueState: 'open', carriers: [] })).toMatchObject({
+      close: false,
+      reason: 'no-carrier',
+    });
+  });
+
+  test('a carrier list known to be partial never closes', () => {
+    expect(
+      planIssueClose({
+        issueState: 'open',
+        carriers: [carrier('PRD-1', 'completed')],
+        carriersComplete: false,
+      }),
+    ).toMatchObject({ close: false, reason: 'carriers-truncated' });
+  });
+});
+
 describe('reply composition', () => {
   const CHANGESET_BODY =
     'Honor backslash escapes in the markdown promoters.\n\nTyping `\\==not a highlight\\==` now stays literal instead of turning into a highlight.';
@@ -496,5 +574,145 @@ describe('the two channels say different things', () => {
     expect(() =>
       composeReply({ changeset, version: 'nonsense', originChannel: 'github-issue' }),
     ).toThrow(/derived version/);
+  });
+});
+
+describe('the contact email an intake report carries', () => {
+  const intake = (contactLine, note = 'It froze.') =>
+    [
+      'Automated intake from the in-app OpenKnowledge bug reporter.',
+      '',
+      '* Level: full',
+      '* App version: 0.88.6',
+      ...(contactLine === null ? [] : [contactLine]),
+      '',
+      '**User note:**',
+      '',
+      '```',
+      note,
+      '```',
+    ].join('\n');
+
+  test('the address is read from the form Linear stores, an autolinked bullet', () => {
+    expect(
+      parseContactEmail(intake('* Contact email: [jo@example.com](<mailto:jo@example.com>)')),
+    ).toBe('jo@example.com');
+  });
+
+  test('the address is read from the plain line the intake writes', () => {
+    expect(parseContactEmail(intake('- Contact email: jo@example.com'))).toBe('jo@example.com');
+  });
+
+  test('the mailto target wins over link text Linear escaped', () => {
+    expect(
+      parseContactEmail(
+        intake('* Contact email: [jo\\_lee@example.com](<mailto:jo_lee@example.com>)'),
+      ),
+    ).toBe('jo_lee@example.com');
+  });
+
+  test('a report without the line has no contact email', () => {
+    expect(parseContactEmail(intake(null))).toBeNull();
+    expect(parseContactEmail('')).toBeNull();
+    expect(parseContactEmail(undefined)).toBeNull();
+  });
+
+  test('an address typed into the note is never mistaken for the contact field', () => {
+    expect(parseContactEmail(intake(null, '- Contact email: someone-else@example.com'))).toBeNull();
+  });
+
+  test('prose that mentions the field without an address yields nothing', () => {
+    expect(parseContactEmail('Bug reports now carry an optional Contact email: field.')).toBeNull();
+    expect(parseContactEmail('- Contact email: (none)')).toBeNull();
+  });
+
+  test('every Inkeep domain is internal, and nothing else is', () => {
+    expect(isInternalContactEmail('dev@inkeep.com')).toBe(true);
+    expect(isInternalContactEmail('Dev@Mail.Inkeep.COM')).toBe(true);
+    expect(isInternalContactEmail('dev@inkeep.ai')).toBe(true);
+    expect(isInternalContactEmail('dev@notinkeep.com')).toBe(false);
+    expect(isInternalContactEmail('inkeep@example.com')).toBe(false);
+  });
+
+  test('an email origin is keyed by its mailto url and remembers the report it came from', () => {
+    expect(contactEmailOrigin('jo@example.com', 'PRD-9')).toEqual({
+      kind: 'repliable-origin',
+      channel: 'email',
+      url: 'mailto:jo@example.com',
+      address: 'jo@example.com',
+      reportIdentifier: 'PRD-9',
+      reportKind: 'bug-report',
+    });
+  });
+});
+
+describe('an emailed reply', () => {
+  const changeset = { title: 'Fix', body: 'Fix the download.' };
+
+  test('says how to update without assuming the desktop app, and leaves out internal tickets', () => {
+    const text = composeReply({
+      changeset,
+      version: '0.89.0',
+      originChannel: 'email',
+      coverage: ['PRD-1'],
+    });
+    expect(text).toContain('get the latest Open Knowledge');
+    expect(text).toContain('Thanks for telling us.');
+    expect(text).not.toContain('Thanks for the report');
+    expect(text).not.toContain('desktop app');
+    expect(text).not.toContain('Covers');
+  });
+
+  test('names the release by a bare URL, since a mail client does not render markdown', () => {
+    const text = composeReply({ changeset, version: '0.89.0', originChannel: 'email' });
+    expect(text).toContain('https://github.com/inkeep/open-knowledge/releases/tag/v0.89.0');
+    expect(text).not.toContain('](');
+    expect(text).not.toContain('<https://');
+  });
+
+  test('a beta email promises a second email rather than a reply "here"', () => {
+    const text = composeReply({
+      changeset,
+      version: '0.89.0-beta.1',
+      originChannel: 'email',
+      channel: 'beta',
+    });
+    expect(text).toContain('email you again');
+    expect(text).not.toContain('follow up here');
+  });
+
+  test('says why the reader is getting it', () => {
+    const text = composeReply({ changeset, version: '0.89.0', originChannel: 'email' });
+    expect(text).toContain(
+      'left this address when you sent the Open Knowledge team a report or feedback',
+    );
+  });
+
+  test('the subject names the report and the release, and a correction says so', () => {
+    expect(
+      composeEmailSubject({ identifier: 'PRD-10089', version: '0.89.0', channel: 'stable' }),
+    ).toBe('Your Open Knowledge report PRD-10089 is fixed in v0.89.0');
+    expect(
+      composeEmailSubject({ identifier: 'PRD-10089', version: '0.89.0-beta.1', channel: 'beta' }),
+    ).toBe('A fix for your Open Knowledge report PRD-10089 is in beta v0.89.0-beta.1');
+    expect(
+      composeEmailSubject({
+        identifier: 'PRD-10089',
+        version: '0.89.0',
+        channel: 'stable',
+        correction: true,
+      }),
+    ).toBe('Correction: your Open Knowledge report PRD-10089 is fixed in v0.89.0');
+    expect(
+      composeEmailSubject({ identifier: 'PRD-1', version: '0.89.0', reportKind: 'feedback' }),
+    ).toBe('What you told us about Open Knowledge is fixed in v0.89.0');
+    expect(
+      composeEmailSubject({
+        identifier: 'PRD-1',
+        version: '0.89.0-beta.1',
+        channel: 'beta',
+        reportKind: 'feedback',
+      }),
+    ).toBe('A fix for what you told us about Open Knowledge is in beta v0.89.0-beta.1');
   });
 });

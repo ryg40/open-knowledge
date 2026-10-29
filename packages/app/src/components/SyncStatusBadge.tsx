@@ -38,6 +38,7 @@ import { useGitWorktreeStatus } from '@/hooks/use-git-worktree-status';
 import { useConfigContext } from '@/lib/config-provider';
 import { hashFromAssetPath, hashFromDocName, isSameHash } from '@/lib/doc-hash';
 import { engineSyncMode } from '@/lib/engine-sync-mode';
+import { revealEditor } from '@/lib/reveal-editor';
 import { triggerSync } from '@/lib/trigger-sync';
 import { openAccountSettings, openSyncSettings } from '@/lib/use-settings-route';
 import { EnableSyncConfirmDialog } from './EnableSyncConfirmDialog';
@@ -68,6 +69,7 @@ function triggerSyncFromBadge(op: ManualSyncOp = 'sync', onFailure?: () => void)
 
 function navigateToHash(nextHash: string): void {
   if (typeof window === 'undefined') return;
+  revealEditor();
   if (!isSameHash(window.location.hash, nextHash)) {
     window.location.hash = nextHash;
   }
@@ -140,10 +142,11 @@ export function displayState(status: GitSyncStatus): GitSyncStatus['state'] {
 
 interface BadgeIconProps {
   status: GitSyncStatus;
+  size?: 'size-3.5' | 'size-4';
 }
 
-function BadgeIcon({ status }: BadgeIconProps) {
-  const cls = 'size-3.5';
+function BadgeIcon({ status, size = 'size-3.5' }: BadgeIconProps) {
+  const cls = size;
   switch (displayState(status)) {
     case 'dormant':
       return <Cloud className={`${cls} text-muted-foreground`} />;
@@ -159,7 +162,7 @@ function BadgeIcon({ status }: BadgeIconProps) {
         <Spinner aria-hidden="true" icon={RefreshCw} className={`${cls} text-muted-foreground`} />
       );
     case 'conflict':
-      return <AlertTriangle className={`${cls} text-amber-500`} />;
+      return <AlertTriangle className={`${cls} text-warning`} />;
     case 'offline':
       return <CloudOff className={`${cls} text-muted-foreground`} />;
     case 'auth-error':
@@ -169,7 +172,7 @@ function BadgeIcon({ status }: BadgeIconProps) {
         <LogIn className={`${cls} text-destructive`} />
       );
     case 'disabled':
-      if (status.pausedReason) return <AlertTriangle className={`${cls} text-amber-500`} />;
+      if (status.pausedReason) return <AlertTriangle className={`${cls} text-warning`} />;
       if (status.ahead > 0 || status.behind > 0) {
         return <RefreshCw className={`${cls} text-muted-foreground`} />;
       }
@@ -668,7 +671,7 @@ function WorktreeRow({
             <TooltipTrigger asChild>
               <span
                 dir="auto"
-                // biome-ignore lint/a11y/noNoninteractiveTabindex: tooltip-on-static-text pattern (see EditorFooter) — Radix opens on the trigger's focus, so a non-focusable span leaves sighted keyboard-only users no way to recover a truncated path. Sibling rows that link are buttons and already take focus, so this also stops the list silently skipping the rows whose path is their only content.
+                // oxlint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- tooltip-on-static-text pattern (see EditorFooter) — Radix opens on the trigger's focus, so a non-focusable span leaves sighted keyboard-only users no way to recover a truncated path. Sibling rows that link are buttons and already take focus, so this also stops the list silently skipping the rows whose path is their only content.
                 tabIndex={0}
                 className={`min-w-0 rounded-xs focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50 ${pathClassName}`}
               >
@@ -679,7 +682,6 @@ function WorktreeRow({
               {entry.path}
             </TooltipContent>
           </Tooltip>
-          {}
           {label !== entry.path && <span className="sr-only">{entry.path}</span>}
         </>
       )}
@@ -946,12 +948,11 @@ function WorktreeStatusSection({
         worktree && (
           <section
             className="flex max-h-56 flex-col gap-2.5 overflow-y-auto overscroll-contain focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-            // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard-focusable scroll container — Chromium doesn't make overflow:auto divs focusable without tabIndex.
+            // oxlint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- keyboard-focusable scroll container — Chromium doesn't make overflow:auto divs focusable without tabIndex.
             tabIndex={0}
             aria-labelledby="worktree-status-label"
             data-testid="worktree-listing"
           >
-            {}
             <WorktreeGroup title={<Trans>Pull brings in</Trans>} entries={incoming} />
             <WorktreeGroup title={<Trans>Push includes</Trans>} entries={willPush} />
             <WorktreeGroup
@@ -1001,13 +1002,11 @@ function UpdatedLine({
   if (label === null) return <span />;
   return (
     <span className="text-xs text-muted-foreground" data-testid="sync-popover-last-sync">
-      {}
       {showArrows && (
         <span className="sr-only" data-testid="sync-popover-last-sync-label">
           {label}
         </span>
       )}
-      {}
       {showArrows ? (
         <span aria-hidden="true" className="inline-flex items-center gap-1">
           {pulled !== null && (
@@ -1108,7 +1107,6 @@ function PopoverBody({ status, onSignIn, onSetIdentity }: PopoverBodyProps) {
   return (
     <div className="flex flex-col gap-3.5">
       <div className="flex items-center justify-between gap-2">
-        {}
         <div className="flex shrink-0 items-center gap-2">
           <BadgeIcon status={status} />
           <span className="text-1sm font-medium">
@@ -1140,7 +1138,6 @@ function PopoverBody({ status, onSignIn, onSetIdentity }: PopoverBodyProps) {
         strandedCommitCount={strandedCommitCount}
       />
 
-      {}
       <div className="flex flex-col gap-1.5">
         <SectionLabel>
           <Trans>Sync mode</Trans>
@@ -1163,7 +1160,6 @@ function PopoverBody({ status, onSignIn, onSetIdentity }: PopoverBodyProps) {
           <SelectContent>
             <SelectItem value="off" className="text-xs">{t`Manual`}</SelectItem>
             <SelectItem value="follow" className="text-xs">{t`Auto (Pull only)`}</SelectItem>
-            {}
             <SelectItem value="full" className="text-xs" disabled={genuineReadOnly}>
               {t`Auto (Pull and Push)`}
             </SelectItem>
@@ -1180,7 +1176,6 @@ function PopoverBody({ status, onSignIn, onSetIdentity }: PopoverBodyProps) {
         </p>
       </div>
 
-      {}
       <div className="flex flex-col gap-2 border-t pt-3">
         <SectionLabel>
           <Trans>Manual</Trans>
@@ -1237,8 +1232,6 @@ function PopoverBody({ status, onSignIn, onSetIdentity }: PopoverBodyProps) {
         )}
       </div>
 
-      {}
-      {}
       <div
         role="status"
         aria-live="polite"
@@ -1263,7 +1256,6 @@ function PopoverBody({ status, onSignIn, onSetIdentity }: PopoverBodyProps) {
           </p>
         ))}
 
-        {}
         {isParkedOnNotFoundAsIdentity(status) && status.pushPermission?.checkStatus === 'denied'
           ? formatDeniedIdentitySentences(status.pushPermission).map((sentence) => (
               <p key={sentence} className="text-xs text-muted-foreground">
@@ -1324,8 +1316,7 @@ function PopoverBody({ status, onSignIn, onSetIdentity }: PopoverBodyProps) {
 
       {state === 'conflict' && (
         <div className="flex items-start gap-2">
-          <p className="min-w-0 flex-1 text-xs text-amber-700 dark:text-amber-400">
-            {}
+          <p className="min-w-0 flex-1 text-xs text-warning">
             <Trans>A document has a conflict — resolve it to keep it up to date.</Trans>
           </p>
           {firstConflictDocName !== null && (
@@ -1382,7 +1373,6 @@ function PopoverBody({ status, onSignIn, onSetIdentity }: PopoverBodyProps) {
         </p>
       )}
 
-      {}
       <WorktreeStatusSection
         status={status}
         worktree={worktree}
@@ -1392,10 +1382,8 @@ function PopoverBody({ status, onSignIn, onSetIdentity }: PopoverBodyProps) {
         lastReadAt={worktreeLastReadAt}
       />
 
-      {}
       <div className="flex items-center justify-between gap-2">
         <UpdatedLine pulledAt={pulledAt} pushedAt={pushedAt} combinedAt={combinedAt} />
-        {}
         <PopoverClose asChild>
           <Button
             variant="link"
@@ -1488,7 +1476,7 @@ export function SyncStatusBadge({ onSignIn, onSetIdentity }: SyncStatusBadgeProp
                   : t`Sync status: ${syncStateLabel}`
               }
             >
-              <BadgeIcon status={status} />
+              <BadgeIcon status={status} size="size-4" />
               {label && (
                 <span className="absolute -top-0.5 -right-0.5 text-[9px] leading-none font-medium bg-background border rounded-full px-0.5">
                   {label}
@@ -1496,7 +1484,7 @@ export function SyncStatusBadge({ onSignIn, onSetIdentity }: SyncStatusBadgeProp
               )}
               {!label && showIdentityDot && (
                 <span
-                  className="absolute -top-0.5 -right-0.5 size-1.5 rounded-full bg-amber-500 ring-2 ring-background"
+                  className="absolute -top-0.5 -right-0.5 size-1.5 rounded-full bg-warning ring-2 ring-background"
                   aria-hidden
                 />
               )}
@@ -1505,7 +1493,6 @@ export function SyncStatusBadge({ onSignIn, onSetIdentity }: SyncStatusBadgeProp
         </TooltipTrigger>
         <TooltipContent>{tooltipLabel(status)}</TooltipContent>
       </Tooltip>
-      {}
       <PopoverContent
         align="end"
         className="flex max-h-(--radix-popover-content-available-height) w-80 flex-col overflow-y-auto p-3"

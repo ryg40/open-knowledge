@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import type { ProcessTerminationLookup, ProcessTerminationQuery } from '@inkeep/open-knowledge';
 import {
   MINIDUMP_FILE_EXTENSION,
   type OkBugReportCrashDetectedEvent,
@@ -71,6 +72,28 @@ const OS_SHUTDOWN_MARKER_TTL_MS = 120_000;
 
 export const SENTINEL_HEARTBEAT_INTERVAL_MS = 60_000;
 
+export const REINSTALL_KILL_WINDOW_MS = 5 * 60_000;
+
+export type InstalledAppChange =
+  | { kind: 'read'; changedAtMs: number }
+  | { kind: 'unreadable'; error: string };
+
+export function readInstalledAppChangeSync(
+  exePath: string,
+  stat: (path: string) => { birthtimeMs: number; ctimeMs: number } = statSync,
+): InstalledAppChange {
+  try {
+    const { birthtimeMs, ctimeMs } = stat(exePath);
+    const changedAtMs = Math.max(birthtimeMs, ctimeMs);
+    return Number.isFinite(changedAtMs) && changedAtMs > 0
+      ? { kind: 'read', changedAtMs }
+      : { kind: 'unreadable', error: 'invalid-time' };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | null)?.code;
+    return { kind: 'unreadable', error: typeof code === 'string' ? code : 'unknown' };
+  }
+}
+
 interface CrashLogger {
   info(payload: Record<string, unknown>, msg: string): void;
   warn(payload: Record<string, unknown>, msg: string): void;
@@ -111,6 +134,7 @@ interface SentinelState {
   osShutdownReasons?: string[];
   suspendedAt?: string;
   appVersion?: string;
+  pid?: number;
 }
 
 export interface MainExitRecord {
@@ -164,11 +188,15 @@ export interface CrashDetectionDeps {
   crashDumpsDir: string;
   appBundleRoot: string;
   appVersion: string;
+  processId: number;
   platform?: NodeJS.Platform;
   emit(event: OkBugReportCrashDetectedEvent): boolean;
   now(): Date;
   currentBootSessionUuid(): string | null;
+  currentBootStartedAtMs?(): number | null;
   installInFlight?(span: { deathFromMs: number; deathToMs: number }): InstallInFlight | null;
+  processTermination?(query: ProcessTerminationQuery): ProcessTerminationLookup;
+  installedAppChange?(): InstalledAppChange;
   mainThreadWatchdog: Pick<MainThreadWatchdog, 'readPrevious' | 'readPreviousStall' | 'start'>;
   logger: CrashLogger;
 }
@@ -731,7 +759,7 @@ export function createCrashDetection(deps: CrashDetectionDeps): CrashDetection {
       ) {
         deps.logger.warn(
           { event: 'crash-detection.boot-session-unavailable', platform: process.platform },
-          'kernel boot-session identity unavailable — reboot suppression is disabled this launch',
+          'kernel boot-session identity unavailable — reboot detection falls back to the OS boot instant this launch',
         );
       }
 
@@ -756,6 +784,7 @@ export function createCrashDetection(deps: CrashDetectionDeps): CrashDetection {
       let prevOsShutdownReasons: string[] | null = null;
       let prevSuspendedAt: string | null = null;
       let prevAppVersion: string | null = null;
+      let prevPid: number | null = null;
       if (sentinelRaw !== null) {
         let parsed: Record<string, unknown> | null = null;
         try {
@@ -783,6 +812,9 @@ export function createCrashDetection(deps: CrashDetectionDeps): CrashDetection {
         }
         prevSuspendedAt = field('suspendedAt');
         prevAppVersion = asReportableAppVersion(field('appVersion'));
+        const rawPid = parsed?.pid;
+        prevPid =
+          typeof rawPid === 'number' && Number.isInteger(rawPid) && rawPid > 0 ? rawPid : null;
       }
 
       const detectedAtMs = detectedAt.getTime();
@@ -904,13 +936,66 @@ export function createCrashDetection(deps: CrashDetectionDeps): CrashDetection {
       );
       const boundDump = (attachableDumps.find(arming) ?? attachableDumps[0])?.entry ?? null;
 
-      const rebootedBetweenSessions =
-        prevBootSessionUuid !== null &&
-        bootSessionUuid !== null &&
-        prevBootSessionUuid !== bootSessionUuid;
-      const machineLevelDeath =
+      const bootSessionsComparable = prevBootSessionUuid !== null && bootSessionUuid !== null;
+      const bootStartedAtMs = bootSessionsComparable
+        ? null
+        : (deps.currentBootStartedAtMs?.() ?? null);
+      const rebootedBetweenSessions = bootSessionsComparable
+        ? prevBootSessionUuid !== bootSessionUuid
+        : bootStartedAtMs !== null && lastAliveMs !== null && bootStartedAtMs > lastAliveMs;
+      const sentinelUnflushed = sentinelRaw?.includes('\u0000') ?? false;
+      const announcedMachineCause = rebootedBetweenSessions
+        ? 'system-reboot'
+        : prevPendingOsShutdownAt !== null
+          ? 'os-shutdown'
+          : prevSuspendedAt !== null
+            ? 'suspended'
+            : sentinelUnflushed
+              ? 'unflushed-sentinel'
+              : null;
+      const unexplainedDirtyEnd =
         sentinelPresent &&
-        (rebootedBetweenSessions || prevPendingOsShutdownAt !== null || prevSuspendedAt !== null);
+        announcedMachineCause === null &&
+        installInFlight === null &&
+        newDumps.length === 0 &&
+        lastAliveMs !== null;
+      const processTermination =
+        unexplainedDirtyEnd && prevPid !== null && deps.processTermination !== undefined
+          ? deps.processTermination({ pid: prevPid, fromMs: lastAliveMs, toMs: detectedAtMs })
+          : null;
+      const killedByPriorityUnderOthersMemory =
+        processTermination?.outcome === 'killed' &&
+        processTermination.victimChosenByPriority &&
+        processTermination.largestProcessOwned === false;
+      const installedAppChange =
+        unexplainedDirtyEnd && deps.installedAppChange !== undefined
+          ? deps.installedAppChange()
+          : null;
+      const installedAppChangedAtMs =
+        installedAppChange?.kind === 'read' ? installedAppChange.changedAtMs : null;
+      const reinstalledOverSession =
+        liveness.kind !== 'blocked' &&
+        installedAppChangedAtMs !== null &&
+        lastAliveMs !== null &&
+        installedAppChangedAtMs > lastAliveMs &&
+        installedAppChangedAtMs <= detectedAtMs &&
+        installedAppChangedAtMs - lastAliveMs <= REINSTALL_KILL_WINDOW_MS;
+      const machineCause =
+        announcedMachineCause ??
+        (killedByPriorityUnderOthersMemory
+          ? 'os-memory-pressure'
+          : reinstalledOverSession
+            ? 'app-reinstalled'
+            : null);
+      const machineLevelDeath = sentinelPresent && machineCause !== null;
+      const terminationFields = {
+        previousPid: prevPid,
+        processTermination,
+        installedAppChangedAt:
+          installedAppChangedAtMs === null ? null : new Date(installedAppChangedAtMs).toISOString(),
+        installedAppChangeError:
+          installedAppChange?.kind === 'unreadable' ? installedAppChange.error : null,
+      };
 
       const updateInstallDeath = sentinelPresent && installInFlight !== null;
       const suppressibleDeath = machineLevelDeath || updateInstallDeath;
@@ -934,15 +1019,7 @@ export function createCrashDetection(deps: CrashDetectionDeps): CrashDetection {
 
       let armed: OkBugReportCrashDetectedEvent | null = null;
       if (machineSuppressed || crashTooOld) {
-        const reason = !machineSuppressed
-          ? 'stale-crash'
-          : rebootedBetweenSessions
-            ? 'system-reboot'
-            : prevPendingOsShutdownAt !== null
-              ? 'os-shutdown'
-              : prevSuspendedAt !== null
-                ? 'suspended'
-                : 'update-install';
+        const reason = machineSuppressed ? (machineCause ?? 'update-install') : 'stale-crash';
         const breadcrumb = {
           event: 'crash-detection.machine-level-death',
           reason,
@@ -957,6 +1034,8 @@ export function createCrashDetection(deps: CrashDetectionDeps): CrashDetection {
           prevBootId,
           prevBootSessionUuid,
           currentBootSessionUuid: bootSessionUuid,
+          currentBootStartedAt:
+            bootStartedAtMs === null ? null : new Date(bootStartedAtMs).toISOString(),
           lastAliveAt: prevLastAliveAt,
           sentinelAgeMs,
           deathAgeMs,
@@ -964,16 +1043,11 @@ export function createCrashDetection(deps: CrashDetectionDeps): CrashDetection {
           deathAtSource,
           staleAfterMs: STALE_CRASH_AFTER_MS,
           class: machineSuppressed ? 'external' : 'stale',
-          machineCause: rebootedBetweenSessions
-            ? 'system-reboot'
-            : prevPendingOsShutdownAt !== null
-              ? 'os-shutdown'
-              : prevSuspendedAt !== null
-                ? 'suspended'
-                : null,
+          machineCause,
           suspendedAt: prevSuspendedAt,
           pendingOsShutdownAt: prevPendingOsShutdownAt,
           osShutdownReasons: prevOsShutdownReasons,
+          ...terminationFields,
           ...previousSessionFields,
         };
         if (reason === 'os-shutdown') {
@@ -988,9 +1062,15 @@ export function createCrashDetection(deps: CrashDetectionDeps): CrashDetection {
               ? 'previous session was killed by a system reboot — suppressing the report prompt'
               : reason === 'suspended'
                 ? 'previous session died asleep without resuming — suppressing the report prompt'
-                : reason === 'stale-crash'
-                  ? 'previous session died too long ago to report usefully — suppressing the report prompt'
-                  : 'previous session was killed by an update install — suppressing the report prompt',
+                : reason === 'os-memory-pressure'
+                  ? 'previous session was ended by the OS to relieve memory pressure another process caused — suppressing the report prompt'
+                  : reason === 'app-reinstalled'
+                    ? 'previous session was closed by an installer replacing the app — suppressing the report prompt'
+                    : reason === 'unflushed-sentinel'
+                      ? 'previous session left a sentinel the OS never flushed, so the machine stopped under it — suppressing the report prompt'
+                      : reason === 'stale-crash'
+                        ? 'previous session died too long ago to report usefully — suppressing the report prompt'
+                        : 'previous session was killed by an update install — suppressing the report prompt',
           );
         }
       } else if (somethingToReport) {
@@ -1033,6 +1113,10 @@ export function createCrashDetection(deps: CrashDetectionDeps): CrashDetection {
                 lastAliveAt: prevLastAliveAt,
                 suspendedAt: prevSuspendedAt,
                 pendingOsShutdownAt: prevPendingOsShutdownAt,
+                bootSessionsComparable,
+                currentBootStartedAt:
+                  bootStartedAtMs === null ? null : new Date(bootStartedAtMs).toISOString(),
+                sentinelUnflushed,
                 attemptedInstall: installInFlight?.attemptedVersion ?? null,
                 crashedAppVersion,
                 crashedAppVersionParseFailed: dumpVersion?.parseFailed ?? false,
@@ -1043,6 +1127,7 @@ export function createCrashDetection(deps: CrashDetectionDeps): CrashDetection {
                     }
                   : {}),
                 detectingAppVersion: deps.appVersion,
+                ...terminationFields,
                 ...previousSessionFields,
               },
               'previous session ended uncleanly — arming report invitation',
@@ -1061,6 +1146,7 @@ export function createCrashDetection(deps: CrashDetectionDeps): CrashDetection {
         startedAt: detectedAt.toISOString(),
         lastAliveAt: detectedAt.toISOString(),
         appVersion: deps.appVersion,
+        pid: deps.processId,
         ...(bootSessionUuid !== null ? { bootSessionUuid } : {}),
       };
       writeSentinel('arm');

@@ -108,8 +108,7 @@ function StatusRow({ availability }: { availability: Availability }) {
 
   return (
     <div className="space-y-3" data-testid="slides-status-missing">
-      {}
-      <p className="text-sm text-amber-600 dark:text-amber-400">
+      <p className="text-sm text-warning">
         <Trans>
           Slidev isn't installed, so the Slidev action stays hidden. Install it, then return to this
           window.
@@ -153,7 +152,7 @@ function StatusRow({ availability }: { availability: Availability }) {
           onClick={(e) => dispatchExternalLinkClick(e, SLIDEV_INSTALL_DOCS)}
           onAuxClick={(e) => dispatchExternalLinkClick(e, SLIDEV_INSTALL_DOCS)}
           aria-label={t`Other ways to install Slidev`}
-          className="inline-flex items-center gap-0.5 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          className="inline-flex items-center gap-0.5 text-xs text-primary underline-offset-2 hover:underline"
           data-testid="slides-install-docs-link"
         >
           <Trans>Other ways to install</Trans>
@@ -187,7 +186,6 @@ export function SlidesPluginSection() {
           Slidev CLI, which OpenKnowledge does not bundle.
         </Trans>
       </SettingsSectionHeader>
-      {}
       <div aria-live="polite">
         <StatusRow availability={availability} />
       </div>
